@@ -22,12 +22,35 @@ struct Cli {
     /// 场次编号（正式版由时间门禁自动判定，骨架版手动指定便于测试）
     #[arg(long)]
     session: u32,
-    /// 主密钥（正式版由 stub 分片现场拼装，骨架版手动传入便于测试）
+    /// 主密钥。优先用 --master-file 或环境变量 EXAM_MASTER（命令行参数会
+    /// 出现在进程列表里，同机其他用户可读）。
     #[arg(long)]
-    master: String,
+    master: Option<String>,
+    /// 从文件读取主密钥（内容为 64-hex）
+    #[arg(long, conflicts_with = "master")]
+    master_file: Option<String>,
     /// 自解压包路径（默认读自身）
     #[arg(long)]
     package: Option<String>,
+}
+
+/// 取主密钥：--master-file > --master > 环境变量 EXAM_MASTER。
+/// 显式参数优先于环境变量，避免环境里残留的旧密钥被静默采用。
+fn resolve_master(master: Option<String>, master_file: Option<String>) -> Result<String> {
+    if let Some(path) = master_file {
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("读取密钥文件 {path}"))?;
+        return Ok(text.trim().to_string());
+    }
+    if let Some(m) = master {
+        return Ok(m);
+    }
+    if let Ok(v) = std::env::var("EXAM_MASTER")
+        && !v.trim().is_empty()
+    {
+        return Ok(v.trim().to_string());
+    }
+    anyhow::bail!("缺少主密钥：请用 --master-file、--master 或环境变量 EXAM_MASTER 提供")
 }
 
 fn main() -> Result<()> {
@@ -42,28 +65,18 @@ fn main() -> Result<()> {
             .into_owned(),
     };
     let bytes = std::fs::read(&exe_path).with_context(|| format!("读取 {exe_path}"))?;
-    let payload = container::extract_payload(&bytes).context(
-        "未找到内嵌 payload。骨架版请用 --package 指向 builder 生成的 exe",
-    )?;
+    let payload = container::extract_payload(&bytes)
+        .context("未找到内嵌 payload。骨架版请用 --package 指向 builder 生成的 exe")?;
 
     // 2. 用主密钥解 header（正式版主密钥由 stub 分片拼装 + 时间门禁后才给）。
-    let master = crypto::master_from_hex(&cli.master).context("解析主密钥")?;
+    let master_hex = resolve_master(cli.master, cli.master_file)?;
+    let master = crypto::master_from_hex(&master_hex).context("解析主密钥")?;
 
-    // header 里带 salt，但解 header 需要 K_manifest，K_manifest 派生需要 salt。
-    // 解决：salt 同时以明文形式放在 payload 头部之外的固定位置？——
-    // 更简单：K_manifest 派生用空 salt，header 解密后再取真实 salt 派生 K_payload。
-    // 但当前 build_payload 用 manifest.salt 派生了 K_manifest。
-    // 骨架版折中：暂时用空 salt 解 header 的流程在正式版由 stub 完成；
-    // 这里为了打通主干，要求调用方同时提供 salt（正式版不需要）。
-    //
-    // —— 改为：builder 把 salt 明文放在 payload 前 16 字节之外不可取。
-    // 最干净的做法：K_manifest = HKDF(master, salt="", "manifest")，
-    // header 内含真实 salt，解出 header 后再派生 K_payload / K_session。
-    //
-    // 因此这里先用空 salt 派生 K_manifest。
+    // K_manifest 用空 salt 派生：header 里才带真实 salt，若用真实 salt 派生
+    // 会陷入"要 salt 才能解 header，要解 header 才能拿 salt"的死锁。
     let k_manifest = crypto::hkdf_derive(&master, b"", "manifest");
-    let (header, data_ct) = container::parse_payload(payload, &k_manifest)
-        .context("解析 header 失败（密钥错误？）")?;
+    let (header, data_ct) =
+        container::parse_payload(payload, &k_manifest).context("解析 header 失败（密钥错误？）")?;
     let salt = hex::decode(&header.salt).context("header.salt hex 解码")?;
 
     // 3. 解锁指定场次（校验学号是否在名单）。
@@ -79,8 +92,16 @@ fn main() -> Result<()> {
     // 4. 解密题库。
     let data = container::decrypt_data(&master, &salt, &data_ct).context("解密题库")?;
 
-    // 5. 确定性抽题。
-    let paper = picker::generate_paper(cli.student, unlocked.session_id, &salt, &data.banks);
+    // 5. 确定性抽题。抽题数取自 payload 的 picks 表（清单设置的权威值），
+    //    而不是题库自带的 pick —— 后者只是默认值，可能与清单不一致。
+    let paper = picker::generate_paper(
+        cli.student,
+        unlocked.session_id,
+        &salt,
+        &data.banks,
+        |exam_id, fallback| data.pick_for(exam_id, fallback),
+    )
+    .context("抽题失败")?;
 
     // 6. 输出结果（骨架版打印指纹；正式版进入考试界面）。
     println!("✔ 解锁成功");

@@ -60,9 +60,15 @@ pub fn encrypt(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, 
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::BadKeyLen(key.len()))?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = &Nonce::from(nonce_bytes);
     let ct = cipher
-        .encrypt(nonce, Payload { msg: plaintext, aad })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::Encrypt)?;
     let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
     out.extend_from_slice(&nonce_bytes);
@@ -76,9 +82,17 @@ pub fn decrypt(key: &[u8; 32], data: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<
         return Err(CryptoError::Decrypt);
     }
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::BadKeyLen(key.len()))?;
-    let nonce = Nonce::from_slice(&data[..NONCE_LEN]);
+    let mut nonce_arr = [0u8; NONCE_LEN];
+    nonce_arr.copy_from_slice(&data[..NONCE_LEN]);
+    let nonce = &Nonce::from(nonce_arr);
     let pt = cipher
-        .decrypt(nonce, Payload { msg: &data[NONCE_LEN..], aad })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &data[NONCE_LEN..],
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::Decrypt)?;
     Ok(Zeroizing::new(pt))
 }

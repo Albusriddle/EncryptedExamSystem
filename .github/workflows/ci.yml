@@ -27,15 +27,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
       - name: lint + test
         working-directory: admin
+        # uv 会按 pyproject.toml 的 requires-python 自动挑选解释器，
+        # 不需要额外的 setup-python。
         run: |
           uv sync --locked
           uv run ruff check .
           uv run pytest -q
+
+  # 端到端：真的打一个包再用学生端解开，防止"单元测试全绿但装不起来"。
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 打包并验证
+        run: |
+          set -euo pipefail
+          cargo build --release -p client -p builder
+          BIN=./target/release
+          MASTER=$("$BIN/exam-builder" keygen 2>/dev/null)
+          "$BIN/exam-builder" build \
+            --manifest banks/demo/manifest.example.json \
+            --banks banks/ \
+            --stub "$BIN/exam-client" \
+            --out ./StudentClient \
+            --master "$MASTER"
+          "$BIN/exam-builder" verify --package ./StudentClient --master "$MASTER"
+          # 名单内学生应解锁成功
+          ./StudentClient --student 2021001 --session 1 \
+            --master "$MASTER" --package ./StudentClient
+          # 名单外学生应被拒绝（非零退出）
+          if ./StudentClient --student 9999999 --session 1 \
+               --master "$MASTER" --package ./StudentClient; then
+            echo "✗ 名单外学生竟然解锁成功了"; exit 1
+          fi
+          echo "✓ e2e 通过"
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -44,3 +73,5 @@ jobs:
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

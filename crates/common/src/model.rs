@@ -110,7 +110,11 @@ pub enum ModelError {
     #[error("exam_id 为空")]
     EmptyExamId,
     #[error("题库 {exam_id} 抽题数 {pick} 超过题量 {pool}")]
-    PickExceedsPool { exam_id: String, pick: u32, pool: usize },
+    PickExceedsPool {
+        exam_id: String,
+        pick: u32,
+        pool: usize,
+    },
     #[error("题库 {exam_id} 存在重复题目 ID: {qid}")]
     DuplicateQuestionId { exam_id: String, qid: String },
 }

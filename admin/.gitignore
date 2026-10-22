@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+build/
+dist/
+*.egg-info/
+
+# 注意：uv.lock 必须入库，CI 的 `uv sync --locked` 依赖它保证依赖可复现。

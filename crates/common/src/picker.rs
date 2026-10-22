@@ -1,10 +1,11 @@
 //! 确定性抽题：固定 (学号, 场次, salt) → 固定试卷，跨平台/跨版本稳定。
 //!
 //! 稳定性三原则：
+//!
 //! 1. 种子用 blake3 显式算出 32 字节，不依赖 rand 内部的 seed_from_u64 细节；
 //! 2. 随机源用 ChaCha8Rng（算法固定，rand_chacha 承诺跨版本一致）；
 //! 3. 洗牌自己实现 Fisher-Yates，只依赖 next_u32()，不用 slice::shuffle
-//!   （后者实现可能随 rand 大版本变化）。
+//!    （后者实现可能随 rand 大版本变化）。
 
 use rand::RngCore;
 use rand_chacha::ChaCha8Rng;
@@ -68,35 +69,69 @@ fn fisher_yates_shuffle(items: &mut [usize], rng: &mut ChaCha8Rng) {
     }
 }
 
+/// 抽题错误。
+#[derive(Debug, thiserror::Error)]
+pub enum PickError {
+    #[error("题库 {exam_id} 要求抽 {pick} 题，但只有 {pool} 题")]
+    PickExceedsPool {
+        exam_id: String,
+        pick: u32,
+        pool: usize,
+    },
+}
+
 /// 从题库中确定性抽取 `pick` 道题，返回题目 id。
-fn pick_from_bank(bank: &ExamBank, rng: &mut ChaCha8Rng) -> Vec<String> {
-    let mut pool: Vec<usize> = (0..bank.questions.len()).collect();
+///
+/// `pick` 由调用方给出（来自 payload 的 picks 表），**不读** `bank.pick`，
+/// 避免"清单设置的抽题数被题库默认值覆盖"。
+fn pick_from_bank(
+    bank: &ExamBank,
+    pick: u32,
+    rng: &mut ChaCha8Rng,
+) -> Result<Vec<String>, PickError> {
+    let pool_len = bank.questions.len();
+    let n = pick as usize;
+    if n > pool_len {
+        return Err(PickError::PickExceedsPool {
+            exam_id: bank.exam_id.clone(),
+            pick,
+            pool: pool_len,
+        });
+    }
+    let mut pool: Vec<usize> = (0..pool_len).collect();
     fisher_yates_shuffle(&mut pool, rng);
-    pool[..bank.pick as usize]
+    Ok(pool[..n]
         .iter()
         .map(|&i| bank.questions[i].id.clone())
-        .collect()
+        .collect())
 }
 
 /// 生成一份完整试卷。
 ///
 /// `salt` 取 manifest.salt 的原始字节（hex 解码后）。
-pub fn generate_paper(
+/// `pick_for` 返回每个题库的实际抽题数；返回 `None` 时回退到题库自带 pick。
+pub fn generate_paper<F>(
     student_id: u64,
     session_id: u32,
     salt: &[u8],
     banks: &[ExamBank],
-) -> Paper {
+    pick_for: F,
+) -> Result<Paper, PickError>
+where
+    F: Fn(&str, u32) -> u32,
+{
     let mut rng = make_rng(student_id, session_id, salt);
-    let sections = banks
-        .iter()
-        .map(|b| (b.exam_id.clone(), pick_from_bank(b, &mut rng)))
-        .collect();
-    Paper {
+    let mut sections = Vec::with_capacity(banks.len());
+    for b in banks {
+        let pick = pick_for(&b.exam_id, b.pick);
+        let ids = pick_from_bank(b, pick, &mut rng)?;
+        sections.push((b.exam_id.clone(), ids));
+    }
+    Ok(Paper {
         student_id,
         session_id,
         sections,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -121,11 +156,16 @@ mod tests {
         }
     }
 
+    /// 用题库自带 pick 抽题的便捷封装（测试用）。
+    fn paper_default(student: u64, session: u32, salt: &[u8], banks: &[ExamBank]) -> Paper {
+        generate_paper(student, session, salt, banks, |_, fallback| fallback).expect("抽题不应失败")
+    }
+
     #[test]
     fn same_seed_same_paper() {
         let banks = vec![demo_bank("math", 100, 20), demo_bank("english", 80, 15)];
-        let p1 = generate_paper(2021001, 1, b"salt", &banks);
-        let p2 = generate_paper(2021001, 1, b"salt", &banks);
+        let p1 = paper_default(2021001, 1, b"salt", &banks);
+        let p2 = paper_default(2021001, 1, b"salt", &banks);
         assert_eq!(p1, p2);
         assert_eq!(p1.fingerprint(), p2.fingerprint());
     }
@@ -133,23 +173,23 @@ mod tests {
     #[test]
     fn different_student_different_paper() {
         let banks = vec![demo_bank("math", 100, 20)];
-        let p1 = generate_paper(2021001, 1, b"salt", &banks);
-        let p2 = generate_paper(2021002, 1, b"salt", &banks);
+        let p1 = paper_default(2021001, 1, b"salt", &banks);
+        let p2 = paper_default(2021002, 1, b"salt", &banks);
         assert_ne!(p1.sections, p2.sections);
     }
 
     #[test]
     fn different_session_different_paper() {
         let banks = vec![demo_bank("math", 100, 20)];
-        let p1 = generate_paper(2021001, 1, b"salt", &banks);
-        let p2 = generate_paper(2021001, 2, b"salt", &banks);
+        let p1 = paper_default(2021001, 1, b"salt", &banks);
+        let p2 = paper_default(2021001, 2, b"salt", &banks);
         assert_ne!(p1.sections, p2.sections);
     }
 
     #[test]
     fn pick_count_and_uniqueness() {
         let banks = vec![demo_bank("math", 100, 20)];
-        let p = generate_paper(2021001, 1, b"salt", &banks);
+        let p = paper_default(2021001, 1, b"salt", &banks);
         let ids = &p.sections[0].1;
         assert_eq!(ids.len(), 20);
         let mut sorted = ids.clone();
@@ -158,20 +198,43 @@ mod tests {
         assert_eq!(sorted.len(), 20, "抽题结果不应有重复");
     }
 
+    /// 回归：清单里设置的抽题数必须真正生效（曾经被题库自带 pick 覆盖）。
+    #[test]
+    fn explicit_pick_overrides_bank_default() {
+        let banks = vec![demo_bank("math", 100, 3)];
+        let p = generate_paper(2021001, 1, b"salt", &banks, |_, _| 25).unwrap();
+        assert_eq!(p.sections[0].1.len(), 25, "应遵循显式 pick 而非题库默认值");
+    }
+
+    /// 回归：pick 超过题量必须返回错误，而不是 panic（曾经会越界 panic）。
+    #[test]
+    fn pick_exceeds_pool_returns_error() {
+        let banks = vec![demo_bank("math", 6, 10)];
+        let err = generate_paper(2021001, 1, b"salt", &banks, |_, _| 10).unwrap_err();
+        assert!(matches!(
+            err,
+            PickError::PickExceedsPool {
+                pick: 10,
+                pool: 6,
+                ..
+            }
+        ));
+    }
+
     /// 黄金向量：锁定算法，一旦改动会立刻在 CI 报警。
     #[test]
     fn golden_fingerprint() {
         let banks = vec![demo_bank("math", 50, 10), demo_bank("english", 40, 8)];
-        let p = generate_paper(2021001, 1, b"golden-salt", &banks);
-        // 首次运行后把实际值填进来；后续任何算法变更都会 break 这个测试。
+        let p = paper_default(2021001, 1, b"golden-salt", &banks);
         let fp = p.fingerprint();
         assert_eq!(fp.len(), 64, "blake3 hex 长度");
-        // 记录当前值，便于人工核对（改算法时更新此值并注明原因）。
-        insta_like_snapshot(&fp);
+        assert_eq!(fp, GOLDEN_FP, "抽题算法变更需同步更新黄金向量并说明原因");
     }
 
-    fn insta_like_snapshot(fp: &str) {
-        // 简单快照：打印出来供人工比对，避免引入 insta 依赖。
-        eprintln!("golden fingerprint = {fp}");
-    }
+    /// 黄金向量值。**修改前请确认这是有意为之**：改它意味着所有已发出的
+    /// 试卷在重跑时会变题。
+    ///
+    /// 取值条件：student=2021001, session=1, salt="golden-salt",
+    /// banks=[math(50 题, pick 10), english(40 题, pick 8)]，使用题库自带 pick。
+    const GOLDEN_FP: &str = "c86a6927c25d2464ada2cb8646a247b25aeac55d2ea3e92ab8f0e1d85b27986c";
 }

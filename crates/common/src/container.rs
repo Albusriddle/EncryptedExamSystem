@@ -71,9 +71,23 @@ pub struct BankIndex {
 }
 
 /// data 段明文结构（解密后）：剥离了答案的题库集合。
+///
+/// `picks` 记录"本包内每个题库实际应抽多少题"，由 builder 根据清单的
+/// 场次覆盖值解析后写入。客户端**必须**用这里的分值抽题，不能再用
+/// `ExamBank.pick`（那是题库自带的默认值，可能与清单不一致）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PayloadData {
     pub banks: Vec<crate::model::ExamBank>,
+    /// exam_id -> 实际抽题数
+    #[serde(default)]
+    pub picks: std::collections::BTreeMap<String, u32>,
+}
+
+impl PayloadData {
+    /// 按 exam_id 取实际抽题数，缺失时回退到题库自带 pick。
+    pub fn pick_for(&self, exam_id: &str, fallback: u32) -> u32 {
+        self.picks.get(exam_id).copied().unwrap_or(fallback)
+    }
 }
 
 /// 打包：把题库与场次封装成 payload 字节串。
@@ -96,9 +110,41 @@ pub fn build_payload(
         }
     }
 
+    // 1.5 解析每个题库的实际抽题数。
+    //
+    // 场次的 `SessionExam.pick` 是权威值；未指定时才回退到题库自带 pick。
+    // 匹配不到题库时**直接报错**——绝不静默回退，否则清单里写的抽题数会
+    // 无声无息地失效（这是本仓库曾经真实出现过的 bug）。
+    let mut picks: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for s in sessions {
+        for e in &s.exams {
+            let bank = match_bank(&e.file, banks).ok_or_else(|| {
+                ContainerError::Format(format!(
+                    "场次 {} 引用的题库 {} 匹配不到（请检查清单里的 file 与题库的 exam_id）",
+                    s.session_id, e.file
+                ))
+            })?;
+            let effective = e.pick.unwrap_or(bank.pick);
+            if effective as usize > bank.questions.len() {
+                return Err(ContainerError::Format(format!(
+                    "场次 {} 的题库 {} 要求抽 {} 题，但只有 {} 题",
+                    s.session_id,
+                    bank.exam_id,
+                    effective,
+                    bank.questions.len()
+                )));
+            }
+            let entry = picks.entry(bank.exam_id.clone()).or_insert(effective);
+            *entry = (*entry).max(effective);
+        }
+    }
+
     // 2. data 段：K_payload 加密。
     let k_payload = crypto::hkdf_derive(master, salt, "payload");
-    let data_plain = serde_json::to_vec(&PayloadData { banks: clean_banks })?;
+    let data_plain = serde_json::to_vec(&PayloadData {
+        banks: clean_banks,
+        picks,
+    })?;
     let data_ct = crypto::encrypt(&k_payload, &data_plain, b"payload")?;
 
     // 3. header：含每场次的加密信封。
@@ -160,10 +206,7 @@ pub fn build_payload(
 }
 
 /// 给 exe 追加 payload，生成自解压学生端。
-pub fn append_payload_to_exe(
-    stub_bytes: &[u8],
-    payload: &[u8],
-) -> Result<Vec<u8>, ContainerError> {
+pub fn append_payload_to_exe(stub_bytes: &[u8], payload: &[u8]) -> Result<Vec<u8>, ContainerError> {
     let mut out = stub_bytes.to_vec();
     out.extend_from_slice(payload);
     out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
@@ -171,9 +214,48 @@ pub fn append_payload_to_exe(
     Ok(out)
 }
 
+/// 把清单里的 `file` 归一成候选键，用于匹配题库的 `exam_id`。
+///
+/// 依次尝试：完整去后缀路径 → 仅文件名去后缀 → 下划线转连字符。
+/// 调用方应**先按 exam_id 精确匹配**，匹配不到再用本函数做宽松匹配。
+pub fn resolve_exam_key(file: &str) -> String {
+    let base = file.rsplit('/').next().unwrap_or(file);
+    let stem = base.strip_suffix(".json").unwrap_or(base);
+    stem.replace(['/', '_'], "-")
+}
+
+/// 在题库列表里按清单的 `file` 找到对应题库。
+///
+/// 匹配优先级：
+/// 1. `file` 去 `.json` 后与 `exam_id` 完全相等；
+/// 2. `file` 的完整路径（`/`→`-`、`_`→`-`）与 `exam_id` 相等；
+/// 3. 仅文件名去后缀与 `exam_id` 相等。
+///
+/// 都匹配不到返回 `None`，由调用方报错——**绝不静默回退**。
+pub fn match_bank<'a>(
+    file: &str,
+    banks: &'a [crate::model::ExamBank],
+) -> Option<&'a crate::model::ExamBank> {
+    let base = file.rsplit('/').next().unwrap_or(file);
+    let stem = base.strip_suffix(".json").unwrap_or(base);
+    let full_key = file
+        .strip_suffix(".json")
+        .unwrap_or(file)
+        .replace(['/', '_'], "-");
+
+    banks
+        .iter()
+        .find(|b| b.exam_id == stem)
+        .or_else(|| banks.iter().find(|b| b.exam_id == full_key))
+        .or_else(|| banks.iter().find(|b| b.exam_id == stem.replace('_', "-")))
+}
+
 /// 从自解压 exe 字节中提取 payload。
+///
+/// 所有长度计算都做边界检查：损坏/截断的文件返回错误而不是 panic。
 pub fn extract_payload(exe_bytes: &[u8]) -> Result<&[u8], ContainerError> {
-    if exe_bytes.len() < 16 {
+    const FOOTER: usize = 16; // payload_len(8) + magic_tail(8)
+    if exe_bytes.len() < FOOTER + MAGIC.len() {
         return Err(ContainerError::Format("文件过小".into()));
     }
     let tail = &exe_bytes[exe_bytes.len() - 8..];
@@ -181,9 +263,17 @@ pub fn extract_payload(exe_bytes: &[u8]) -> Result<&[u8], ContainerError> {
         return Err(ContainerError::Format("缺少尾部魔数，非自解压包".into()));
     }
     let len_bytes = &exe_bytes[exe_bytes.len() - 16..exe_bytes.len() - 8];
-    let payload_len = u64::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
-    let start = exe_bytes.len() - 16 - payload_len;
-    if &exe_bytes[start..start + 8] != MAGIC {
+    let payload_len = u64::from_le_bytes(len_bytes.try_into().expect("8 字节切片")) as usize;
+
+    // 防溢出/越界：payload 长度必须能装进 footer 之前的部分。
+    let available = exe_bytes.len() - FOOTER;
+    if payload_len > available {
+        return Err(ContainerError::Format(format!(
+            "payload 长度 {payload_len} 超出文件可用范围 {available}（文件损坏或被截断）"
+        )));
+    }
+    let start = available - payload_len;
+    if &exe_bytes[start..start + MAGIC.len()] != MAGIC {
         return Err(ContainerError::Format("payload 魔数不匹配".into()));
     }
     Ok(&exe_bytes[start..start + payload_len])
@@ -313,7 +403,10 @@ mod tests {
             start: "2026-12-20T09:00:00+08:00".into(),
             end: "2026-12-20T11:00:00+08:00".into(),
             students,
-            exams: vec![SessionExam { file: "math.json".into(), pick: None }],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: None,
+            }],
         }
     }
 
@@ -336,8 +429,7 @@ mod tests {
         assert_eq!(header.bank_index[0].total, 50);
 
         // 解锁场次（学号在名单中）。
-        let unlocked =
-            try_unlock_session(&header.sessions[0], &master(), salt, 2021001).unwrap();
+        let unlocked = try_unlock_session(&header.sessions[0], &master(), salt, 2021001).unwrap();
         assert!(unlocked.is_some());
         // 学号不在名单中。
         let denied = try_unlock_session(&header.sessions[0], &master(), salt, 9999999).unwrap();
@@ -353,7 +445,13 @@ mod tests {
     fn append_and_extract() {
         let stub = b"FAKE_STUB_BYTES_1234567890";
         let banks = vec![bank("math", 20)];
-        let payload = build_payload(&master(), &banks, &[session(1, vec![1])], b"salt-0123456789").unwrap();
+        let payload = build_payload(
+            &master(),
+            &banks,
+            &[session(1, vec![1])],
+            b"salt-0123456789",
+        )
+        .unwrap();
         let sfx = append_payload_to_exe(stub, &payload).unwrap();
         let extracted = extract_payload(&sfx).unwrap();
         assert_eq!(extracted, payload.as_slice());
@@ -362,8 +460,134 @@ mod tests {
     #[test]
     fn wrong_manifest_key_fails() {
         let banks = vec![bank("math", 10)];
-        let payload = build_payload(&master(), &banks, &[session(1, vec![1])], b"salt-0123456789").unwrap();
+        let payload = build_payload(
+            &master(),
+            &banks,
+            &[session(1, vec![1])],
+            b"salt-0123456789",
+        )
+        .unwrap();
         let wrong = [0xCD; 32];
         assert!(parse_payload(&payload, &wrong).is_err());
+    }
+
+    /// 回归：损坏/截断的包必须返回错误，不能 panic（曾经 subtract with overflow）。
+    #[test]
+    fn corrupt_footer_returns_error() {
+        let payload = build_payload(&master(), &[], &[], b"salt-0123456789").unwrap();
+        let mut sfx = append_payload_to_exe(b"STUB", &payload).unwrap();
+        let n = sfx.len();
+        sfx[n - 16..n - 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(extract_payload(&sfx).is_err(), "超大长度应报错而非 panic");
+    }
+
+    #[test]
+    fn truncated_file_returns_error() {
+        assert!(extract_payload(b"").is_err());
+        assert!(extract_payload(b"EXAMTAIL").is_err());
+        assert!(extract_payload(b"short").is_err());
+    }
+
+    #[test]
+    fn tampered_header_returns_error() {
+        let banks = vec![bank("math", 10)];
+        let mut payload = build_payload(
+            &master(),
+            &banks,
+            &[session(1, vec![1])],
+            b"salt-0123456789",
+        )
+        .unwrap();
+        payload[20] ^= 0xFF; // 篡改 header 密文
+        let k_manifest = crypto::hkdf_derive(&master(), b"", "manifest");
+        assert!(parse_payload(&payload, &k_manifest).is_err());
+    }
+
+    /// 回归：清单里 SessionExam.pick 必须真正生效（曾经完全被忽略）。
+    #[test]
+    fn session_pick_override_is_applied() {
+        use crate::model::SessionExam;
+        let banks = vec![bank("demo-math", 50)];
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![1],
+            // 清单要求抽 17 题，题库自带 pick 是 5。
+            exams: vec![SessionExam {
+                file: "demo-math.json".into(),
+                pick: Some(17),
+            }],
+        };
+        let salt = b"salt-0123456789";
+        let payload = build_payload(&master(), &banks, &[s], salt).unwrap();
+        let k_manifest = crypto::hkdf_derive(&master(), b"", "manifest");
+        let (_, data_ct) = parse_payload(&payload, &k_manifest).unwrap();
+        let data = decrypt_data(&master(), salt, &data_ct).unwrap();
+        assert_eq!(
+            data.pick_for("demo-math", 5),
+            17,
+            "清单的 pick 覆盖必须写入 payload"
+        );
+    }
+
+    /// 回归：清单引用不存在的题库必须报错，不能静默忽略。
+    #[test]
+    fn unknown_bank_reference_is_error() {
+        use crate::model::SessionExam;
+        let banks = vec![bank("demo-math", 50)];
+        let s = Session {
+            session_id: 1,
+            start: "x".into(),
+            end: "y".into(),
+            students: vec![1],
+            exams: vec![SessionExam {
+                file: "nonexistent.json".into(),
+                pick: None,
+            }],
+        };
+        let err = build_payload(&master(), &banks, &[s], b"salt-0123456789").unwrap_err();
+        assert!(matches!(err, ContainerError::Format(_)));
+    }
+
+    /// 回归：pick 超过题量必须在打包时报错。
+    #[test]
+    fn pick_exceeds_pool_is_build_error() {
+        use crate::model::SessionExam;
+        let banks = vec![bank("demo-math", 6)];
+        let s = Session {
+            session_id: 1,
+            start: "x".into(),
+            end: "y".into(),
+            students: vec![1],
+            exams: vec![SessionExam {
+                file: "demo-math.json".into(),
+                pick: Some(99),
+            }],
+        };
+        assert!(build_payload(&master(), &banks, &[s], b"salt-0123456789").is_err());
+    }
+
+    #[test]
+    fn match_bank_prefers_exact_exam_id() {
+        let banks = vec![bank("demo-math", 50), bank("math", 10)];
+        // file = "demo/math.json"：文件名 stem 是 "math"，与 exam_id "math" 精确相等，
+        // 应优先命中 "math" 而不是靠路径猜出的 "demo-math"。
+        let hit = match_bank("demo/math.json", &banks).unwrap();
+        assert_eq!(hit.exam_id, "math");
+    }
+
+    #[test]
+    fn match_bank_falls_back_to_full_path() {
+        // 只有 demo-math 时，路径归一化后应能命中。
+        let banks = vec![bank("demo-math", 50)];
+        let hit = match_bank("demo/math.json", &banks).unwrap();
+        assert_eq!(hit.exam_id, "demo-math");
+    }
+
+    #[test]
+    fn match_bank_returns_none_when_missing() {
+        let banks = vec![bank("math", 10)];
+        assert!(match_bank("nope.json", &banks).is_none());
     }
 }
