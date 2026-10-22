@@ -1,0 +1,2 @@
+[failure] build-windows
+    FAILED: 压缩管理端（连同 _internal，教师解压即可用）  (failure)

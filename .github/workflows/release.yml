@@ -76,11 +76,13 @@ jobs:
           set -euo pipefail
           python admin/buildtools/build_exe.py
 
-      - name: 压缩管理端（连同 _internal，教师解压即可用）
-        shell: pwsh
+      # 复用本地同一个打包脚本，保证 CI 产物与本地演练完全一致
+      # （包含 开始这里.md / 使用说明.md / 示例题库 与正确的命名）。
+      - name: 生成教师发布包
+        shell: bash
         run: |
-          Compress-Archive -Path dist/ExamAdmin -DestinationPath release/ExamAdmin-windows.zip -Force
-          Get-Item release/ExamAdmin-windows.zip | Select-Object Name, Length
+          set -euo pipefail
+          bash scripts/make-release-zip.sh "${GITHUB_REF_NAME}"
 
       - name: 收集产物
         shell: bash
@@ -89,6 +91,7 @@ jobs:
           mkdir -p release
           cp target/x86_64-pc-windows-msvc/release/exam-builder.exe release/
           cp target/x86_64-pc-windows-msvc/release/exam-client.exe release/stub-template.exe
+          cp dist/ExamAdmin-*-windows.zip release/
           ls -la release/
 
       - uses: actions/upload-artifact@v4
@@ -100,20 +103,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/ExamAdmin-windows.zip
+            release/ExamAdmin-*-windows.zip
             release/exam-builder.exe
             release/stub-template.exe
-          body: |
-            ## 保密考试系统 ${{ github.ref_name }}
-
-            ### 教师用这个
-            - **`ExamAdmin-windows.zip`** —— 管理端图形程序。
-              解压后双击 `ExamAdmin\ExamAdmin.exe` 即可配题、打包。
-              使用步骤见包内 `使用说明.md`。
-
-            ### 进阶
-            - `exam-builder.exe` —— 命令行打包工具，供脚本化使用。
-            - `stub-template.exe` —— 学生端模板（**不能直接发给学生**，
-              需由 builder 通过 `--stub` 打入 payload 后才可使用）。
-
-            学生端产物由教师打包时生成，学生双击 exe 输入学号即可，无需任何密钥文件。
+          body_path: docs/release-notes.md
