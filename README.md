@@ -17,40 +17,34 @@ worker/      # Cloudflare Worker 签名时间服务（M4）
 banks/demo/  # 假题库，供 CI 与本地调试（真题库不入库，见 .gitignore）
 ```
 
-## 本机快速开始（Windows，链接器可装 D 盘）
+## 本机快速开始（Windows）
+
+本机已装 VS Build Tools，直接用默认 MSVC target（兼容性最好）：
 
 ```powershell
-# 1. 装 MinGW 链接器（约 300MB，可指定 D 盘路径）
-winget install --id MartinStorsjo.LLVM-MinGW -e --location D:\tools\llvm-mingw
-$env:Path = "D:\tools\llvm-mingw\bin;$env:Path"
-
-# 2. 加 gnu target（.cargo/config.toml 已配好 linker）
-rustup target add x86_64-pc-windows-gnu
-
-# 3. 跑测试（加密往返 / 确定性抽题 / 容器打包解包）
-cargo test --workspace --target x86_64-pc-windows-gnu
+cargo test --workspace          # 15 个单元测试：加密/抽题/容器
 ```
 
-> 发布给学生机房的正式版请切 MSVC target（需 VS Build Tools，见 docs 方案 §6.1）。
+若换一台 C 盘空间紧张的机器，可改走 GNU target + MinGW（装 D 盘），见 docs 方案 §6.1。
 
-## 端到端演示（M2 目标）
+## 端到端演示（M2 已验证通过）
 
 ```powershell
-# 生成主密钥（请自行保管，勿提交）
-$master = cargo run -p builder -- keygen
+cargo build --release -p client -p builder
 
-# 用 demo 题库 + 示例清单打包（先编译出 client 作为 stub）
-cargo build -p client --release --target x86_64-pc-windows-gnu
-cargo run -p builder -- build `
-  --manifest banks/demo/manifest.example.json `
-  --banks banks/ `
-  --stub target/x86_64-pc-windows-gnu/release/exam-client.exe `
-  --out StudentClient.exe `
-  --master $master
+# 1. 生成主密钥（自行保管，勿提交）
+$master = .\target\release\exam-builder.exe keygen
 
-# 学生端解锁 + 抽题（骨架版手动传学号/场次/密钥）
-./StudentClient.exe --student 2021001 --session 1 --master $master --package StudentClient.exe
+# 2. 打包：demo 题库 + 示例清单 → 自解压学生端
+.\target\release\exam-builder.exe build `
+  --manifest banks/demo/manifest.example.json --banks banks/ `
+  --stub target/release/exam-client.exe --out StudentClient.exe --master $master
+
+# 3. 学生端解锁 + 确定性抽题（骨架版手动传参，M4 换 GUI + 时间门禁）
+.\StudentClient.exe --student 2021001 --session 1 --master $master --package StudentClient.exe
 ```
+
+已验证：名单内学生解锁抽题成功、名单外拒绝、重复运行试卷指纹一致。
 
 ## 安全红线
 
