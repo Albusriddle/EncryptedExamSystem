@@ -769,6 +769,28 @@ mod gate_tests {
         assert!(matches!(err, GateError::NotStarted { .. }));
     }
 
+    /// 学生看到的提示必须是本地时间并带时区。
+    ///
+    /// 曾经用 UTC 显示：学生本地 18:28 却看到 10:28，会以为程序算错了时间。
+    /// 这里直接断言用户可见文案，避免以后又被改回 UTC。
+    #[test]
+    fn not_started_message_is_local_and_zoned() {
+        let s = [win(1, T0900, T1100)];
+        let err = decide_session(&s, None, T0900 - 100).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("（UTC"), "提示缺少时区标注: {text}");
+        assert!(text.contains("考试尚未开始"), "提示文案变了: {text}");
+    }
+
+    /// 窗口外解锁的提示同样要带时区。
+    #[test]
+    fn out_of_window_message_is_local_and_zoned() {
+        let s = [win(1, T0900, T1100)];
+        let err = decide_session(&s, Some(1), T1100 + 100).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("（UTC"), "提示缺少时区标注: {text}");
+    }
+
     #[test]
     fn after_all_sessions_reports_not_in_window() {
         let s = [win(1, T0900, T1100)];
