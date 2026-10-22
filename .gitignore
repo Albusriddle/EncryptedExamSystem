@@ -45,3 +45,6 @@ out/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# pytest 的 tmp_path 根目录（若 pytest 配置把 basetemp 放在仓库内）
+pytest-of-*/

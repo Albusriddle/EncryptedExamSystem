@@ -44,13 +44,27 @@ def build_package(
     cmd = [
         str(builder_exe),
         "build",
-        "--manifest", str(manifest),
-        "--banks", str(banks_dir),
-        "--stub", str(stub_exe),
-        "--out", str(out_exe),
+        "--manifest",
+        str(manifest),
+        "--banks",
+        str(banks_dir),
+        "--stub",
+        str(stub_exe),
+        "--out",
+        str(out_exe),
     ]
+    # 必须显式指定 UTF-8：Rust 端输出中文，而 Windows 上 `text=True`
+    # 默认用系统 locale（cp936/GBK）解码，遇到 UTF-8 中文会抛
+    # UnicodeDecodeError 或产生乱码。errors="replace" 保证即使有异常字节
+    # 也不会让整个打包流程崩在"读输出"这一步。
     proc = subprocess.run(  # noqa: S603
-        cmd, capture_output=True, text=True, timeout=timeout, env=env
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        env=env,
     )
     ok = proc.returncode == 0
     return BuildResult(
