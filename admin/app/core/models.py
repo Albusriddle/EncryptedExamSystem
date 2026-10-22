@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-INT_MAX = 2_147_483_647
+# u64 上限。不限制 INT_MAX：真实学号常为 12 位，早已超出 i32。
+U64_MAX = 2**64 - 1
 
 
 class Question(BaseModel):
@@ -57,11 +58,17 @@ class Session(BaseModel):
     @field_validator("students")
     @classmethod
     def _check_students(cls, v: list[int]) -> list[int]:
+        """学号必须是正整数。
+
+        **不限制 INT_MAX**：真实学号常为 12 位（如 202312345678），
+        早已超出 i32。内部与 Rust 端一致使用 u64，上限 1.8e19 足够任何场景。
+        与 `crates/common/src/container.rs::validate_sessions` 保持一致。
+        """
         for sid in v:
-            if sid < 0:
-                raise ValueError(f"学号不能为负: {sid}")
-            if sid > INT_MAX:
-                raise ValueError(f"学号 {sid} 超过 INT_MAX（{INT_MAX}）")
+            if sid <= 0:
+                raise ValueError(f"学号必须是正整数: {sid}")
+            if sid > U64_MAX:
+                raise ValueError(f"学号超出 u64 范围: {sid}")
         if len(v) != len(set(v)):
             raise ValueError("学号列表存在重复")
         return v

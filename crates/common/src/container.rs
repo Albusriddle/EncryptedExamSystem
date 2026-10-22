@@ -29,6 +29,8 @@
 
 use std::collections::BTreeMap;
 
+use rayon::prelude::*;
+
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, CryptoError, KdfParams, TAG_LEN};
@@ -166,10 +168,9 @@ pub fn build_payload(
         }
     }
 
-    // 2. 清单自身校验（时间窗、重复学号、场次编号）+ 抽题数解析。
+    // 2. 清单自身校验（时间窗、重复学号、场次编号）。
     //    用静默版：builder 层已校验并打印过警告，这里重复打印会让管理员困惑。
     validate_sessions_silent(sessions)?;
-    let picks = resolve_picks(&clean_banks, sessions)?;
 
     // 3. 逐场生成：会话密钥 → 题库密文 → 每生信封。
     let mut blob_area: Vec<u8> = Vec::new();
@@ -178,6 +179,11 @@ pub fn build_payload(
     for s in sessions {
         let session_secret = crypto::random_key();
         let bank_key = crypto::hkdf_derive(&session_secret, salt, "bank");
+
+        // 本场的抽题数：**必须按场次独立解析**。
+        // 早期实现用全局 exam_id→pick 映射并取 max，导致场次 1 设 2 题
+        // 会被场次 2 的 5 题污染（实测：清单要求 2 题，实际抽了 5 题）。
+        let picks = resolve_session_picks(&clean_banks, s)?;
 
         // 本场引用的题库（按清单顺序）
         let mut session_banks = Vec::new();
@@ -209,7 +215,7 @@ pub fn build_payload(
 
         let data = PayloadData {
             banks: session_banks,
-            picks: picks.clone(),
+            picks,
             bank_index: session_index,
         };
         let data_plain = serde_json::to_vec(&data)?;
@@ -220,21 +226,30 @@ pub fn build_payload(
         blob_area.extend_from_slice(&data_ct);
 
         // 每生一个信封。
-        let mut envelopes = Vec::with_capacity(s.students.len());
-        for &sid in &s.students {
-            let entry_key = crypto::session_entry_key(sid, s.session_id, salt, kdf)?;
-            let inner = EntryPayload {
-                student_id: sid,
-                session_secret: hex::encode(*session_secret),
-                exams: s.exams.clone(),
-            };
-            let inner_plain = serde_json::to_vec(&inner)?;
-            let blob = crypto::encrypt(&entry_key, &inner_plain, b"envelope-v2")?;
-            envelopes.push(Envelope {
-                tag: crypto::envelope_tag(&entry_key),
-                blob: base64_encode(&blob),
-            });
-        }
+        //
+        // **并行生成**：每生一次 Argon2id(64MiB, t=3) 约 91ms，
+        // 1000 人串行要 91 秒（实测）。每个信封完全独立：
+        // 输入只有 (sid, session_id, salt, kdf, session_secret)，
+        // session_secret 在循环外生成且只读，Argon2id 无全局状态，
+        // 因此并行化没有数据竞争风险。
+        let envelopes: Vec<Envelope> = s
+            .students
+            .par_iter()
+            .map(|&sid| -> Result<Envelope, ContainerError> {
+                let entry_key = crypto::session_entry_key(sid, s.session_id, salt, kdf)?;
+                let inner = EntryPayload {
+                    student_id: sid,
+                    session_secret: hex::encode(*session_secret),
+                    exams: s.exams.clone(),
+                };
+                let inner_plain = serde_json::to_vec(&inner)?;
+                let blob = crypto::encrypt(&entry_key, &inner_plain, b"envelope-v2")?;
+                Ok(Envelope {
+                    tag: crypto::envelope_tag(&entry_key),
+                    blob: base64_encode(&blob),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         session_headers.push(SessionHeader {
             session_id: s.session_id,
@@ -267,38 +282,41 @@ pub fn build_payload(
     Ok(out)
 }
 
-/// 解析每个题库的实际抽题数（清单值优先，多场取最大值）。
-fn resolve_picks(
+/// 解析**单个场次**内每个题库的实际抽题数。
+///
+/// 为什么必须按场次隔离：`picks` 会随本场题库一起加密进该场的 data 段，
+/// 客户端抽题时读的就是这一份。早期实现用全局 `exam_id → pick` 映射并取
+/// `max()`，导致场次 1 设 2 题被场次 2 的 5 题覆盖（实测：清单要求 2 题，
+/// 实际抽出 5 题）。`validate_sessions` 已保证同一场次内不重复引用题库，
+/// 因此这里 `insert` 不会互相覆盖。
+fn resolve_session_picks(
     banks: &[crate::model::ExamBank],
-    sessions: &[Session],
+    session: &Session,
 ) -> Result<BTreeMap<String, u32>, ContainerError> {
+    if session.students.is_empty() {
+        return Err(ContainerError::Format(format!(
+            "场次 {} 的学号名单为空",
+            session.session_id
+        )));
+    }
     let mut picks: BTreeMap<String, u32> = BTreeMap::new();
-    for s in sessions {
-        if s.students.is_empty() {
+    for e in &session.exams {
+        let bank = match_bank(&e.file, banks).ok_or_else(|| {
+            ContainerError::Format(format!(
+                "场次 {} 引用的题库 {} 匹配不到",
+                session.session_id, e.file
+            ))
+        })?;
+        let effective = e.pick.unwrap_or(bank.pick);
+        if effective as usize > bank.questions.len() {
             return Err(ContainerError::Format(format!(
-                "场次 {} 的学号名单为空",
-                s.session_id
+                "场次 {} 的题库 {} 要求抽 {effective} 题，但只有 {} 题",
+                session.session_id,
+                bank.exam_id,
+                bank.questions.len()
             )));
         }
-        for e in &s.exams {
-            let bank = match_bank(&e.file, banks).ok_or_else(|| {
-                ContainerError::Format(format!(
-                    "场次 {} 引用的题库 {} 匹配不到",
-                    s.session_id, e.file
-                ))
-            })?;
-            let effective = e.pick.unwrap_or(bank.pick);
-            if effective as usize > bank.questions.len() {
-                return Err(ContainerError::Format(format!(
-                    "场次 {} 的题库 {} 要求抽 {effective} 题，但只有 {} 题",
-                    s.session_id,
-                    bank.exam_id,
-                    bank.questions.len()
-                )));
-            }
-            let entry = picks.entry(bank.exam_id.clone()).or_insert(effective);
-            *entry = (*entry).max(effective);
-        }
+        picks.insert(bank.exam_id.clone(), effective);
     }
     Ok(picks)
 }
@@ -350,9 +368,18 @@ fn validate_sessions_impl(sessions: &[Session], emit_warnings: bool) -> Result<(
                 )));
             }
         }
-        // 重复学号：会让信封数量虚高，也说明清单有误。
+        // 学号校验：必须是正整数。
+        //
+        // 上限**不设 INT_MAX**——真实学号常为 12 位（如 202312345678），
+        // 早已超出 i32。内部用 u64，足以容纳任何真实学号。
         let mut seen_students = std::collections::HashSet::new();
         for &sid in &s.students {
+            if sid == 0 {
+                return Err(ContainerError::Format(format!(
+                    "场次 {} 的学号为 0（学号必须是正整数）",
+                    s.session_id
+                )));
+            }
             if !seen_students.insert(sid) {
                 return Err(ContainerError::Format(format!(
                     "场次 {} 的学号 {} 重复出现",
@@ -380,14 +407,55 @@ fn validate_sessions_impl(sessions: &[Session], emit_warnings: bool) -> Result<(
         }
     }
 
-    // 时间窗重叠：**只警告不报错**。
-    // 重叠可能是管理员有意为之（例如同一场次分两个班），
-    // 但必须提示——因为客户端遇到重叠会取 session_id 最小的一场，
-    // 学生可能被分到自己没想到的那场。
+    // 时间窗重叠处理：
+    //
+    // - **同一学生**同时落在两个重叠场次里 → **报错**。客户端只能取
+    //   session_id 最小的一场，学生既无法选择也不知道，这是配置歧义，
+    //   不该让学生承担。
+    // - 重叠但学生无交集 → 仅警告。这是合法用法（同一场次分两个班）。
+    check_student_overlap(sessions)?;
     if emit_warnings {
         warn_overlapping_windows(sessions);
     }
 
+    Ok(())
+}
+
+/// 检测"同一学生同时在两个重叠场次"的歧义配置。
+fn check_student_overlap(sessions: &[Session]) -> Result<(), ContainerError> {
+    for i in 0..sessions.len() {
+        for j in (i + 1)..sessions.len() {
+            let (a, b) = (&sessions[i], &sessions[j]);
+            let (Some(a_start), Some(a_end)) = (
+                crate::timegate::parse_rfc3339(&a.start),
+                crate::timegate::parse_rfc3339(&a.end),
+            ) else {
+                continue;
+            };
+            let (Some(b_start), Some(b_end)) = (
+                crate::timegate::parse_rfc3339(&b.start),
+                crate::timegate::parse_rfc3339(&b.end),
+            ) else {
+                continue;
+            };
+            if !(a_start < b_end && b_start < a_end) {
+                continue; // 时间窗不重叠
+            }
+            let common: Vec<u64> = a
+                .students
+                .iter()
+                .filter(|s| b.students.contains(s))
+                .copied()
+                .collect();
+            if !common.is_empty() {
+                return Err(ContainerError::Format(format!(
+                    "场次 {} 与 {} 时间窗重叠，且学生 {:?} 同时在两场。\n\
+                     客户端无法判断该进哪一场。请调整时间窗，或把这些学生从其中一场移除。",
+                    a.session_id, b.session_id, common
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1011,27 +1079,145 @@ mod tests {
         assert!(validate_sessions(&[s]).is_err());
     }
 
-    /// 时间窗重叠**只警告不报错**（可能是有意配置）。
+    /// 时间窗重叠但**学生无交集** → 合法（同一场次分两个班），只警告。
     #[test]
-    fn overlapping_windows_do_not_fail_validation() {
+    fn overlapping_windows_without_shared_students_is_ok() {
         use crate::model::SessionExam;
-        let mk = |id: u32, start: &str, end: &str| Session {
+        let mk = |id: u32, start: &str, end: &str, students: Vec<u64>| Session {
             session_id: id,
             start: start.into(),
             end: end.into(),
-            students: vec![1],
+            students,
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: None,
             }],
         };
-        // 两场完全重叠
-        let a = mk(1, "2026-12-20T09:00:00+08:00", "2026-12-20T11:00:00+08:00");
-        let b = mk(2, "2026-12-20T10:00:00+08:00", "2026-12-20T12:00:00+08:00");
+        let a = mk(
+            1,
+            "2026-12-20T09:00:00+08:00",
+            "2026-12-20T11:00:00+08:00",
+            vec![1, 2],
+        );
+        let b = mk(
+            2,
+            "2026-12-20T10:00:00+08:00",
+            "2026-12-20T12:00:00+08:00",
+            vec![3, 4],
+        );
         assert!(
             validate_sessions(&[a, b]).is_ok(),
-            "重叠应只警告，不应阻止打包"
+            "学生无交集的重叠是合法分班，应只警告"
         );
+    }
+
+    /// **P0 回归**：不同场次引用同一题库时，pick 必须互不干扰。
+    ///
+    /// 早期实现用全局 exam_id→pick 映射并取 max，导致场次 1 设 2 题
+    /// 被场次 2 的 5 题覆盖（实测：清单要求 2 题，实际抽出 5 题）。
+    #[test]
+    fn picks_are_isolated_per_session() {
+        use crate::model::SessionExam;
+        let banks = vec![bank("math", 50)];
+        // 注意：必须用常量 SALT，因为下面的 unlock() 辅助函数内部用的是它。
+        let salt = SALT;
+        // 场次 1 抽 2 题，场次 2 抽 5 题，引用同一题库。
+        // 学生不同、时间窗不重叠，避免触发其他校验。
+        let s1 = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![1001],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: Some(2),
+            }],
+        };
+        let s2 = Session {
+            session_id: 2,
+            start: "2026-12-20T14:00:00+08:00".into(),
+            end: "2026-12-20T16:00:00+08:00".into(),
+            students: vec![2002],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: Some(5),
+            }],
+        };
+        let payload = build_payload(&master(), &banks, &[s1, s2], salt, kdf()).unwrap();
+
+        let u1 = unlock(&payload, 1001, 1).unwrap().expect("场次1应解锁");
+        let d1 = decrypt_data(&u1.session_secret, salt, &u1.data_ct).unwrap();
+        assert_eq!(
+            d1.pick_for("math", 0),
+            2,
+            "场次1 必须抽 2 题，不能被场次2 的 5 题污染"
+        );
+
+        let u2 = unlock(&payload, 2002, 2).unwrap().expect("场次2应解锁");
+        let d2 = decrypt_data(&u2.session_secret, salt, &u2.data_ct).unwrap();
+        assert_eq!(d2.pick_for("math", 0), 5, "场次2 必须抽 5 题");
+    }
+
+    /// **回归**：时间窗重叠且**同一学生**在两场 → 必须报错。
+    ///
+    /// 客户端只能取 session_id 最小的一场，学生既无法选择也不知道，
+    /// 这是配置歧义，不该让学生承担。
+    #[test]
+    fn overlapping_windows_with_shared_student_is_error() {
+        use crate::model::SessionExam;
+        let mk = |id: u32, start: &str, end: &str| Session {
+            session_id: id,
+            start: start.into(),
+            end: end.into(),
+            students: vec![2021001],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: None,
+            }],
+        };
+        let a = mk(1, "2026-12-20T09:00:00+08:00", "2026-12-20T11:00:00+08:00");
+        let b = mk(2, "2026-12-20T10:00:00+08:00", "2026-12-20T12:00:00+08:00");
+        let err = validate_sessions(&[a, b]).unwrap_err();
+        assert!(
+            matches!(err, ContainerError::Format(ref m) if m.contains("同时在两场")),
+            "实际: {err}"
+        );
+    }
+
+    /// 学号为 0 必须报错（正整数约束）。
+    #[test]
+    fn rejects_zero_student_id() {
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![0],
+            exams: vec![crate::model::SessionExam {
+                file: "math.json".into(),
+                pick: None,
+            }],
+        };
+        let err = validate_sessions(&[s]).unwrap_err();
+        assert!(
+            matches!(err, ContainerError::Format(ref m) if m.contains("必须是正整数")),
+            "实际: {err}"
+        );
+    }
+
+    /// 学号可以超过 i32::MAX（真实学号常为 12 位）。
+    #[test]
+    fn allows_student_id_above_i32_max() {
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![202312345678],
+            exams: vec![crate::model::SessionExam {
+                file: "math.json".into(),
+                pick: None,
+            }],
+        };
+        assert!(validate_sessions(&[s]).is_ok(), "12 位学号应当被接受");
     }
 
     #[test]
@@ -1077,7 +1263,19 @@ mod tests {
             }],
         };
         assert!(validate_sessions(&[mk(1), mk(1)]).is_err());
-        assert!(validate_sessions(&[mk(1), mk(2)]).is_ok());
+        // 注意：两场用**不同学生**，否则会因时间窗重叠+学生交集而报错，
+        // 掩盖这里真正要测的"场次编号重复"。
+        let a = Session {
+            session_id: 1,
+            students: vec![1],
+            ..mk(1)
+        };
+        let b = Session {
+            session_id: 2,
+            students: vec![2],
+            ..mk(1)
+        };
+        assert!(validate_sessions(&[a, b]).is_ok());
     }
 
     #[test]

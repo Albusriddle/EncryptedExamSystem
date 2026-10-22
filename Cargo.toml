@@ -23,3 +23,5 @@ zeroize = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 argon2 = "0.5"
+# 信封生成并行化：每生一次 Argon2id(64MiB)，1000 人串行需 91 秒。
+rayon = "1"

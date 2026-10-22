@@ -40,13 +40,19 @@ def test_bank_duplicate_ids() -> None:
         ExamBank(exam_id="m", title="t", pick=1, questions=[q, q])
 
 
-def test_student_over_int_max() -> None:
-    with pytest.raises(ValueError, match="INT_MAX"):
-        _session(students=[2_147_483_648])
+def test_student_above_i32_max_is_allowed() -> None:
+    """真实学号常为 12 位（如 202312345678），必须允许。"""
+    s = _session(students=[202312345678])
+    assert s.students == [202312345678]
 
 
-def test_student_negative() -> None:
-    with pytest.raises(ValueError, match="不能为负"):
+def test_student_zero_rejected() -> None:
+    with pytest.raises(ValueError, match="正整数"):
+        _session(students=[0])
+
+
+def test_student_negative_rejected() -> None:
+    with pytest.raises(ValueError, match="正整数"):
         _session(students=[-1])
 
 
