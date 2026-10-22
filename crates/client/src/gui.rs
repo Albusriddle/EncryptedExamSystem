@@ -41,6 +41,8 @@ pub struct ExamApp {
     opts: UnlockOpts,
     /// 启动时预判的密钥来源，决定是否显示"开发模式"横幅。
     key_hint: KeySource,
+    /// 顶部水印文本，构造时算一次即可。
+    watermark: String,
     /// 是否需要在下一帧把焦点交给学号输入框。
     ///
     /// 只在**首次启动**与**从错误返回 Idle** 时置 `true`。
@@ -62,6 +64,7 @@ impl ExamApp {
             },
             opts,
             key_hint,
+            watermark: common::watermark(),
             focus_pending: true,
         }
     }
@@ -121,6 +124,21 @@ impl eframe::App for ExamApp {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
         self.poll();
+
+        // 水印条带：声明在最前，所以位于窗口最顶部。
+        egui::TopBottomPanel::top("watermark").show(ctx, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(&self.watermark)
+                            .size(11.0)
+                            .color(egui::Color32::from_gray(130)),
+                    );
+                });
+            });
+            ui.add_space(2.0);
+        });
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(6.0);

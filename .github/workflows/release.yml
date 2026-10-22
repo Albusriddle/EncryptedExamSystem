@@ -30,6 +30,19 @@ jobs:
       - name: 构建（GitHub runner 自带 VS，用 msvc 出正式版）
         run: cargo build --release --workspace --target x86_64-pc-windows-msvc
 
+      - name: 校验版本号与 tag 一致
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE_V=$(tr -d '[:space:]' < VERSION)
+          TAG_V="${GITHUB_REF_NAME#v}"
+          if [ "$FILE_V" != "$TAG_V" ]; then
+            echo "✗ VERSION ($FILE_V) 与 tag ($TAG_V) 不一致"
+            echo "  发布前请把 VERSION / Cargo.toml / admin/pyproject.toml 一起改成 $TAG_V"
+            exit 1
+          fi
+          echo "✓ 版本号 $FILE_V 与 tag 一致"
+
       - name: 冒烟测试（发布前必须通过）
         shell: bash
         run: |

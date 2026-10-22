@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QSizePolicy,
     QTabWidget,
     QWidget,
 )
@@ -35,6 +36,7 @@ from app.ui.tab_banks import BanksTab
 from app.ui.tab_build import BuildTab
 from app.ui.tab_sessions import SessionsTab
 from app.ui.tab_students import StudentsTab
+from app.version import watermark
 
 
 class MainWindow(QMainWindow):
@@ -75,6 +77,20 @@ class MainWindow(QMainWindow):
         act_check.setToolTip("一次性列出所有会阻止打包的问题")
         act_check.triggered.connect(self.check_config)
         bar.addAction(act_check)
+
+        # 水印：紧接在「检查配置」右侧。
+        # 用可伸缩的 spacer 把后面的控件推到最右，窗口放大时水印仍在右边。
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        bar.addWidget(spacer)
+        self.watermark_label = QLabel(watermark())
+        self.watermark_label.setObjectName("watermark")
+        self.watermark_label.setToolTip(
+            "保密考试系统（EES）· 版本 " + watermark().split()[1].lstrip("v")
+        )
+        # 显式颜色：palette(mid) 在深色主题下几乎与背景同色，实测看不见。
+        self.watermark_label.setStyleSheet("color: #9aa0a6; padding-right: 12px; font-size: 11px;")
+        bar.addWidget(self.watermark_label)
 
     def _build_tabs(self) -> None:
         self.tabs = QTabWidget()

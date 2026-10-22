@@ -77,6 +77,8 @@ fn main() -> Result<()> {
 
 /// CLI 输出。
 fn print_result(unlocked: &Unlocked) {
+    println!("{}", common::watermark());
+    println!();
     println!("✔ 解锁成功");
     println!("  学号: {}", unlocked.student_id);
     println!("  模式: {}", unlocked.key_source.describe());

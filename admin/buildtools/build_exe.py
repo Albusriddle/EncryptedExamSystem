@@ -106,6 +106,10 @@ def main() -> int:
         # 把 builder 作为数据文件带进去，运行时从 sys._MEIPASS 取
         "--add-binary",
         f"{BUILDER}{sep}.",
+        # 版本号文件：两端水印都读它，必须打进包里，
+        # 否则冻结后 app_version() 只能返回 0.0.0。
+        "--add-data",
+        f"{ROOT / 'VERSION'}{sep}.",
         # 让 PyInstaller 能找到 app 包
         "--paths",
         str(ADMIN),
@@ -146,6 +150,26 @@ def main() -> int:
         print((chk.stderr or "")[-800:])
         return 1
     print("✓ 自检通过（--selftest 成功）")
+
+    # 版本号必须能从包里读到，否则水印会显示 0.0.0
+    want = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    got = ""
+    try:
+        vp = subprocess.run(
+            [str(out), "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        got = (vp.stdout or "").strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if want and want not in got:
+        print(f"✗ 版本号未打进包：期望 {want}，实际 {got or '(空)'}")
+        return 1
+    print(f"✓ 版本号已打包：{got}")
 
     # 学生端模板与手册放进同一目录：教师只需拷贝这一个文件夹
     rel = out.parent

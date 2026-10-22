@@ -94,6 +94,12 @@ def selftest() -> int:
 def main() -> int:
     if "--selftest" in sys.argv:
         return selftest()
+    if "--version" in sys.argv:
+        # 供构建自检读取，确认 VERSION 真的被打进包里
+        from app.version import app_version
+
+        print(app_version())
+        return 0
     app = QApplication(sys.argv)
     install_excepthook()
     app.setApplicationName("保密考试系统 · 管理端")
