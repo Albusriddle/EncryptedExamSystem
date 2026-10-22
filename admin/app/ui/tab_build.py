@@ -286,7 +286,9 @@ class BuildTab(QWidget):
             self.preview.setStyleSheet("color:#b03030;")
         else:
             self.preview.setText(
-                f"共 {len(self.state.sessions)} 个场次、{total} 个学生信封，可以打包。"
+                f"共 {len(self.state.sessions)} 个场次、{total} 个学生信封，可以打包。\n"
+                "密钥会自动写进包内 —— 学生双击 exe、输入学号即可，"
+                "不需要任何密钥文件，也不需要你重新编译程序。"
             )
             self.preview.setStyleSheet("color:#2a7a2a;")
 
@@ -379,5 +381,9 @@ class BuildTab(QWidget):
         except OSError:
             pass
         QMessageBox.information(
-            self, "打包成功", f"已生成：\n{out}\n\n请务必核对界面上的 SHA-256。"
+            self,
+            "打包成功",
+            f"已生成：\n{out}\n\n"
+            "✔ 密钥已内嵌在包内，学生双击即可使用（无需任何参数）。\n\n"
+            "请核对日志里的 SHA-256。",
         )

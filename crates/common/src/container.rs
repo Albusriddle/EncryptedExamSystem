@@ -37,11 +37,53 @@ use crate::crypto::{self, CryptoError, KdfParams, TAG_LEN};
 use crate::model::Session;
 
 /// payload 起始魔数。
-pub const MAGIC: &[u8; 8] = b"EXAMPKG2";
+pub const MAGIC: &[u8; 8] = b"EXAMPKG3";
 /// 尾部魔数，用于从 exe 末尾定位 payload。
 pub const MAGIC_TAIL: &[u8; 8] = b"EXAMTAIL";
 /// 当前格式版本。
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
+
+/// 密钥区魔数：标记"这个包内嵌了 K_manifest"。
+pub const KEY_MAGIC: &[u8; 8] = b"EXAMKEY1";
+
+/// 密钥区长度：魔数 8 字节 + 混淆后的 32 字节密钥。
+pub const KEY_AREA_LEN: usize = 8 + 32;
+
+/// 密钥混淆掩码。
+///
+/// **这不是密码学保护**：它只让 `strings`/`grep` 搜不到 64 位 hex 形式的
+/// K_manifest，让"随手看一眼"不能得手。有逆向能力的人仍可还原。
+///
+/// 安全性上与"编译期嵌入 binary"完全等价——两者都在同一个 exe 文件里，
+/// 拿到文件的人都能取出密钥。真正的防线是：即使拿到 K_manifest，
+/// 也只能读到场次时间与人数，**拿不到任何题目**（题库用每场独立
+/// session_secret 加密，且需要知道合法学号并付出一次 Argon2id）。
+const KEY_MASK: [u8; 32] = [
+    0x3d, 0x9a, 0x57, 0xc1, 0x8e, 0x24, 0xfb, 0x60, 0xa5, 0x13, 0xd8, 0x4c, 0x72, 0xbe, 0x09, 0xe6,
+    0x51, 0xcf, 0x2a, 0x87, 0x6d, 0xf0, 0x38, 0x94, 0x1b, 0xa2, 0x7e, 0xd5, 0x43, 0xbc, 0x68, 0x0f,
+];
+
+/// 把 K_manifest 打包成密钥区字节（魔数 + 掩码后的密钥）。
+pub fn make_key_area(k_manifest: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEY_AREA_LEN);
+    out.extend_from_slice(KEY_MAGIC);
+    for i in 0..32 {
+        out.push(k_manifest[i] ^ KEY_MASK[i]);
+    }
+    out
+}
+
+/// 从密钥区还原 K_manifest。密钥区格式不对时返回 `None`（视为未内嵌）。
+pub fn read_key_area(area: &[u8]) -> Option<[u8; 32]> {
+    if area.len() != KEY_AREA_LEN || &area[..8] != KEY_MAGIC {
+        return None;
+    }
+    let mut k = [0u8; 32];
+    for i in 0..32 {
+        k[i] = area[8 + i] ^ KEY_MASK[i];
+    }
+    Some(k)
+}
 
 /// 容器错误。
 #[derive(Debug, thiserror::Error)]
@@ -153,12 +195,18 @@ pub struct UnlockedSession {
 }
 
 /// 打包：把题库与场次封装成 payload 字节串。
+/// 构建 payload。
+///
+/// `embed_k_manifest = true` 时把 K_manifest 写进密钥区，
+/// 学生端**双击即可解锁**，无需任何参数，也无需教师重新编译 client。
+/// 这是默认路径：否则教师必须装 Rust 工具链才能产出可用的包。
 pub fn build_payload(
     master: &[u8; 32],
     banks: &[crate::model::ExamBank],
     sessions: &[Session],
     salt: &[u8],
     kdf: KdfParams,
+    embed_k_manifest: bool,
 ) -> Result<Vec<u8>, ContainerError> {
     // 1. 剥离答案。
     let mut clean_banks = banks.to_vec();
@@ -270,14 +318,23 @@ pub fn build_payload(
         sessions: session_headers,
     };
     let header_plain = serde_json::to_vec(&header)?;
-    let header_ct = crypto::encrypt(&k_manifest, &header_plain, b"header-v2")?;
+    let header_ct = crypto::encrypt(&k_manifest, &header_plain, b"header-v3")?;
 
     // 5. 组装 payload。
-    let mut out = Vec::with_capacity(16 + header_ct.len() + blob_area.len());
+    //    布局：MAGIC | version | header_len | header_ct | key_len | key_area | blob_area
+    //    key_len = 0 表示未内嵌密钥（学生需自行提供 master）。
+    let key_area: Vec<u8> = if embed_k_manifest {
+        make_key_area(&k_manifest)
+    } else {
+        Vec::new()
+    };
+    let mut out = Vec::with_capacity(20 + header_ct.len() + key_area.len() + blob_area.len());
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
     out.extend_from_slice(&(header_ct.len() as u32).to_le_bytes());
     out.extend_from_slice(&header_ct);
+    out.extend_from_slice(&(key_area.len() as u32).to_le_bytes());
+    out.extend_from_slice(&key_area);
     out.extend_from_slice(&blob_area);
     Ok(out)
 }
@@ -579,6 +636,41 @@ pub fn extract_payload(exe_bytes: &[u8]) -> Result<&[u8], ContainerError> {
 }
 
 /// 解析 payload 的 header（需要 K_manifest）。
+/// 从 payload 里取出内嵌的 K_manifest。
+///
+/// 返回：
+/// - `Ok(Some(k))`：包内嵌了密钥，学生端可直接用；
+/// - `Ok(None)`：包未内嵌密钥（`--no-embed-key` 打的包），学生需提供 master；
+/// - `Err(_)`：payload 本身损坏。
+///
+/// 这是学生端**双击即可运行**的关键：密钥随包分发，不需要教师重新编译 client。
+pub fn embedded_k_manifest(payload: &[u8]) -> Result<Option<[u8; 32]>, ContainerError> {
+    if payload.len() < 20 || &payload[..8] != MAGIC {
+        return Err(ContainerError::Format("payload 魔数错误".into()));
+    }
+    let version = u32::from_le_bytes(payload[8..12].try_into().expect("4 字节"));
+    if version != VERSION {
+        return Err(ContainerError::Format(format!(
+            "不支持的版本 {version}（当前支持 {VERSION}）"
+        )));
+    }
+    let header_len = u32::from_le_bytes(payload[12..16].try_into().expect("4 字节")) as usize;
+    let key_off = 16 + header_len;
+    if payload.len() < key_off + 4 {
+        return Err(ContainerError::Format("header 长度越界".into()));
+    }
+    let key_len =
+        u32::from_le_bytes(payload[key_off..key_off + 4].try_into().expect("4 字节")) as usize;
+    if key_len == 0 {
+        return Ok(None);
+    }
+    let end = key_off + 4 + key_len;
+    if end > payload.len() {
+        return Err(ContainerError::Format("key 区长度越界".into()));
+    }
+    Ok(read_key_area(&payload[key_off + 4..end]))
+}
+
 pub fn parse_header<'a>(
     payload: &'a [u8],
     k_manifest: &[u8; 32],
@@ -593,13 +685,20 @@ pub fn parse_header<'a>(
         )));
     }
     let header_len = u32::from_le_bytes(payload[12..16].try_into().expect("4 字节")) as usize;
-    if payload.len() < 16 + header_len {
-        return Err(ContainerError::Format("header 长度越界".into()));
+    if payload.len() < 20 + header_len {
+        return Err(ContainerError::Format("header/key 长度越界".into()));
     }
     let header_ct = &payload[16..16 + header_len];
-    let blob_area = &payload[16 + header_len..];
+    let key_off = 16 + header_len;
+    let key_len =
+        u32::from_le_bytes(payload[key_off..key_off + 4].try_into().expect("4 字节")) as usize;
+    let blob_off = key_off + 4 + key_len;
+    if blob_off > payload.len() {
+        return Err(ContainerError::Format("key 区长度越界".into()));
+    }
+    let blob_area = &payload[blob_off..];
 
-    let header_plain = crypto::decrypt(k_manifest, header_ct, b"header-v2")?;
+    let header_plain = crypto::decrypt(k_manifest, header_ct, b"header-v3")?;
     let header: Header = serde_json::from_slice(&header_plain)?;
     Ok((header, blob_area))
 }
@@ -773,7 +872,7 @@ mod tests {
     fn build_and_unlock_roundtrip() {
         let banks = vec![bank("math", 50)];
         let sessions = vec![session(1, vec![2021001, 2021002])];
-        let payload = build_payload(&master(), &banks, &sessions, SALT, kdf()).unwrap();
+        let payload = build_payload(&master(), &banks, &sessions, SALT, kdf(), true).unwrap();
 
         let unlocked = unlock(&payload, 2021001, 1).unwrap().expect("应解锁成功");
         assert_eq!(unlocked.session_id, 1);
@@ -789,9 +888,89 @@ mod tests {
     #[test]
     fn unknown_student_is_denied() {
         let banks = vec![bank("math", 50)];
-        let payload =
-            build_payload(&master(), &banks, &[session(1, vec![2021001])], SALT, kdf()).unwrap();
+        let payload = build_payload(
+            &master(),
+            &banks,
+            &[session(1, vec![2021001])],
+            SALT,
+            kdf(),
+            true,
+        )
+        .unwrap();
         assert!(unlock(&payload, 9999999, 1).unwrap().is_none());
+    }
+
+    /// v3 关键能力：内嵌密钥后，**不需要 master** 也能解出 header。
+    ///
+    /// 这是"学生双击即可使用"的技术基础。此前教师必须重新编译 client
+    /// 才能产出可用的包，而教师没有 Rust 工具链。
+    #[test]
+    fn embedded_key_allows_unlock_without_master() {
+        let banks = vec![bank("math", 20)];
+        let sessions = vec![session(1, vec![2021001])];
+        let payload = build_payload(&master(), &banks, &sessions, SALT, kdf(), true).unwrap();
+
+        let k = embedded_k_manifest(&payload).unwrap().expect("应内嵌密钥");
+        assert_eq!(k, manifest_key(&master()), "内嵌的应是 K_manifest");
+
+        // 用内嵌密钥解 header —— 完全不碰 master
+        let (header, _blob) = parse_header(&payload, &k).unwrap();
+        assert_eq!(header.sessions.len(), 1);
+    }
+
+    /// `embed = false` 时不得写入密钥区。
+    #[test]
+    fn no_key_area_when_not_embedded() {
+        let banks = vec![bank("math", 20)];
+        let payload = build_payload(
+            &master(),
+            &banks,
+            &[session(1, vec![1])],
+            SALT,
+            kdf(),
+            false,
+        )
+        .unwrap();
+        assert!(
+            embedded_k_manifest(&payload).unwrap().is_none(),
+            "未内嵌时不应有密钥区"
+        );
+    }
+
+    /// 密钥区里不得出现 K_manifest 的 64-hex 明文（掩码后应搜不到）。
+    #[test]
+    fn key_area_is_obfuscated() {
+        let banks = vec![bank("math", 20)];
+        let payload =
+            build_payload(&master(), &banks, &[session(1, vec![1])], SALT, kdf(), true).unwrap();
+        let k = manifest_key(&master());
+        assert!(
+            !contains_bytes(&payload, hex::encode(k).as_bytes()),
+            "payload 中出现了 K_manifest 的 hex 明文"
+        );
+        assert!(
+            !contains_bytes(&payload, &k),
+            "payload 中出现了 K_manifest 的原始字节"
+        );
+    }
+
+    /// 密钥区被篡改时，header 解密必须失败（不能静默用坏密钥）。
+    #[test]
+    fn tampered_key_area_fails_to_decrypt_header() {
+        let banks = vec![bank("math", 20)];
+        let mut payload =
+            build_payload(&master(), &banks, &[session(1, vec![1])], SALT, kdf(), true).unwrap();
+        let k = embedded_k_manifest(&payload).unwrap().unwrap();
+        // 翻转密钥区最后一个字节（密钥区紧跟在 header 之后）
+        let header_len = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
+        let idx = 16 + header_len + 4 + KEY_AREA_LEN - 1;
+        payload[idx] ^= 0xff;
+        let bad = embedded_k_manifest(&payload).unwrap().unwrap();
+        assert_ne!(bad, k);
+        assert!(
+            parse_header(&payload, &bad).is_err(),
+            "坏密钥必须解不开 header"
+        );
     }
 
     /// **核心安全验收**：payload 里不得出现任何学号的明文。
@@ -805,6 +984,7 @@ mod tests {
             &[session(1, students.clone())],
             SALT,
             kdf(),
+            true,
         )
         .unwrap();
 
@@ -852,7 +1032,7 @@ mod tests {
                 pick: None,
             }],
         };
-        let payload = build_payload(&master(), &banks, &[s1, s2], SALT, kdf()).unwrap();
+        let payload = build_payload(&master(), &banks, &[s1, s2], SALT, kdf(), true).unwrap();
 
         let u1 = unlock(&payload, 1001, 1).unwrap().expect("场次1应解锁");
         let u2 = unlock(&payload, 2002, 2).unwrap().expect("场次2应解锁");
@@ -878,7 +1058,7 @@ mod tests {
                 pick: Some(17),
             }],
         };
-        let payload = build_payload(&master(), &banks, &[s], SALT, kdf()).unwrap();
+        let payload = build_payload(&master(), &banks, &[s], SALT, kdf(), true).unwrap();
         let u = unlock(&payload, 1, 1).unwrap().unwrap();
         let data = decrypt_data(&u.session_secret, SALT, &u.data_ct).unwrap();
         assert_eq!(data.pick_for("math", 5), 17);
@@ -898,7 +1078,7 @@ mod tests {
                 pick: Some(99),
             }],
         };
-        assert!(build_payload(&master(), &banks, &[s], SALT, kdf()).is_err());
+        assert!(build_payload(&master(), &banks, &[s], SALT, kdf(), true).is_err());
     }
 
     #[test]
@@ -914,7 +1094,7 @@ mod tests {
                 pick: None,
             }],
         };
-        assert!(build_payload(&master(), &banks, &[s], SALT, kdf()).is_err());
+        assert!(build_payload(&master(), &banks, &[s], SALT, kdf(), true).is_err());
     }
 
     #[test]
@@ -930,7 +1110,7 @@ mod tests {
                 pick: None,
             }],
         };
-        assert!(build_payload(&master(), &banks, &[s], SALT, kdf()).is_err());
+        assert!(build_payload(&master(), &banks, &[s], SALT, kdf(), true).is_err());
     }
 
     #[test]
@@ -941,6 +1121,7 @@ mod tests {
             &[session(1, vec![1])],
             SALT,
             kdf(),
+            true,
         )
         .unwrap();
         let sfx = append_payload_to_exe(b"FAKE_STUB_BYTES_1234567890", &payload).unwrap();
@@ -955,6 +1136,7 @@ mod tests {
             &[session(1, vec![1])],
             SALT,
             kdf(),
+            true,
         )
         .unwrap();
         assert!(parse_header(&payload, &[0xCD; 32]).is_err());
@@ -968,6 +1150,7 @@ mod tests {
             &[session(1, vec![1])],
             SALT,
             kdf(),
+            true,
         )
         .unwrap();
         let mut sfx = append_payload_to_exe(b"STUB", &payload).unwrap();
@@ -991,6 +1174,7 @@ mod tests {
             &[session(1, vec![1])],
             SALT,
             kdf(),
+            true,
         )
         .unwrap();
         payload[20] ^= 0xFF;
@@ -1147,7 +1331,7 @@ mod tests {
                 pick: Some(5),
             }],
         };
-        let payload = build_payload(&master(), &banks, &[s1, s2], salt, kdf()).unwrap();
+        let payload = build_payload(&master(), &banks, &[s1, s2], salt, kdf(), true).unwrap();
 
         let u1 = unlock(&payload, 1001, 1).unwrap().expect("场次1应解锁");
         let d1 = decrypt_data(&u1.session_secret, salt, &u1.data_ct).unwrap();

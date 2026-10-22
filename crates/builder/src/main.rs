@@ -51,6 +51,13 @@ enum Cmd {
         /// 使学生端免输 master。**注意：这是 K_manifest 而非 master**。
         #[arg(long)]
         emit_keyfile: Option<PathBuf>,
+        /// **不要**把 K_manifest 写进包（默认会写）。
+        ///
+        /// 默认写入时，学生双击 exe 即可解锁，无需任何参数。
+        /// 加上本开关后，学生必须自行提供 --master——GUI 无法使用，
+        /// 仅用于调试或特殊的分发方式。
+        #[arg(long)]
+        no_embed_key: bool,
     },
     /// 校验一个包能否被指定密钥解开
     Verify {
@@ -105,9 +112,18 @@ fn main() -> Result<()> {
             master,
             master_file,
             emit_keyfile,
+            no_embed_key,
         } => {
             let key = resolve_master(master, master_file)?;
-            build(manifest, banks, stub, out, &key, emit_keyfile)?;
+            build(
+                manifest,
+                banks,
+                stub,
+                out,
+                &key,
+                emit_keyfile,
+                !no_embed_key,
+            )?;
         }
         Cmd::Verify {
             package,
@@ -158,6 +174,7 @@ fn build(
     out_path: PathBuf,
     master_hex: &str,
     emit_keyfile: Option<PathBuf>,
+    embed_key: bool,
 ) -> Result<()> {
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("读取清单 {}", manifest_path.display()))?;
@@ -231,18 +248,26 @@ fn build(
         println!("   参考：m=65536/t=3 时单次约 91ms；缓存命中前请耐心等待，不要中断。");
     }
 
-    let payload =
-        container::build_payload(&master, &banks, &manifest.sessions, &salt, manifest.kdf)
-            .context("构建 payload")?;
+    let payload = container::build_payload(
+        &master,
+        &banks,
+        &manifest.sessions,
+        &salt,
+        manifest.kdf,
+        embed_key,
+    )
+    .context("构建 payload")?;
     let stub =
         std::fs::read(&stub_path).with_context(|| format!("读取 stub {}", stub_path.display()))?;
 
-    // 检测 stub 是否已嵌入密钥。
-    // 这一步非常重要：若 stub 未嵌入，学生端运行时会报"缺少密钥"，
-    // 而管理员很可能以为已经嵌入——直到考场上才发现。
-    let stub_embedded = contains_bytes(&stub, b"EXAMKEY:EMBEDDED");
-    let stub_plain = contains_bytes(&stub, b"EXAMKEY:PLAIN");
-    if !stub_embedded && !stub_plain {
+    // 检测 stub 是不是本项目的 client 产物。
+    //
+    // 注意：v3 起密钥默认写在**包**（payload 的密钥区）里，不再依赖
+    // stub 是否编译期内嵌。所以这里只做"是不是我们的 client"的识别，
+    // 不再据此警告"学生需要 --master"——那取决于 embed_key 开关。
+    let stub_plain =
+        contains_bytes(&stub, b"EXAMKEY:PLAIN") || contains_bytes(&stub, b"EXAMKEY:EMBEDDED");
+    if !stub_plain {
         println!(
             "⚠ 警告：stub 里没有密钥状态标记（{}）。\n\
              这可能不是本项目的 client 构建产物，或版本过旧。",
@@ -258,21 +283,23 @@ fn build(
     println!("  payload 大小: {} 字节", payload.len());
     println!("  payload SHA256: {}", container::payload_hash(&payload));
     println!("  场次: {}", manifest.sessions.len());
+    if embed_key {
+        println!("  ✔ 已内嵌密钥：学生双击 exe 输入学号即可，无需任何参数或密钥文件。");
+    } else {
+        println!(
+            "  ⚠ 未内嵌密钥（--no-embed-key）：学生必须自行提供 --master。\n\
+             这意味着图形界面无法使用，请确认这是你想要的分发方式。"
+        );
+    }
     println!("  学生信封: {total_students} 个（每个学生一个，包内不含学号明文）");
     println!(
         "  KDF: Argon2id(m={}, t={}, p={})",
         manifest.kdf.m_cost, manifest.kdf.t_cost, manifest.kdf.p_cost
     );
 
-    if stub_embedded {
-        println!("  ✔ 学生端已内嵌密钥：学生运行后只需输入学号");
-    } else {
-        println!();
-        println!("⚠⚠ 注意：这个学生端**未内嵌密钥**，学生必须提供 --master 才能解锁。");
-        println!("   若要学生免输密钥，请：");
-        println!("     1. 用本命令加上 --emit-keyfile kf.txt 导出 K_manifest；");
-        println!("     2. 设置 EXAM_KEYFILE=kf.txt 后重新编译 client；");
-        println!("     3. 用新编译出的 client 作为 --stub 重新打包。");
+    // 密钥状态在 payload 组装时已打印，这里只补一句分发提示。
+    if embed_key {
+        println!("  学生分发：把本文件发给学生，双击 → 输入学号 → 考试。");
     }
 
     // 输出 K_manifest，供学生端编译时嵌入（使其免输 master）。
@@ -281,7 +308,7 @@ fn build(
         std::fs::write(&path, hex::encode(k_manifest))
             .with_context(|| format!("写出 keyfile {}", path.display()))?;
         println!("\n✔ 已输出 K_manifest 到 {}", path.display());
-        println!("  用它重新编译学生端即可免输 master：");
+        println!("  （可选）用它重新编译学生端，可让密钥编译进 binary 而非包内：");
         println!("    $env:EXAM_KEYFILE = \"{}\"", path.display());
         println!("    cargo build --release -p client");
         println!("  ⚠ 这是 K_manifest 而非 master：泄漏后只能看到场次安排，拿不到题目。");

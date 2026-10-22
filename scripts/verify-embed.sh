@@ -50,9 +50,34 @@ cat > "$TMP/live.json" <<JSON
 JSON
 
 echo
-echo "== 路径 1：未嵌入（开发模式）=="
+echo "== 路径 0：默认打包（包内嵌密钥，学生零配置）=="
+# 这是**最重要的一条**：教师没有 Rust 工具链，必须能在不重编译 client 的
+# 前提下产出学生双击可用的包。若这条失败，整个产品交付不出去。
 "$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
-  --stub "$CLIENT" --out "$TMP/dev.exe" --master "$MASTER" >/dev/null 2>&1
+  --stub "$CLIENT" --out "$TMP/zero_conf.exe" --master "$MASTER" 2>&1 \
+  | grep -q "已内嵌密钥" || fail "默认打包未内嵌密钥"
+ok "默认打包已内嵌密钥"
+
+if "$TMP/zero_conf.exe" --student 2021001 --package "$TMP/zero_conf.exe" \
+    | grep -q "解锁成功"; then
+  ok "学生不带任何密钥即可解锁"
+else
+  fail "默认包无法零配置解锁（教师将无法交付）"
+fi
+
+"$TMP/zero_conf.exe" --student 2021001 --package "$TMP/zero_conf.exe" \
+  | grep -q "正式（密钥随包分发）" || fail "模式显示不正确"
+ok "模式显示为正式分发"
+
+if "$TMP/zero_conf.exe" --student 9999999 --package "$TMP/zero_conf.exe" >/dev/null 2>&1; then
+  fail "默认包中来宾学号竟然解锁成功"
+fi
+ok "名单外学生被拒绝"
+
+echo
+echo "== 路径 1：显式 --no-embed-key（调试模式）=="
+"$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
+  --stub "$CLIENT" --out "$TMP/dev.exe" --master "$MASTER" --no-embed-key >/dev/null 2>&1
 
 if "$TMP/dev.exe" --student 2021001 --package "$TMP/dev.exe" >/dev/null 2>&1; then
   fail "未嵌入时竟然不需要 master"
@@ -118,19 +143,14 @@ ok "不一致的 master 被拒绝"
 cargo build --release -p client >/dev/null 2>&1
 
 echo
-echo "== stub 状态检测（防止误发未嵌入的包）=="
-# 未嵌入的 stub 打包时必须警告
+echo "== stub 身份检测（防止拿错二进制当学生端）=="
+# v3 起密钥默认写在包里，stub 是否编译期内嵌已不影响学生能否使用；
+# 这里改为验证：非本项目的 exe 必须被识别出来。
 cargo build --release -p client >/dev/null 2>&1
 OUT=$("$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
       --stub "$CLIENT" --out "$TMP/plain.exe" --master "$MASTER" 2>&1)
-echo "$OUT" | grep -q "未内嵌密钥" || fail "未嵌入的 stub 未被警告"
-ok "未嵌入 stub 被正确警告"
-
-# 已嵌入的 stub 打包时必须确认
-OUT=$("$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
-      --stub "$TMP/stub_emb.exe" --out "$TMP/emb.exe" --master "$MASTER" 2>&1)
-echo "$OUT" | grep -q "已内嵌密钥" || fail "已嵌入的 stub 未被识别"
-ok "已嵌入 stub 被正确识别"
+echo "$OUT" | grep -q "没有密钥状态标记" && fail "本项目的 client 被误判为陌生 stub"
+ok "本项目 client 被正确识别"
 
 # 非本项目的 exe 必须提示无标记
 printf 'NOT_A_CLIENT' > "$TMP/fake.exe"

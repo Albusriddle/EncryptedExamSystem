@@ -79,9 +79,7 @@ fn main() -> Result<()> {
 fn print_result(unlocked: &Unlocked) {
     println!("✔ 解锁成功");
     println!("  学号: {}", unlocked.student_id);
-    if !unlocked.embedded {
-        println!("  模式: 开发（密钥由命令行提供，未嵌入）");
-    }
+    println!("  模式: {}", unlocked.key_source.describe());
     println!("  场次: {}", unlocked.session_id);
     println!("  时间窗: {} ~ {}", unlocked.start, unlocked.end);
     if let Some(t) = &unlocked.net {

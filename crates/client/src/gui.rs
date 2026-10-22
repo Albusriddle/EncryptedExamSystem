@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::workflow::{self, UnlockOpts, Unlocked};
+use crate::workflow::{self, KeySource, UnlockOpts, Unlocked};
 
 /// 界面阶段。
 enum Stage {
@@ -39,6 +39,8 @@ enum Stage {
 pub struct ExamApp {
     stage: Stage,
     opts: UnlockOpts,
+    /// 启动时预判的密钥来源，决定是否显示"开发模式"横幅。
+    key_hint: KeySource,
     /// 是否需要在下一帧把焦点交给学号输入框。
     ///
     /// 只在**首次启动**与**从错误返回 Idle** 时置 `true`。
@@ -52,12 +54,14 @@ impl ExamApp {
         // 中文字体：egui 默认字体不含 CJK，必须手动加载系统字体，
         // 否则界面上所有中文都是"□"。
         install_cjk_font(&cc.egui_ctx);
+        let key_hint = workflow::peek_key_source(&opts);
         Self {
             stage: Stage::Idle {
                 input: String::new(),
                 error: None,
             },
             opts,
+            key_hint,
             focus_pending: true,
         }
     }
@@ -123,10 +127,12 @@ impl eframe::App for ExamApp {
             ui.horizontal(|ui| {
                 ui.heading("保密考试系统");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !crate::keys::is_embedded() {
+                    // 只有在"需要学生自己出密钥"时才提示开发模式；
+                    // 包内嵌/编译期内嵌都是正式分发形态，不该吓学生。
+                    if matches!(self.key_hint, KeySource::Master) {
                         ui.colored_label(
                             egui::Color32::from_rgb(200, 120, 0),
-                            "开发模式（未嵌入密钥）",
+                            "开发模式（需要密钥文件）",
                         );
                     }
                 });
