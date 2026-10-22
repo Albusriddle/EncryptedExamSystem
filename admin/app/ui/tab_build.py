@@ -41,6 +41,82 @@ from app.core.banks_io import write_temp_banks
 from app.core.state import ProjectState
 
 
+def is_frozen() -> bool:
+    """是否运行在 PyInstaller 打包后的环境里。"""
+    return bool(getattr(sys, "frozen", False))
+
+
+def program_dir() -> Path:
+    """程序所在目录。
+
+    冻结后是 ExamAdmin.exe 所在目录；源码运行时是仓库根。
+    """
+    return Path(sys.executable).parent if is_frozen() else Path(__file__).resolve().parents[3]
+
+
+def default_stub() -> Path:
+    """学生端模板（stub）的默认位置。
+
+    冻结后**必须**看程序目录：发布包里 stub-template.exe 就放在
+    ExamAdmin.exe 旁边。早期实现一律按源码目录结构去找
+    （`__file__` 的 parents[3] + target/release），冻结后路径变成
+    `.../ExamAdmin/target/release/exam-client.exe` —— 根本不存在，
+    教师点「开始打包」只会看到"找不到 stub"。
+    """
+    name = "exam-client.exe" if os.name == "nt" else "exam-client"
+    if is_frozen():
+        d = program_dir()
+        for cand in (
+            d / f"stub-template{'.exe' if os.name == 'nt' else ''}",
+            d / "_internal" / name,
+        ):
+            if cand.is_file():
+                return cand
+        # 都不在：返回"应该放的位置"，让报错信息有指导意义
+        return d / f"stub-template{'.exe' if os.name == 'nt' else ''}"
+    return builder_exe_root() / name
+
+
+def _writable(d: Path) -> bool:
+    """真正写一次来判断目录可写。
+
+    不能用 `os.access`：它在 Windows 上对 ACL 的判断不可靠，
+    而企业环境里桌面常被 OneDrive 重定向、权限也随之变化。
+    """
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / ".exam_write_probe"
+        probe.write_bytes(b"")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def default_out() -> Path:
+    """打包输出位置的默认值：**第一个真正可写**的用户目录。
+
+    硬编码桌面会踩坑：实测某些环境桌面被 OneDrive 接管，写入报
+    「拒绝访问 (os error 5)」，教师点打包只看到一句错误。
+    这里按"文档 → 桌面 → 用户目录 → 程序目录"顺序探测，
+    都不可写才退回当前工作目录。
+    """
+    if not is_frozen():
+        return Path(__file__).resolve().parents[3] / "dist" / "StudentClient.exe"
+
+    home = Path.home()
+    for d in (
+        home / "Documents",
+        home / "Desktop",
+        home / "OneDrive" / "Desktop",
+        home,
+        program_dir(),
+    ):
+        if d.is_dir() and _writable(d):
+            return d / "StudentClient.exe"
+    return Path.cwd() / "StudentClient.exe"
+
+
 def builder_exe_root() -> Path:
     """返回 client 产物所在目录（与 builder_exe 的搜索规则一致）。"""
     name = "exam-client.exe" if os.name == "nt" else "exam-client"
@@ -227,6 +303,11 @@ class BuildTab(QWidget):
 
         lay.addWidget(box)
 
+        # 启动自愈：字段里的路径若不存在、而默认位置有货，自动换过去。
+        # 这样即使界面上的默认值因为环境变化（如换了机器/目录）失效，
+        # 教师也不必自己去翻 stub-template.exe。
+        self._autofix_paths()
+
         self.preview = QLabel()
         self.preview.setWordWrap(True)
         lay.addWidget(self.preview)
@@ -253,15 +334,24 @@ class BuildTab(QWidget):
         self.log_view.setPlaceholderText("打包日志会显示在这里")
         lay.addWidget(self.log_view, 1)
 
+    def _autofix_paths(self) -> None:
+        """把不存在的默认路径纠正到实际可用的位置。"""
+        stub_field = self.edit_stub.text().strip()
+        if stub_field and not Path(stub_field).is_file():
+            cand = default_stub()
+            if cand.is_file():
+                self.edit_stub.setText(str(cand))
+        out_field = self.edit_out.text().strip()
+        if not out_field:
+            self.edit_out.setText(str(default_out()))
+
     # ---------------------------------------------------------------- 默认值
 
     def _default_stub(self) -> str:
-        name = "exam-client.exe" if os.name == "nt" else "exam-client"
-        return str(builder_exe_root() / name)
+        return str(default_stub())
 
     def _default_out(self) -> Path:
-        root = Path(__file__).resolve().parents[3]
-        return root / "dist" / "StudentClient.exe"
+        return default_out()
 
     # ---------------------------------------------------------------- 交互
 
@@ -345,7 +435,17 @@ class BuildTab(QWidget):
 
         stub = Path(self.edit_stub.text())
         if not stub.exists():
-            QMessageBox.critical(self, "找不到 stub", str(stub))
+            near = default_stub()
+            hint = (
+                f"\n\n发布包里的模板应该在：\n{near}"
+                if is_frozen()
+                else "\n\n源码运行时需要先 cargo build --release -p client"
+            )
+            QMessageBox.critical(
+                self,
+                "找不到学生端模板",
+                f"{stub}\n\n这个文件不存在。{hint}\n\n可以点右侧「选择…」指定 stub-template.exe。",
+            )
             return
 
         out = Path(self.edit_out.text())

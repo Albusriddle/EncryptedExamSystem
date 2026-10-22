@@ -230,3 +230,114 @@ def test_find_artifact_missing_returns_none(tmp_path: Path) -> None:
 
     (tmp_path / "target").mkdir()
     assert find_artifact("exam-builder.exe", root=tmp_path) is None
+
+
+# ---------------------------------------------------------------- 冻结环境路径
+
+
+def test_default_stub_uses_program_dir_when_frozen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """打包后必须去 ExamAdmin.exe 旁边找 stub-template.exe。
+
+    用户实测：旧实现按源码目录结构拼出
+    .../ExamAdmin/target/release/exam-client.exe，点打包直接报"找不到 stub"。
+    """
+    import sys
+
+    from app.ui import tab_build
+
+    exe_dir = tmp_path / "ExamAdmin"
+    exe_dir.mkdir()
+    stub = exe_dir / "stub-template.exe"
+    stub.write_bytes(b"x")
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "ExamAdmin.exe"))
+
+    assert tab_build.default_stub() == stub
+
+
+def test_default_stub_frozen_missing_returns_expected_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """stub 不存在时，返回"应该放的位置"，便于报错里给出指引。"""
+    import sys
+
+    from app.ui import tab_build
+
+    exe_dir = tmp_path / "ExamAdmin"
+    exe_dir.mkdir()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "ExamAdmin.exe"))
+
+    got = tab_build.default_stub()
+    assert got.parent == exe_dir
+    assert got.name.startswith("stub-template")
+
+
+def test_default_out_when_frozen_is_writable_user_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """输出不能落在程序目录（可能在 Program Files）。"""
+    import sys
+
+    from app.ui import tab_build
+
+    home = tmp_path / "home"
+    desktop = home / "Desktop"
+    desktop.mkdir(parents=True)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "ExamAdmin" / "ExamAdmin.exe"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    out = tab_build.default_out()
+    assert out.parent == desktop
+    assert out.name.endswith(".exe")
+
+
+def test_default_paths_not_frozen_use_repo_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """源码运行时仍指向仓库的 target/release 与 dist。"""
+    import sys
+
+    from app.ui import tab_build
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    assert "target" in str(tab_build.default_stub())
+    assert tab_build.default_out().name == "StudentClient.exe"
+
+
+def test_default_out_skips_unwritable_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认输出目录必须真的可写。
+
+    硬编码桌面踩过坑：某些环境桌面被 OneDrive 接管，
+    打包报「拒绝访问 (os error 5)」。
+    """
+    import sys
+
+    from app.ui import tab_build
+
+    home = tmp_path / "home"
+    docs = home / "Documents"
+    docs.mkdir(parents=True)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "app" / "ExamAdmin.exe"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    out = tab_build.default_out()
+    assert tab_build._writable(out.parent), "默认输出目录必须可写"
+
+
+def test_writable_detects_readonly_dir(tmp_path: Path) -> None:
+    from app.ui.tab_build import _writable
+
+    ok = tmp_path / "ok"
+    ok.mkdir()
+    assert _writable(ok) is True
+
+    # 指向一个"文件"当目录 → 必然不可写
+    not_dir = tmp_path / "file.txt"
+    not_dir.write_text("x", encoding="utf-8")
+    assert _writable(not_dir) is False
