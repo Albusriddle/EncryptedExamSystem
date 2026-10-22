@@ -6,10 +6,13 @@ on:
 
 # 打 tag 才出 Windows 包，节省私有仓库的 Actions 分钟。
 #
-# ⚠ 发布物只有 exam-builder.exe（管理端工具）。
-#   exam-client.exe 是**模板 stub**，没有内嵌 payload，学生单独拿到它无法使用；
-#   它由 builder 在打包时作为 --stub 传入，最终产物才是发给学生的自解压包。
-#   因此这里**不发布** client，避免误发。
+# 发布三种东西：
+#   1. ExamAdmin（管理端图形程序，文件夹形式）—— 教师直接用这个
+#   2. exam-builder.exe —— 命令行打包工具（进阶用户）
+#   3. stub-template.exe —— 学生端模板，随 ExamAdmin 一起提供
+#
+# ⚠ stub-template.exe 单独发给学生是**没有用**的：它没有内嵌 payload。
+#   必须先由 builder 把 payload（含密钥）打进去，产物才是学生的自解压包。
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -17,8 +20,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
       - name: 构建（GitHub runner 自带 VS，用 msvc 出正式版）
         run: cargo build --release --workspace --target x86_64-pc-windows-msvc
+
       - name: 冒烟测试（发布前必须通过）
         shell: bash
         run: |
@@ -27,6 +32,44 @@ jobs:
           MASTER=$("$BIN/exam-builder.exe" keygen 2>/dev/null)
           test ${#MASTER} -eq 64 || { echo "✗ keygen 输出长度错误"; exit 1; }
           echo "✓ builder 可运行"
+
+      - name: 端到端冒烟（学生端必须零配置可解锁）
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=target/x86_64-pc-windows-msvc/release
+          TMP=./_smoke
+          mkdir -p "$TMP"
+          MASTER=$("$BIN/exam-builder.exe" keygen 2>/dev/null)
+          NS=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
+          NE=$(date -u -d '1 hour'     +%Y-%m-%dT%H:%M:%SZ)
+          cat > "$TMP/m.json" <<JSON
+          {"version":2,"salt":"00112233445566778899aabbccddeeff",
+           "sessions":[{"session_id":1,"start":"$NS","end":"$NE",
+           "students":[2021001],"exams":[{"file":"demo/math.json","pick":2}]}]}
+          JSON
+          export EXAM_MASTER="$MASTER"
+          "$BIN/exam-builder.exe" build --manifest "$TMP/m.json" --banks banks/ \
+            --stub "$BIN/exam-client.exe" --out "$TMP/S.exe"
+          # 关键：不带任何密钥参数，模拟学生双击
+          "$TMP/S.exe" --student 2021001 --package "$TMP/S.exe" | grep -q "解锁成功" \
+            || { echo "✗ 学生端无法零配置解锁（发布物不可用）"; exit 1; }
+          echo "✓ 学生端零配置可解锁"
+          rm -rf "$TMP"
+
+      - name: 安装 Python 与 PySide6
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install PySide6 pyinstaller
+
+      - name: 打包管理端（文件夹形式）
+        shell: bash
+        run: |
+          set -euo pipefail
+          python admin/packaging/build_exe.py
+
       - name: 收集产物
         shell: bash
         run: |
@@ -34,20 +77,34 @@ jobs:
           mkdir -p release
           cp target/x86_64-pc-windows-msvc/release/exam-builder.exe release/
           cp target/x86_64-pc-windows-msvc/release/exam-client.exe release/stub-template.exe
+          # 管理端：连同 _internal 一起压缩，教师解压即可用
+          cd dist && 7z a -tzip ../release/ExamAdmin-windows.zip ExamAdmin > /dev/null
+          cd ..
           ls -la release/
+
       - uses: actions/upload-artifact@v4
         with:
           name: exam-tools-windows
           path: release/
+
       - name: 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*.exe
+          files: |
+            release/ExamAdmin-windows.zip
+            release/exam-builder.exe
+            release/stub-template.exe
           body: |
             ## 保密考试系统 ${{ github.ref_name }}
 
-            - `exam-builder.exe` —— 管理端打包工具
-            - `stub-template.exe` —— 学生端模板（**不能直接发给学生**，
-              需由 builder 通过 `--stub` 打入 payload 后才可使用）
+            ### 教师用这个
+            - **`ExamAdmin-windows.zip`** —— 管理端图形程序。
+              解压后双击 `ExamAdmin\ExamAdmin.exe` 即可配题、打包。
+              使用步骤见包内 `使用说明.md`。
 
-            使用方式见仓库 README。
+            ### 进阶
+            - `exam-builder.exe` —— 命令行打包工具，供脚本化使用。
+            - `stub-template.exe` —— 学生端模板（**不能直接发给学生**，
+              需由 builder 通过 `--stub` 打入 payload 后才可使用）。
+
+            学生端产物由教师打包时生成，学生双击 exe 输入学号即可，无需任何密钥文件。

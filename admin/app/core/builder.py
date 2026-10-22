@@ -17,6 +17,10 @@ class BuildResult:
     ok: bool
     output: str
     package: Path | None = None
+    #: 若请求了 --emit-keyfile，这里是写出的 K_manifest 文件路径
+    keyfile: Path | None = None
+    #: 包内是否内嵌了密钥（决定学生能否零配置使用）
+    embedded: bool = False
 
 
 class BuilderError(RuntimeError):
@@ -31,8 +35,17 @@ def build_package(
     out_exe: Path,
     master_hex: str,
     timeout: int = 300,
+    *,
+    emit_keyfile: Path | None = None,
+    embed_key: bool = True,
 ) -> BuildResult:
-    """调用 exam-builder 生成学生端自解压包。"""
+    """调用 exam-builder 生成学生端自解压包。
+
+    参数与 CLI 的 `exam-builder build` 一一对应，避免"UI 能做的脚本做不了"：
+
+    - `emit_keyfile`：额外导出 K_manifest（可选，用于自行编译内嵌版 client）；
+    - `embed_key`：是否把密钥写进包（默认 True，学生零配置）。
+    """
     if not builder_exe.exists():
         raise BuilderError(f"找不到 builder: {builder_exe}")
     if not stub_exe.exists():
@@ -53,6 +66,11 @@ def build_package(
         "--out",
         str(out_exe),
     ]
+    if emit_keyfile is not None:
+        cmd += ["--emit-keyfile", str(emit_keyfile)]
+    if not embed_key:
+        cmd += ["--no-embed-key"]
+
     # 必须显式指定 UTF-8：Rust 端输出中文，而 Windows 上 `text=True`
     # 默认用系统 locale（cp936/GBK）解码，遇到 UTF-8 中文会抛
     # UnicodeDecodeError 或产生乱码。errors="replace" 保证即使有异常字节
@@ -67,8 +85,12 @@ def build_package(
         env=env,
     )
     ok = proc.returncode == 0
+    combined = (proc.stdout + proc.stderr).strip()
     return BuildResult(
         ok=ok,
-        output=(proc.stdout + proc.stderr).strip(),
+        output=combined,
         package=out_exe if ok else None,
+        keyfile=emit_keyfile if (ok and emit_keyfile is not None) else None,
+        # 从输出里判断，而不是想当然：以实际行为为准
+        embedded=ok and "已内嵌密钥" in combined,
     )
