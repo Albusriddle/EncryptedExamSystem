@@ -184,3 +184,49 @@ def test_temp_banks_have_no_answers(tmp_path: Path) -> None:
 
     # 源对象不能被就地改动（必须 deep copy）
     assert bank.questions[0].answer == "B"
+
+
+# ---------------------------------------------------------------- 产物定位
+
+
+def _touch(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x")
+    return path
+
+
+def test_find_artifact_local_layout(tmp_path: Path) -> None:
+    """本机 `cargo build --release` 的布局。"""
+    from buildtools.build_exe import find_artifact
+
+    want = _touch(tmp_path / "target" / "release" / "exam-builder.exe")
+    assert find_artifact("exam-builder.exe", root=tmp_path) == want
+
+
+def test_find_artifact_ci_layout(tmp_path: Path) -> None:
+    """CI `cargo build --release --target <triple>` 的布局。
+
+    这是 release 工作流真实使用的布局。旧实现只认 target/release，
+    在全新 checkout（无旧残留）下必然找不到而失败。
+    """
+    from buildtools.build_exe import find_artifact
+
+    want = _touch(tmp_path / "target" / "x86_64-pc-windows-msvc" / "release" / "exam-builder.exe")
+    (tmp_path / "target" / "release").mkdir(parents=True, exist_ok=True)
+    assert find_artifact("exam-builder.exe", root=tmp_path) == want
+
+
+def test_find_artifact_prefers_local(tmp_path: Path) -> None:
+    """两者都在时优先 target/release（本机开发时的常见情形）。"""
+    from buildtools.build_exe import find_artifact
+
+    local = _touch(tmp_path / "target" / "release" / "exam-builder.exe")
+    _touch(tmp_path / "target" / "x86_64-pc-windows-msvc" / "release" / "exam-builder.exe")
+    assert find_artifact("exam-builder.exe", root=tmp_path) == local
+
+
+def test_find_artifact_missing_returns_none(tmp_path: Path) -> None:
+    from buildtools.build_exe import find_artifact
+
+    (tmp_path / "target").mkdir()
+    assert find_artifact("exam-builder.exe", root=tmp_path) is None

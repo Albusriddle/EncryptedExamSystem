@@ -43,6 +43,27 @@ jobs:
           uv run ruff check .
           uv run pytest -q
 
+  # 发布预检：复现 release.yml 的关键假设。
+  #
+  # 为什么需要单独一个 job：release 曾经有三处只有真实发布环境才暴露的问题
+  # （产物在 target/<triple>/release、onefile 需要可写 TEMP、脚本输出编码）。
+  # 这里用 --target 构建，专门覆盖"CI 布局与产物定位"这一段，
+  # 让回归在 PR 阶段就被发现，而不是打 tag 之后。
+  release-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 安装 Linux GUI 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - name: 按 release 的方式构建（带 --target）
+        run: cargo build --release --workspace --target x86_64-unknown-linux-gnu
+      - name: 发布预检
+        run: bash scripts/preflight-release.sh
+
   # 端到端：真的打一个包再用学生端解开，防止"单元测试全绿但装不起来"。
   e2e:
     runs-on: ubuntu-latest

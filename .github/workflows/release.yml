@@ -68,7 +68,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python admin/packaging/build_exe.py
+          python admin/buildtools/build_exe.py
 
       - name: 压缩管理端（连同 _internal，教师解压即可用）
         shell: pwsh

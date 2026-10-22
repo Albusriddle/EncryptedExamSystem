@@ -7,7 +7,7 @@
 3. 产出后要自检：启动一次，确认 --version 正常。
 
 用法：
-    uv run python packaging/build_exe.py
+    uv run python buildtools/build_exe.py
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ EXE = ".exe" if os.name == "nt" else ""
 DIST = ROOT / "dist"
 
 
-def find_artifact(name: str) -> Path | None:
+def find_artifact(name: str, root: Path | None = None) -> Path | None:
     """在 target 下找 cargo 产物。
 
     cargo 产物位置取决于是否指定了 `--target`：
@@ -42,11 +42,12 @@ def find_artifact(name: str) -> Path | None:
     GitHub Actions 的 release 工作流用的是后者。若只认前者，
     CI 发布会因"找不到 exam-builder"直接失败。这里按优先级搜索。
     """
+    base = root if root is not None else ROOT
     candidates = [
-        ROOT / "target" / "release" / name,  # 本机默认构建
-        ROOT / "target" / "x86_64-pc-windows-msvc" / "release" / name,
+        base / "target" / "release" / name,  # 本机默认构建
+        base / "target" / "x86_64-pc-windows-msvc" / "release" / name,
     ]
-    for d in sorted((ROOT / "target").glob("*/release")):
+    for d in sorted((base / "target").glob("*/release")):
         candidates.append(d / name)
     for c in candidates:
         if c.is_file():
