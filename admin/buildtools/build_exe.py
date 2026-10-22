@@ -125,6 +125,28 @@ def main() -> int:
     size = out.stat().st_size
     print(f"✓ 已生成 {out}（{size / 1024 / 1024:.1f} MB）")
 
+    # 构建后自检：跑一次 --selftest，确认打的包里依赖齐全。
+    # 没有这一步的话，"PyInstaller 成功但 exe 一启动就崩"要等到
+    # 用户下载后才发现（本轮 CI 真实踩到：漏装 pydantic）。
+    try:
+        chk = subprocess.run(
+            [str(out), "--selftest"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"✗ 自检无法运行：{e}")
+        return 1
+    if chk.returncode != 0:
+        print("✗ 自检失败：打出来的程序无法启动，缺少依赖？")
+        print((chk.stdout or "")[-800:])
+        print((chk.stderr or "")[-800:])
+        return 1
+    print("✓ 自检通过（--selftest 成功）")
+
     # 学生端模板与手册放进同一目录：教师只需拷贝这一个文件夹
     rel = out.parent
     src = find_artifact(f"exam-client{EXE}")

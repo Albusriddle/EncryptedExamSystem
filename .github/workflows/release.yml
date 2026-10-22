@@ -68,7 +68,9 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install PySide6 pyinstaller
+          # 必须装管理端自己的依赖（pydantic）。只装 PySide6 的话，
+          # PyInstaller 不会报错，但打出的 exe 一启动就 ModuleNotFoundError。
+          pip install -e "./admin[gui]" pyinstaller
 
       - name: 打包管理端（文件夹形式）
         shell: bash
