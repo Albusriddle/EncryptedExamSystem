@@ -5,6 +5,11 @@ on:
     tags: ["v*"]
 
 # 打 tag 才出 Windows 包，节省私有仓库的 Actions 分钟。
+#
+# ⚠ 发布物只有 exam-builder.exe（管理端工具）。
+#   exam-client.exe 是**模板 stub**，没有内嵌 payload，学生单独拿到它无法使用；
+#   它由 builder 在打包时作为 --stub 传入，最终产物才是发给学生的自解压包。
+#   因此这里**不发布** client，避免误发。
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -12,13 +17,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: build（release 用 msvc，GitHub runner 自带 VS）
+      - name: 构建（GitHub runner 自带 VS，用 msvc 出正式版）
         run: cargo build --release --workspace --target x86_64-pc-windows-msvc
-      - name: 打包产物
+      - name: 冒烟测试（发布前必须通过）
+        shell: bash
         run: |
-          mkdir release
-          copy target\x86_64-pc-windows-msvc\release\exam-builder.exe release\
-          copy target\x86_64-pc-windows-msvc\release\exam-client.exe release\
+          set -euo pipefail
+          BIN=target/x86_64-pc-windows-msvc/release
+          MASTER=$("$BIN/exam-builder.exe" keygen 2>/dev/null)
+          test ${#MASTER} -eq 64 || { echo "✗ keygen 输出长度错误"; exit 1; }
+          echo "✓ builder 可运行"
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp target/x86_64-pc-windows-msvc/release/exam-builder.exe release/
+          cp target/x86_64-pc-windows-msvc/release/exam-client.exe release/stub-template.exe
+          ls -la release/
       - uses: actions/upload-artifact@v4
         with:
           name: exam-tools-windows
@@ -27,3 +43,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release/*.exe
+          body: |
+            ## 保密考试系统 ${{ github.ref_name }}
+
+            - `exam-builder.exe` —— 管理端打包工具
+            - `stub-template.exe` —— 学生端模板（**不能直接发给学生**，
+              需由 builder 通过 `--stub` 打入 payload 后才可使用）
+
+            使用方式见仓库 README。

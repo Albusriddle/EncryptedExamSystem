@@ -229,7 +229,13 @@ fn verify(package: PathBuf, master_hex: &str) -> Result<()> {
     );
     println!("  场次: {}", header.sessions.len());
 
+    // ⚠ 以下信息属于**管理员视图**：只有持有 master 才能看到。
+    // 这恰恰说明了 master 的敏感级别——一旦 master 泄漏，
+    // 攻击者就能得到全部场次时间与每场人数（虽然仍拿不到学号）。
+    // 因此 master 必须与考试包分开保管，绝不能随包分发。
+    let mut total_env = 0usize;
     for s in &header.sessions {
+        total_env += s.envelopes.len();
         println!(
             "    #{} {} ~ {}  信封 {} 个",
             s.session_id,
@@ -237,8 +243,6 @@ fn verify(package: PathBuf, master_hex: &str) -> Result<()> {
             s.end,
             s.envelopes.len()
         );
-        // 用第一个信封对应的学号无法直接得知（这正是设计目标），
-        // 因此这里只能校验数据结构完整性，不能解出内容。
         let off = s.data_off as usize;
         let len = s.data_len as usize;
         anyhow::ensure!(
@@ -249,9 +253,8 @@ fn verify(package: PathBuf, master_hex: &str) -> Result<()> {
         );
     }
 
-    // 泄露自检：包里不应出现任何可识别为学号的十进制串。
-    // 这里只做启发式提示，真正断言在单元测试里。
-    println!("\n⚠ 提示：verify 无法验证信封内容（设计如此——包里没有学号明文）。");
-    println!("   完整校验请用真实学号运行学生端，或跑 cargo test。");
+    println!("\n⚠ 以上为管理员视图：场次时间与人数只有持 master 者可读。");
+    println!("   包里不含学号明文，信封内容无法在不猜中学号的情况下解开。");
+    println!("   总信封数 {total_env} 个（= 各场考生数之和）。");
     Ok(())
 }
