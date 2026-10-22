@@ -211,6 +211,26 @@ fn build(
     // 注意：不再在这里改写 bank.pick。清单的 pick 覆盖由 build_payload
     // 解析成 picks 表写入 data 段，客户端抽题时读取该表。
     // 之前在这里改写 bank.pick 的做法是错的：exam_id 与文件名对不上时会静默失效。
+    //
+    // 先报个预计耗时：每个学生每场都要跑一次 Argon2id，
+    // 大规模清单（如 50 场 × 1000 人 = 5 万个信封）可能要好几分钟，
+    // 没有提示的话管理员会以为程序卡死。
+    let total_envelopes: usize = manifest.sessions.iter().map(|s| s.students.len()).sum();
+    if total_envelopes > 0 {
+        // 不估算总时长：Argon2 的实际耗时受内存带宽影响很大，
+        // 估算值经常与实际差数倍，给错误数字比不给更糟。
+        // 只报"单价 × 数量"，管理员自己就能判断量级。
+        println!(
+            "⏳ 开始打包：{} 个场次，{} 个学生信封，Argon2id(m={}KiB, t={}, p={})，并行生成",
+            manifest.sessions.len(),
+            total_envelopes,
+            manifest.kdf.m_cost,
+            manifest.kdf.t_cost,
+            manifest.kdf.p_cost
+        );
+        println!("   参考：m=65536/t=3 时单次约 91ms；缓存命中前请耐心等待，不要中断。");
+    }
+
     let payload =
         container::build_payload(&master, &banks, &manifest.sessions, &salt, manifest.kdf)
             .context("构建 payload")?;

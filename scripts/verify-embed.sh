@@ -12,6 +12,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 BIN="$ROOT/target/release"
+# 可执行文件后缀：Windows 是 .exe，Linux/macOS 为空。
+# 早期版本硬编码 .exe，在 GitHub Actions（ubuntu）上直接找不到二进制。
+if [ -f "$BIN/exam-builder.exe" ]; then EXE=".exe"; else EXE=""; fi
+
+BUILDER="$BIN/exam-builder$EXE"
+CLIENT="$BIN/exam-client$EXE"
+[ -x "$BUILDER" ] || { echo "  ✗ 找不到 $BUILDER，请先 cargo build --release"; exit 1; }
 # 注意：不要用 /tmp —— 本项目的 Windows 环境下 /tmp 写入会失败。
 TMP="$ROOT/.verify-tmp"
 rm -rf "$TMP"; mkdir -p "$TMP"
@@ -23,7 +30,7 @@ ok()   { echo "  ✓ $1"; }
 echo "== 构建 =="
 cargo build --release -p client -p builder 2>&1 | grep -E "warning: client@|Finished" || true
 
-MASTER="$("$BIN/exam-builder.exe" keygen 2>/dev/null)"
+MASTER="$("$BUILDER" keygen 2>/dev/null)"
 [ "${#MASTER}" -eq 64 ] || fail "keygen 输出长度不是 64"
 
 # 动态时间窗：写死日期会在日期过后永久失败
@@ -44,8 +51,8 @@ JSON
 
 echo
 echo "== 路径 1：未嵌入（开发模式）=="
-"$BIN/exam-builder.exe" build --manifest "$TMP/live.json" --banks banks/ \
-  --stub "$BIN/exam-client.exe" --out "$TMP/dev.exe" --master "$MASTER" >/dev/null 2>&1
+"$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
+  --stub "$CLIENT" --out "$TMP/dev.exe" --master "$MASTER" >/dev/null 2>&1
 
 if "$TMP/dev.exe" --student 2021001 --package "$TMP/dev.exe" >/dev/null 2>&1; then
   fail "未嵌入时竟然不需要 master"
@@ -58,8 +65,8 @@ ok "带 master 可解锁"
 
 echo
 echo "== 路径 2：已嵌入（发布模式）=="
-"$BIN/exam-builder.exe" build --manifest "$TMP/live.json" --banks banks/ \
-  --stub "$BIN/exam-client.exe" --out "$TMP/ignored.exe" --master "$MASTER" \
+"$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
+  --stub "$CLIENT" --out "$TMP/ignored.exe" --master "$MASTER" \
   --emit-keyfile "$TMP/kf.txt" >/dev/null 2>&1
 [ "$(wc -c < "$TMP/kf.txt")" -eq 64 ] || fail "keyfile 长度不是 64"
 
@@ -67,8 +74,8 @@ EXAM_KEYFILE="$TMP/kf.txt" cargo build --release -p client 2>&1 \
   | grep -q "已嵌入 K_manifest" || fail "build.rs 未识别 EXAM_KEYFILE"
 ok "build.rs 已嵌入密钥"
 
-cp "$BIN/exam-client.exe" "$TMP/stub_emb.exe"
-"$BIN/exam-builder.exe" build --manifest "$TMP/live.json" --banks banks/ \
+cp "$CLIENT" "$TMP/stub_emb.exe"
+"$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
   --stub "$TMP/stub_emb.exe" --out "$TMP/student.exe" --master "$MASTER" >/dev/null 2>&1
 
 "$TMP/student.exe" --student 2021001 --package "$TMP/student.exe" \
@@ -114,20 +121,20 @@ echo
 echo "== stub 状态检测（防止误发未嵌入的包）=="
 # 未嵌入的 stub 打包时必须警告
 cargo build --release -p client >/dev/null 2>&1
-OUT=$("$BIN/exam-builder.exe" build --manifest "$TMP/live.json" --banks banks/ \
-      --stub "$BIN/exam-client.exe" --out "$TMP/plain.exe" --master "$MASTER" 2>&1)
+OUT=$("$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
+      --stub "$CLIENT" --out "$TMP/plain.exe" --master "$MASTER" 2>&1)
 echo "$OUT" | grep -q "未内嵌密钥" || fail "未嵌入的 stub 未被警告"
 ok "未嵌入 stub 被正确警告"
 
 # 已嵌入的 stub 打包时必须确认
-OUT=$("$BIN/exam-builder.exe" build --manifest "$TMP/live.json" --banks banks/ \
+OUT=$("$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
       --stub "$TMP/stub_emb.exe" --out "$TMP/emb.exe" --master "$MASTER" 2>&1)
 echo "$OUT" | grep -q "已内嵌密钥" || fail "已嵌入的 stub 未被识别"
 ok "已嵌入 stub 被正确识别"
 
 # 非本项目的 exe 必须提示无标记
 printf 'NOT_A_CLIENT' > "$TMP/fake.exe"
-OUT=$("$BIN/exam-builder.exe" build --manifest "$TMP/live.json" --banks banks/ \
+OUT=$("$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
       --stub "$TMP/fake.exe" --out "$TMP/fake_out.exe" --master "$MASTER" 2>&1)
 echo "$OUT" | grep -q "没有密钥状态标记" || fail "非本项目 exe 未被识别"
 ok "非本项目 exe 被正确识别"
