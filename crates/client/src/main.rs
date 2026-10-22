@@ -14,6 +14,7 @@
 
 mod gui;
 mod keys;
+mod welcome;
 mod workflow;
 
 use anyhow::Result;

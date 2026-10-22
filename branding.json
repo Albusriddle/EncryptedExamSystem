@@ -1,0 +1,28 @@
+{
+  "product": "保密考试系统",
+  "product_en": "EncryptedExamSystem",
+  "abbr": "EES",
+  "repo_url": "https://github.com/Albusriddle/EncryptedExamSystem",
+  "license": "Apache-2.0",
+  "license_name": "Apache License 2.0",
+  "tagline": "加密题库随包分发，学生凭学号与网络时间门禁解锁个人试卷；完全离线，无需服务器。",
+  "credits_title": "致谢",
+  "credits": [
+    {
+      "role": "创始人",
+      "name": "AlbusRiddle",
+      "url": "https://github.com/Albusriddle"
+    },
+    {
+      "role": "部分创意支持",
+      "name": "Stone",
+      "url": "https://github.com/stone6060"
+    },
+    {
+      "role": "精神支持",
+      "name": "湖南大学 Robot 工作坊",
+      "url": "https://github.com/RobotWorkShop-BigHeroX"
+    }
+  ],
+  "star_hint": "如果这个项目对你有帮助，欢迎在 GitHub 点一个 ⭐ Star。"
+}

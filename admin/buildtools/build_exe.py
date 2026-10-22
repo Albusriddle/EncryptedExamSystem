@@ -110,6 +110,9 @@ def main() -> int:
         # 否则冻结后 app_version() 只能返回 0.0.0。
         "--add-data",
         f"{ROOT / 'VERSION'}{sep}.",
+        # 品牌信息：欢迎弹窗的仓库地址/许可证/致谢都从这里读
+        "--add-data",
+        f"{ROOT / 'branding.json'}{sep}.",
         # 让 PyInstaller 能找到 app 包
         "--paths",
         str(ADMIN),

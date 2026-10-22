@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::welcome::Welcome;
 use crate::workflow::{self, KeySource, UnlockOpts, Unlocked};
 
 /// 界面阶段。
@@ -43,6 +44,8 @@ pub struct ExamApp {
     key_hint: KeySource,
     /// 顶部水印文本，构造时算一次即可。
     watermark: String,
+    /// 启动欢迎弹窗（含"不再提示"）
+    welcome: Welcome,
     /// 是否需要在下一帧把焦点交给学号输入框。
     ///
     /// 只在**首次启动**与**从错误返回 Idle** 时置 `true`。
@@ -65,6 +68,7 @@ impl ExamApp {
             opts,
             key_hint,
             watermark: common::watermark(),
+            welcome: Welcome::new(),
             focus_pending: true,
         }
     }
@@ -119,6 +123,11 @@ impl ExamApp {
 
 impl eframe::App for ExamApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 欢迎弹窗置顶绘制；关闭时把焦点还给学号输入框
+        if self.welcome.show(ctx) {
+            self.focus_pending = true;
+        }
+
         // 后台工作期间主动请求重绘，否则界面不刷新。
         if matches!(self.stage, Stage::Busy { .. }) {
             ctx.request_repaint_after(Duration::from_millis(50));

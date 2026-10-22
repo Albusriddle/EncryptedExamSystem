@@ -2,12 +2,14 @@
 //!
 //! 被 builder（打包端）和 client（学生端）共同依赖，保证两端算法完全一致。
 
+pub mod branding;
 pub mod container;
 pub mod crypto;
 pub mod model;
 pub mod picker;
 pub mod timegate;
 
+pub use branding::branding;
 pub use model::*;
 
 /// 版本号，编译期从仓库根的 `VERSION` 文件注入。
