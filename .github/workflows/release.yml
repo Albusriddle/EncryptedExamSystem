@@ -4,6 +4,12 @@ on:
   push:
     tags: ["v*"]
 
+# 必须显式申请 contents: write。
+# 2023 年后新建仓库的 GITHUB_TOKEN 默认只读，不声明的话
+# softprops/action-gh-release 会 403，Release 根本不会出现。
+permissions:
+  contents: write
+
 # 打 tag 才出 Windows 包，节省私有仓库的 Actions 分钟。
 #
 # 发布三种东西：

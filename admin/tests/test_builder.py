@@ -156,8 +156,8 @@ def test_temp_banks_have_no_answers(tmp_path: Path) -> None:
     """
     import json
 
+    from app.core.banks_io import write_temp_banks
     from app.core.models import ExamBank
-    from app.ui.tab_build import write_temp_banks
 
     bank = ExamBank.model_validate(
         {

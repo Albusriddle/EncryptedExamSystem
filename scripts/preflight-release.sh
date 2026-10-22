@@ -67,14 +67,19 @@ fi
 # ---------------------------------------------------------------- 2. 冒烟
 
 head_ "2. 冒烟测试"
-BUILDER=""
-for cand in "target/release/exam-builder$EXE" "target/$TRIPLE/release/exam-builder$EXE"; do
-  [ -f "$cand" ] && BUILDER="$cand" && break
-done
-CLIENT=""
-for cand in "target/release/exam-client$EXE" "target/$TRIPLE/release/exam-client$EXE"; do
-  [ -f "$cand" ] && CLIENT="$cand" && break
-done
+# 统一查找：任意 target 布局都要认（Linux CI 是 target/<linux-triple>/release）
+find_bin() {
+  local name="$1" cand
+  for cand in "target/release/$name" "target/$TRIPLE/release/$name"; do
+    [ -f "$cand" ] && { echo "$cand"; return 0; }
+  done
+  for cand in target/*/release/"$name"; do
+    [ -f "$cand" ] && { echo "$cand"; return 0; }
+  done
+  return 1
+}
+BUILDER="$(find_bin "exam-builder$EXE" || true)"
+CLIENT="$(find_bin "exam-client$EXE" || true)"
 
 if [ -n "$BUILDER" ]; then
   MASTER="$("$BUILDER" keygen 2>/dev/null)"

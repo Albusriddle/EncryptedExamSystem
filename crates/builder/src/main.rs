@@ -278,6 +278,20 @@ fn build(
     let sfx = container::append_payload_to_exe(&stub, &payload)?;
     std::fs::write(&out_path, &sfx).with_context(|| format!("写出 {}", out_path.display()))?;
 
+    // Unix 上必须补执行位：`fs::write` 新建的文件是 0644，
+    // 学生端包直接运行会得到 "Permission denied"（CI 实测退出码 126）。
+    // Windows 没有执行位概念，但也没坏处。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&out_path)
+            .with_context(|| format!("读取权限 {}", out_path.display()))?
+            .permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&out_path, perm)
+            .with_context(|| format!("设置执行位 {}", out_path.display()))?;
+    }
+
     let total_students: usize = manifest.sessions.iter().map(|s| s.students.len()).sum();
     println!("✔ 已生成 {}", out_path.display());
     println!("  payload 大小: {} 字节", payload.len());

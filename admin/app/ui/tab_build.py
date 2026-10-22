@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.banks_io import write_temp_banks
 from app.core.state import ProjectState
 
 
@@ -86,21 +87,6 @@ def builder_exe() -> Path:
         if (d / name).is_file():
             return d / name
     return root / "target" / "release" / name
-
-
-def write_temp_banks(banks: dict, tmpdir: Path) -> None:
-    """把题库写到临时目录（**剥掉 answer**）。
-
-    独立成纯函数是为了能脱离 Qt 测试——这段逻辑关系到"答案会不会
-    泄漏到磁盘"，必须有回归测试守着。
-    """
-    for exam_id, bank in banks.items():
-        stripped = bank.model_copy(deep=True)
-        for q in stripped.questions:
-            q.answer = None
-        (tmpdir / f"{exam_id}.json").write_text(
-            stripped.model_dump_json(by_alias=True), encoding="utf-8"
-        )
 
 
 class BuildWorker(QThread):
