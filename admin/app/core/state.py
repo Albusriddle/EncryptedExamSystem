@@ -79,6 +79,44 @@ class ProjectState:
     def next_session_id(self) -> int:
         return max((s.session_id for s in self.sessions), default=0) + 1
 
+    def new_draft_session(self) -> Session:
+        """构造一个"草稿场次"：尚未选科目，时间默认从现在起两小时。
+
+        草稿不做完整校验（否则教师在选科目之前就会一直报错），
+        真正能否打包由 validate() 与 Rust 端决定。
+        """
+        import datetime as _dt
+
+        from app.core.timeparse import local_to_rfc3339
+
+        now = _dt.datetime.now().replace(minute=0, second=0, microsecond=0)
+        start = now + _dt.timedelta(hours=1)
+        # 若已有场次，新场次默认接在**最后一个场次之后**。
+        # 否则连点两次「新建」会得到两个时间窗完全重叠的场次，
+        # 立刻触发"同一学生同时在两场"的警告，教师会以为程序出错了。
+        from app.core.timeparse import parse_rfc3339 as _parse
+
+        latest_end = 0
+        for x in self.sessions:
+            try:
+                latest_end = max(latest_end, _parse(x.end))
+            except ValueError:
+                continue
+        if latest_end:
+            import datetime as _d2
+
+            last = _d2.datetime.fromtimestamp(latest_end)
+            # 取整到小时，间隔 30 分钟
+            start = last.replace(minute=0, second=0, microsecond=0) + _d2.timedelta(hours=1)
+        end = start + _dt.timedelta(hours=2)
+        return Session(
+            session_id=self.next_session_id(),
+            start=local_to_rfc3339(start.strftime("%Y-%m-%d %H:%M")),
+            end=local_to_rfc3339(end.strftime("%Y-%m-%d %H:%M")),
+            students=list(self.students),
+            exams=[],
+        )
+
     # ---------------------------------------------------------------- 校验
 
     def build_manifest(self) -> Manifest:
@@ -117,6 +155,13 @@ class ProjectState:
                 for err in e.errors():
                     loc = ".".join(str(x) for x in err["loc"])
                     problems.append(f"场次 {s.session_id}: {loc}: {err['msg']}")
+
+        # 场次必须至少有一门科目、至少一名学生（与 Rust 端一致）
+        for s in self.sessions:
+            if not s.exams:
+                problems.append(f"场次 {s.session_id} 还没有选择任何考试科目")
+            if not s.students:
+                problems.append(f"场次 {s.session_id} 的学号名单为空")
 
         # 场次引用的题库必须存在（三层匹配，与 Rust 端一致）
         for s in self.sessions:

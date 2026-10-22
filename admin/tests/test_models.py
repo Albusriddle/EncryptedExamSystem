@@ -66,9 +66,9 @@ def test_session_time_order() -> None:
         _session(start="2026-12-20T12:00:00+08:00", end="2026-12-20T09:00:00+08:00")
 
 
-def test_session_no_exams() -> None:
-    with pytest.raises(ValueError, match="没有任何考试科目"):
-        _session(exams=[])
+def test_session_no_exams_is_draft_ok() -> None:
+    """空科目视为草稿（见 test_session_allows_empty_exams_as_draft）。"""
+    assert _session(exams=[]).exams == []
 
 
 def test_manifest_ok() -> None:

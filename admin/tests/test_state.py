@@ -187,3 +187,42 @@ def test_kdf_default_is_strong() -> None:
     k = KdfParams()
     assert k.m_cost >= 65536
     assert k.t_cost >= 3
+
+
+# ---------------------------------------------------------------- 草稿场次
+
+
+def test_new_draft_session_is_valid_draft() -> None:
+    """新建场次必须是"可用草稿"：有编号、时间窗合法、学生取全局名单。"""
+    st = ProjectState()
+    st.students = [2021001, 2021002]
+    s = st.new_draft_session()
+
+    assert s.session_id == 1
+    assert s.students == [2021001, 2021002]
+    assert s.exams == []  # 还没选科目
+    from app.core.timeparse import parse_rfc3339
+
+    assert parse_rfc3339(s.start) < parse_rfc3339(s.end), "默认时间窗必须合法"
+
+
+def test_new_draft_session_ids_increase() -> None:
+    st = ProjectState()
+    st.sessions = [st.new_draft_session()]
+    assert st.new_draft_session().session_id == 2
+
+
+def test_validate_reports_session_without_exams() -> None:
+    st = ProjectState()
+    st.add_bank(_bank())
+    st.students = [2021001]
+    st.sessions = [st.new_draft_session()]
+    problems = st.validate()
+    assert any("还没有选择任何考试科目" in p for p in problems)
+
+
+def test_validate_reports_empty_roster() -> None:
+    st = _state()
+    st.sessions[0].students = []
+    problems = st.validate()
+    assert any("学号名单为空" in p for p in problems)

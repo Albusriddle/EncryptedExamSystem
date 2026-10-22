@@ -80,8 +80,10 @@ class Session(BaseModel):
                 f"场次 {self.session_id} 的开始时间必须早于结束时间"
                 f"（当前 {self.start} >= {self.end}）"
             )
-        if not self.exams:
-            raise ValueError(f"场次 {self.session_id} 没有任何考试科目")
+        # 注意：这里**不校验** exams 是否为空。
+        # 教师在界面上点「新建」时本来就还没选科目，此时构造 Session
+        # 会抛 ValidationError，导致 Qt 槽函数静默失败（表现为"点了没反应"）。
+        # "必须有科目"由 ProjectState.validate() 提示、由 Rust 端打包时强制。
         return self
 
 

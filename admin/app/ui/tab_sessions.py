@@ -118,7 +118,12 @@ class SessionsTab(QWidget):
         self.state = state
         self._current: Session | None = None
         self._build_ui()
-        self.refresh()
+        # 必须建出科目勾选框：否则"打开工程"后（题库已存在）
+        # 这一栏会是空的，教师看不到任何可勾的科目。
+        self.refresh_choices()
+        # 表单预填一个合法草稿（时间=下一个整点起两小时），
+        # 但不加入 state、也不占用 _current：教师点保存时才真正创建。
+        self._load_into_form(self.state.new_draft_session(), set_current=False)
 
     # ---------------------------------------------------------------- 构建
 
@@ -291,7 +296,18 @@ class SessionsTab(QWidget):
         s = next((x for x in self.state.sessions if x.session_id == sid), None)
         if s is None:
             return
-        self._current = s
+        self._load_into_form(s)
+
+    def _load_into_form(self, s: Session, *, set_current: bool = True) -> None:
+        """把某个场次的字段填进右侧表单。
+
+        `refresh()` 里是 `blockSignals(True)` 设置选中项的，**不会**触发
+        `_on_select`；若只依赖信号，新建/加载工程后表单会停在 Qt 默认值
+        （2000-01-01），保存时报"开始时间必须早于结束时间"。
+        因此新建之后必须显式调用本方法。
+        """
+        if set_current:
+            self._current = s
         self.spin_id.setValue(s.session_id)
         try:
             self.dt_start.setDateTime(QDateTime.fromSecsSinceEpoch(parse_rfc3339(s.start)))
@@ -321,17 +337,11 @@ class SessionsTab(QWidget):
             self.edit_roster.setText(" ".join(str(x) for x in self.state.students))
 
     def new_session(self) -> None:
-        sid = self.state.next_session_id()
-        s = Session(
-            session_id=sid,
-            start="2026-12-20T09:00:00+08:00",
-            end="2026-12-20T11:00:00+08:00",
-            students=list(self.state.students),
-            exams=[],
-        )
+        s = self.state.new_draft_session()
         self.state.sessions.append(s)
-        self._current = s
         self.refresh()
+        # 必须显式填充：refresh 里的选中是 blockSignals 的，不会触发 _on_select
+        self._load_into_form(s)
         self.changed.emit()
 
     def delete_session(self) -> None:
@@ -346,9 +356,10 @@ class SessionsTab(QWidget):
         self.changed.emit()
 
     def save_session(self) -> None:
-        if self._current is None:
-            QMessageBox.information(self, "提示", "请先选中一个场次。")
-            return
+        # 没选中任何场次时，把表单内容当作"新建"保存——
+        # 旧实现直接拒绝（"请先选中一个场次"），但此时表单明明填好了，
+        # 教师会以为程序坏了。
+        creating = self._current is None
 
         # 学号
         if self.combo_roster.currentData() == "all":
@@ -390,8 +401,15 @@ class SessionsTab(QWidget):
             QMessageBox.critical(self, "编号冲突", f"场次编号 {s.session_id} 已被占用。")
             return
 
-        self.state.upsert_session(s)
-        self._current = s
+        if creating:
+            # 新建：编号可能已被占用，重新分配
+            if any(x.session_id == s.session_id for x in self.state.sessions):
+                s = s.model_copy(update={"session_id": self.state.next_session_id()})
+            self.state.sessions.append(s)
+            # 注意：这里不设 _current，交给下面的 _load_into_form
+        else:
+            self.state.upsert_session(s)
         self.refresh()
+        self._load_into_form(s)
         self.changed.emit()
         QMessageBox.information(self, "已保存", f"场次 #{s.session_id} 已保存。")
