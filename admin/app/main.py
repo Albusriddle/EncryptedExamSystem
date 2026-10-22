@@ -136,6 +136,11 @@ def main() -> int:
     # 中文字体：Windows 下默认字体即可；Linux 若缺失由系统配置决定
     win = MainWindow()
     win.show()
+    # 欢迎弹窗：放在主窗口显示之后，避免"弹窗背后一片空白"。
+    # 之前这行因为注释被格式化而漏掉，导致教师端根本没弹窗。
+    from app.ui.welcome import show_welcome_if_needed
+
+    show_welcome_if_needed(win)
     return app.exec()
 
 

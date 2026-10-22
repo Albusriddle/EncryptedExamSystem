@@ -96,3 +96,23 @@ def test_settings_path_is_under_localappdata(
     p = w.settings_path()
     assert p.name == "settings.ini"
     assert p.parent.name == "ExamSystem"
+
+
+def test_main_wires_the_welcome_dialog() -> None:
+    """启动入口必须真的调用欢迎弹窗。
+
+    曾经出现过：welcome.py 写好了、测试也过了，但 main() 里那行调用
+    因为一次代码格式化被悄悄删掉——教师端于是完全没有弹窗，
+    而所有单元测试依然全绿。这条"接线测试"专门守这个洞。
+    """
+    src = (ROOT / "admin" / "app" / "main.py").read_text(encoding="utf-8")
+    assert "show_welcome_if_needed" in src, "main.py 未调用欢迎弹窗"
+    # 必须传主窗口作为父级，否则弹窗可能跑到主窗口后面
+    assert "show_welcome_if_needed(win)" in src, "调用时未传主窗口"
+
+
+def test_credit_role_is_founder_and_author() -> None:
+    """创始人一栏的措辞应为「创始人/仓库作者」。"""
+    roles = [c.role for c in branding().credits]
+    assert "创始人/仓库作者" in roles, f"当前角色: {roles}"
+    assert "创始人" not in roles, "不应保留旧措辞"

@@ -60,97 +60,98 @@ impl Welcome {
         let b = branding();
         let mut closed = false;
 
-        // 用 Area 自己定位而不用 Window：
-        // Window 会按内容自动撑宽，长文本一旦不换行就会顶出视口（实测被裁一半）。
-        // Area 支持显式指定宽度，配合 set_width 才能保证文本按宽度换行。
+        // 用 Window + anchor(CENTER_CENTER) 居中：Window 会先测量自身尺寸
+        // 再按 anchor 摆放，因此不需要我们预先知道宽高。
+        // 宽度用 set_width 固定，长文本才会按宽度换行、不会把窗口撑出视口。
         const W: f32 = 470.0;
         let screen = ctx.screen_rect();
-        // 锚在视口左上角：居中对齐在不同 DPI/标题栏口径下容易把弹窗
-        // 推到视口外（实测右侧被裁）。左上角是唯一确定可见的位置。
-        let pos = screen.left_top() + egui::vec2(40.0, 60.0);
+        let mut popup_rect = egui::Rect::NOTHING;
 
-        // 半透明遮罩，突出弹窗并阻止误点背后的按钮
+        // 半透明遮罩：突出弹窗，并挡住背后的误点
         egui::Area::new(egui::Id::new("welcome_backdrop"))
             .order(egui::Order::Background)
             .fixed_pos(screen.min)
             .show(ctx, |ui| {
-                let painter = ui.painter();
-                painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
+                ui.painter()
+                    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(150));
             });
 
-        let mut frame_rect = egui::Rect::NOTHING;
-        egui::Area::new(egui::Id::new("welcome"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(pos)
+        let win_resp = egui::Window::new("欢迎使用")
+            .collapsible(false)
+            .resizable(false)
+            .movable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .fixed_size(egui::vec2(W, 0.0))
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_width(W);
-                    ui.add_space(4.0);
-                    ui.heading(b.display_name());
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "版本 {} · {}",
-                            common::version(),
-                            b.license_name
-                        ))
+                ui.set_width(W);
+                ui.add_space(2.0);
+                ui.heading(b.display_name());
+                ui.label(
+                    egui::RichText::new(format!("版本 {} · {}", common::version(), b.license_name))
                         .size(12.0)
                         .color(egui::Color32::from_gray(140)),
-                    );
+                );
 
-                    ui.add_space(8.0);
-                    ui.add(egui::Label::new(&b.tagline).wrap());
+                ui.add_space(8.0);
+                ui.add(egui::Label::new(&b.tagline).wrap());
 
-                    ui.add_space(10.0);
-                    ui.label("项目地址：");
-                    let short = b
-                        .repo_url
-                        .trim_start_matches("https://")
-                        .trim_start_matches("http://");
-                    ui.hyperlink_to(short, &b.repo_url)
-                        .on_hover_text(&b.repo_url);
-                    ui.label(format!("许可证：{}（{}）", b.license_name, b.license));
+                ui.add_space(10.0);
+                ui.label("项目地址：");
+                let short = b
+                    .repo_url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://");
+                ui.hyperlink_to(short, &b.repo_url)
+                    .on_hover_text(&b.repo_url);
+                ui.label(format!("许可证：{}（{}）", b.license_name, b.license));
 
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new(&b.credits_title).strong());
-                    for c in &b.credits {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(format!("· {}：", c.role));
-                            ui.hyperlink_to(&c.name, &c.url);
-                        });
-                    }
-
-                    ui.add_space(10.0);
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&b.star_hint)
-                                .color(egui::Color32::from_rgb(90, 170, 90)),
-                        )
-                        .wrap(),
-                    );
-
-                    ui.add_space(12.0);
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.dont_show, "不再提示");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("开始使用").clicked() {
-                                closed = true;
-                            }
-                        });
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new(&b.credits_title).strong());
+                for c in &b.credits {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("· {}：", c.role));
+                        ui.hyperlink_to(&c.name, &c.url);
                     });
-                    frame_rect = ui.min_rect();
+                }
+
+                ui.add_space(10.0);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&b.star_hint)
+                            .color(egui::Color32::from_rgb(90, 170, 90)),
+                    )
+                    .wrap(),
+                );
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.dont_show, "不再提示");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("开始使用").clicked() {
+                            closed = true;
+                        }
+                    });
                 });
             });
+
+        // Window::show 返回的就是窗口自身矩形（含标题栏），用它判断居中才准。
+        if let Some(r) = win_resp {
+            popup_rect = r.response.rect;
+        }
 
         // 诊断：设置 EES_DEBUG_LAYOUT=<文件> 可把弹窗与视口的实际矩形写出来。
         // 截图在 DPI/多显示器下不可靠，让程序自己报告才可信。
         if let Some(path) = std::env::var_os("EES_DEBUG_LAYOUT") {
+            let dx = popup_rect.center().x - screen.center().x;
+            let dy = popup_rect.center().y - screen.center().y;
             let info = format!(
-                "screen={:?}\npopup={:?}\nwidth_pt={}\ncontains={}\n",
+                "screen={:?}\npopup={:?}\nsize_pt={}x{}\ncenter_offset=({dx:.1},{dy:.1})\ncontains={}\n",
                 screen,
-                frame_rect,
-                frame_rect.width(),
-                screen.contains_rect(frame_rect)
+                popup_rect,
+                popup_rect.width(),
+                popup_rect.height(),
+                screen.contains_rect(popup_rect)
             );
             let _ = std::fs::write(path, info);
         }
