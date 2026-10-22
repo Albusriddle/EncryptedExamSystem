@@ -46,6 +46,11 @@ enum Cmd {
         /// 从文件读取主密钥（文件内容为 64-hex，末尾空白会被忽略）
         #[arg(long)]
         master_file: Option<PathBuf>,
+        /// 额外输出 K_manifest 到指定文件（64-hex）。
+        /// 该值供编译学生端时通过环境变量 `EXAM_KEYFILE` 嵌入，
+        /// 使学生端免输 master。**注意：这是 K_manifest 而非 master**。
+        #[arg(long)]
+        emit_keyfile: Option<PathBuf>,
     },
     /// 校验一个包能否被指定密钥解开
     Verify {
@@ -99,9 +104,10 @@ fn main() -> Result<()> {
             out,
             master,
             master_file,
+            emit_keyfile,
         } => {
             let key = resolve_master(master, master_file)?;
-            build(manifest, banks, stub, out, &key)?;
+            build(manifest, banks, stub, out, &key, emit_keyfile)?;
         }
         Cmd::Verify {
             package,
@@ -136,6 +142,7 @@ fn build(
     stub_path: PathBuf,
     out_path: PathBuf,
     master_hex: &str,
+    emit_keyfile: Option<PathBuf>,
 ) -> Result<()> {
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("读取清单 {}", manifest_path.display()))?;
@@ -207,6 +214,18 @@ fn build(
         "  KDF: Argon2id(m={}, t={}, p={})",
         manifest.kdf.m_cost, manifest.kdf.t_cost, manifest.kdf.p_cost
     );
+
+    // 输出 K_manifest，供学生端编译时嵌入（使其免输 master）。
+    if let Some(path) = emit_keyfile {
+        let k_manifest = container::manifest_key(&master);
+        std::fs::write(&path, hex::encode(k_manifest))
+            .with_context(|| format!("写出 keyfile {}", path.display()))?;
+        println!("\n✔ 已输出 K_manifest 到 {}", path.display());
+        println!("  用它重新编译学生端即可免输 master：");
+        println!("    $env:EXAM_KEYFILE = \"{}\"", path.display());
+        println!("    cargo build --release -p client");
+        println!("  ⚠ 这是 K_manifest 而非 master：泄漏后只能看到场次安排，拿不到题目。");
+    }
     Ok(())
 }
 

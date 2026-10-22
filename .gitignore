@@ -31,6 +31,9 @@ banks/*
 !banks/demo/**
 !banks/.gitkeep
 
+# ---- 验收脚本临时目录 ----
+.verify-tmp/
+
 # ---- 构建产物（走 GitHub Releases，不入库）----
 *.exe
 *.msi

@@ -14,6 +14,8 @@
 //! - `--session` **不能**绕过时间窗：它只能在门禁通过后缩小范围。
 //! - `--skip-timegate` 只在 debug 构建里存在，release 编译时被 `cfg` 移除。
 
+mod keys;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 
@@ -46,22 +48,56 @@ struct Cli {
     skip_timegate: bool,
 }
 
-/// 取主密钥：--master-file > --master > 环境变量 EXAM_MASTER。
-fn resolve_master(master: Option<String>, master_file: Option<String>) -> Result<String> {
-    if let Some(path) = master_file {
-        let text =
-            std::fs::read_to_string(&path).with_context(|| format!("读取密钥文件 {path}"))?;
-        return Ok(text.trim().to_string());
+/// 取解 header 用的 K_manifest。
+///
+/// 优先级（**嵌入优先**，发布版就是要学生零配置）：
+///
+/// 1. 编译期嵌入的 K_manifest（由 `EXAM_KEYFILE` 提供，见 build.rs）；
+/// 2. `--master-file` / `--master` / 环境变量 `EXAM_MASTER`（开发调试用）。
+///
+/// 注意：第 2 条拿到的是 **master**，需派生一次 K_manifest；
+/// 第 1 条已经是 K_manifest 本身，**不能再派生**。
+fn resolve_manifest_key(master: Option<String>, master_file: Option<String>) -> Result<[u8; 32]> {
+    if let Some(k) = keys::embedded_manifest_key() {
+        // 若同时显式传了 master，校验一致性，避免"以为用了 A 实际用了 B"。
+        if master.is_some() || master_file.is_some() {
+            let given = read_master_arg(master.as_deref(), master_file.as_deref())?;
+            let derived = container::manifest_key(&given);
+            anyhow::ensure!(
+                derived == k,
+                "显式传入的 master 与包内嵌的密钥不匹配（可能拿错了包或密钥）"
+            );
+        }
+        return Ok(k);
     }
-    if let Some(m) = master {
-        return Ok(m);
-    }
-    if let Ok(v) = std::env::var("EXAM_MASTER")
-        && !v.trim().is_empty()
-    {
-        return Ok(v.trim().to_string());
-    }
-    anyhow::bail!("缺少主密钥：请用 --master-file、--master 或环境变量 EXAM_MASTER 提供")
+
+    // 回退到显式 master（开发模式）。
+    let given = read_master_arg(master.as_deref(), master_file.as_deref())?;
+    Ok(container::manifest_key(&given))
+}
+
+/// 把参数解析成 master。`master_file` 存在时读文件。
+fn read_master_arg(master: Option<&str>, master_file: Option<&str>) -> Result<[u8; 32]> {
+    let hex = if let Some(path) = master_file {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("读取密钥文件 {path}"))?
+            .trim()
+            .to_string()
+    } else if let Some(m) = master {
+        m.trim().to_string()
+    } else if let Ok(v) = std::env::var("EXAM_MASTER") {
+        if v.trim().is_empty() {
+            anyhow::bail!("环境变量 EXAM_MASTER 为空");
+        }
+        v.trim().to_string()
+    } else {
+        anyhow::bail!(
+            "缺少密钥：本包未内嵌密钥，且未提供 master。\n\
+             请用 --master-file / --master / 环境变量 EXAM_MASTER 提供。"
+        );
+    };
+    let m = crypto::master_from_hex(&hex).context("解析主密钥")?;
+    Ok(*m)
 }
 
 fn main() -> Result<()> {
@@ -79,12 +115,10 @@ fn main() -> Result<()> {
     let payload = container::extract_payload(&bytes)
         .context("未找到内嵌 payload。请用 --package 指向 builder 生成的 exe")?;
 
-    // 2. 解 header。
-    let master_hex = resolve_master(cli.master.clone(), cli.master_file.clone())?;
-    let master = crypto::master_from_hex(&master_hex).context("解析主密钥")?;
-    let k_manifest = crypto::hkdf_derive(&master, b"", "manifest");
+    // 2. 解 header。优先用编译期嵌入的 K_manifest，学生无需输入任何密钥。
+    let k_manifest = resolve_manifest_key(cli.master.clone(), cli.master_file.clone())?;
     let (header, blob_area) = container::parse_header(payload, &k_manifest)
-        .context("解析 header 失败（主密钥错误？）")?;
+        .context("解析 header 失败（密钥不匹配？）")?;
     let salt = hex::decode(&header.salt).context("header.salt hex 解码")?;
 
     // 3. 【时间门禁】必须在派生入场密钥之前。
@@ -117,6 +151,9 @@ fn main() -> Result<()> {
     // 7. 展示。
     println!("✔ 解锁成功");
     println!("  学号: {}", cli.student);
+    if !keys::is_embedded() {
+        println!("  模式: 开发（密钥由命令行提供，未嵌入）");
+    }
     println!("  场次: {}", unlocked.session_id);
     println!("  时间窗: {} ~ {}", unlocked.start, unlocked.end);
     if let Some(t) = &net {

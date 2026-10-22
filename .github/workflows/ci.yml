@@ -124,6 +124,10 @@ jobs:
 
           echo "✓ e2e 全部通过"
 
+      - name: 密钥嵌入验收
+        shell: bash
+        run: bash scripts/verify-embed.sh
+
   secret-scan:
     runs-on: ubuntu-latest
     steps:

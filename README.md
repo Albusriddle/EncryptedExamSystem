@@ -40,11 +40,37 @@ $master = .\target\release\exam-builder.exe keygen
   --manifest banks/demo/manifest.example.json --banks banks/ `
   --stub target/release/exam-client.exe --out StudentClient.exe --master $master
 
-# 3. 学生端解锁 + 确定性抽题（骨架版手动传参，M4 换 GUI + 时间门禁）
-.\StudentClient.exe --student 2021001 --session 1 --master $master --package StudentClient.exe
+# 3. 学生端解锁 + 确定性抽题
+.\StudentClient.exe --student 2021001 --master $master --package StudentClient.exe
 ```
 
-已验证：名单内学生解锁抽题成功、名单外拒绝、重复运行试卷指纹一致。
+## 密钥嵌入（学生免输密码）
+
+发布给学生的包可以**不含任何密钥输入**：把 `K_manifest` 嵌入学生端即可。
+
+```powershell
+# 1. 打包时额外导出 K_manifest
+.\target\release\exam-builder.exe build `
+  --manifest banks/demo/manifest.example.json --banks banks/ `
+  --stub target/release/exam-client.exe --out /tmp/x.exe --master $master `
+  --emit-keyfile kf.txt
+
+# 2. 用该 keyfile 重新编译学生端（密钥被分片混淆后嵌入）
+$env:EXAM_KEYFILE = "kf.txt"
+cargo build --release -p client
+
+# 3. 用新的 stub 打包，学生端即可免输密钥
+.\target\release\exam-builder.exe build `
+  --manifest banks/demo/manifest.example.json --banks banks/ `
+  --stub target/release/exam-client.exe --out StudentClient.exe --master $master
+.\StudentClient.exe --student 2021001 --package StudentClient.exe
+```
+
+**安全边界（必须理解）**：嵌入的是 `K_manifest` 而**不是 master**。
+泄漏后果是攻击者可读到场次时间与人数，但**拿不到任何题目**
+（题库用每场独立的 `session_secret` 加密，仍需猜中学号才能触发 Argon2id）。
+
+一键验收：`bash scripts/verify-embed.sh`（CI 已接入）
 
 ## 安全红线
 

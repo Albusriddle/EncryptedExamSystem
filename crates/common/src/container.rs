@@ -246,7 +246,7 @@ pub fn build_payload(
     }
 
     // 4. header 加密。K_manifest 用空 salt 派生（header 里才带真实 salt）。
-    let k_manifest = crypto::hkdf_derive(master, b"", "manifest");
+    let k_manifest = manifest_key(master);
     let header = Header {
         version: VERSION,
         salt: hex::encode(salt),
@@ -403,6 +403,21 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> u64 {
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     (era * 146097 + doe - 719468) as u64
+}
+
+/// 由 master 派生 **header 加密密钥**（K_manifest）。
+///
+/// 这是 master 在容器格式中的**唯一用途**：题库与信封都用每场独立的
+/// `session_secret` 加密，与 master 无关。
+///
+/// 因此"让学生端免输 master"只需嵌入这一个 32 字节密钥：
+/// - 泄漏后果：攻击者可读场次时间与人数，但**拿不到任何题目**；
+/// - 对比现状：现在管理员要把 master 交给每个学生，危害大得多。
+///
+/// 注意：salt 必须为空串。若用真实 salt 派生，客户端会陷入
+/// "要 salt 才能解 header、要解 header 才能拿 salt"的死锁。
+pub fn manifest_key(master: &[u8; 32]) -> [u8; 32] {
+    *crypto::hkdf_derive(master, b"", "manifest")
 }
 
 /// 给 exe 追加 payload，生成自解压学生端。
