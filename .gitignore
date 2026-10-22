@@ -54,3 +54,7 @@ examadm-*/
 
 # GitHub API 诊断输出（临时，不入库）
 .gh/
+
+# 发布包验收用的临时下载/解压目录
+.accept/
+.dl/

@@ -1,7 +1,0 @@
-Traceback (most recent call last):
-  File "main.py", line 14, in <module>
-  File "pyimod02_importers.py", line 457, in exec_module
-  File "app\ui\main_window.py", line 32, in <module>
-  File "pyimod02_importers.py", line 457, in exec_module
-  File "app\core\models.py", line 9, in <module>
-ModuleNotFoundError: No module named 'pydantic'
