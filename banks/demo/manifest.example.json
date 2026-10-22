@@ -3,7 +3,7 @@
   "salt": "00112233445566778899aabbccddeeff",
   "time_sources": [],
   "time_pubkey": "",
-  "kdf": { "m_cost": 19456, "t_cost": 2, "p_cost": 1 },
+  "kdf": { "m_cost": 65536, "t_cost": 3, "p_cost": 1 },
   "sessions": [
     {
       "session_id": 1,

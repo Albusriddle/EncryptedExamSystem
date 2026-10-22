@@ -24,18 +24,30 @@ pub struct Paper {
 
 impl Paper {
     /// 试卷内容哈希，用于"同一学号同场次多次运行结果一致"的校验与泄题溯源。
+    ///
+    /// **每个字段都带长度前缀**：否则 `["ab","c"]` 与 `["a","bc"]` 拼接后
+    /// 字节流相同，会产生指纹碰撞（实测可复现），水印溯源就失去意义。
     pub fn fingerprint(&self) -> String {
         let mut h = blake3::Hasher::new();
+        h.update(b"exam-paper-fp-v2");
         h.update(&self.student_id.to_le_bytes());
         h.update(&self.session_id.to_le_bytes());
+        h.update(&(self.sections.len() as u32).to_le_bytes());
         for (exam_id, ids) in &self.sections {
-            h.update(exam_id.as_bytes());
+            write_len_prefixed(&mut h, exam_id.as_bytes());
+            h.update(&(ids.len() as u32).to_le_bytes());
             for id in ids {
-                h.update(id.as_bytes());
+                write_len_prefixed(&mut h, id.as_bytes());
             }
         }
         h.finalize().to_hex().to_string()
     }
+}
+
+/// 写入 `长度(4 字节 LE) || 内容`，消除拼接歧义。
+fn write_len_prefixed(h: &mut blake3::Hasher, bytes: &[u8]) {
+    h.update(&(bytes.len() as u32).to_le_bytes());
+    h.update(bytes);
 }
 
 /// 由学号、场次、salt 构造确定性 RNG。
@@ -221,6 +233,35 @@ mod tests {
         ));
     }
 
+    /// **回归**：拼接歧义曾导致指纹碰撞（实测可复现）。
+    #[test]
+    fn fingerprint_has_no_concatenation_collision() {
+        let a = Paper {
+            student_id: 1,
+            session_id: 1,
+            sections: vec![("ab".into(), vec!["c".into()])],
+        };
+        let b = Paper {
+            student_id: 1,
+            session_id: 1,
+            sections: vec![("a".into(), vec!["bc".into()])],
+        };
+        assert_ne!(a.fingerprint(), b.fingerprint(), "拼接歧义必须被消除");
+
+        // 题目 id 列表的分组也要有边界
+        let c = Paper {
+            student_id: 1,
+            session_id: 1,
+            sections: vec![("x".into(), vec!["ab".into(), "c".into()])],
+        };
+        let d = Paper {
+            student_id: 1,
+            session_id: 1,
+            sections: vec![("x".into(), vec!["a".into(), "bc".into()])],
+        };
+        assert_ne!(c.fingerprint(), d.fingerprint());
+    }
+
     /// 黄金向量：锁定算法，一旦改动会立刻在 CI 报警。
     #[test]
     fn golden_fingerprint() {
@@ -234,7 +275,10 @@ mod tests {
     /// 黄金向量值。**修改前请确认这是有意为之**：改它意味着所有已发出的
     /// 试卷在重跑时会变题。
     ///
+    /// v2 变更记录（2026-10-22）：fingerprint 加入长度前缀以消除拼接歧义，
+    /// 因此向量值随之改变。此前无真实试卷发出，变更无影响。
+    ///
     /// 取值条件：student=2021001, session=1, salt="golden-salt",
     /// banks=[math(50 题, pick 10), english(40 题, pick 8)]，使用题库自带 pick。
-    const GOLDEN_FP: &str = "c86a6927c25d2464ada2cb8646a247b25aeac55d2ea3e92ab8f0e1d85b27986c";
+    const GOLDEN_FP: &str = "6e429e5e0cf9d03a4ec340c949a6c6e7bbeb0de3043da70e27b0674a2861f971";
 }

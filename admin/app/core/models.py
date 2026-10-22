@@ -82,21 +82,21 @@ class KdfParams(BaseModel):
     """Argon2id 参数。与 Rust 端 crypto::KdfParams 对应。
 
     这些值同时决定"打包耗时"与"攻击者枚举名单的成本"：
-    - 默认 m=19456(19MiB) / t=2 / p=1，单次约 40ms；
-    - 1000 名学生的包约 5 秒（8 线程）；
-    - 攻击者枚举 10^5 个学号约 67 分钟。
-    **不要为了"打包快"把这些值调低。**
+    - 默认 m=65536(64MiB) / t=3 / p=1，单次约 92ms（本机实测）；
+    - 1000 名学生的包约 12 秒（8 线程）；
+    - 攻击者 8 线程枚举 10^5 个学号约 19 分钟。
+    **不要为了"打包快"把这些值调低。** 旧默认 19MiB/t=2 实测只需 3.8 分钟即可枚举完。
     """
 
-    m_cost: int = 19456
-    t_cost: int = 2
+    m_cost: int = 65536
+    t_cost: int = 3
     p_cost: int = 1
 
     @model_validator(mode="after")
     def _check(self) -> KdfParams:
-        if self.m_cost < 8192:
+        if self.m_cost < 65536:
             raise ValueError(f"m_cost 过低（{self.m_cost}），会让学号枚举变得廉价")
-        if self.t_cost < 2:
+        if self.t_cost < 3:
             raise ValueError(f"t_cost 过低（{self.t_cost}）")
         if self.p_cost < 1:
             raise ValueError("p_cost 必须 ≥ 1")

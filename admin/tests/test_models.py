@@ -68,12 +68,13 @@ def test_session_no_exams() -> None:
 def test_manifest_ok() -> None:
     m = Manifest(salt="00" * 16, sessions=[_session()])
     assert m.version == 2
-    assert m.kdf.m_cost >= 8192, "默认 KDF 参数不应被调低"
+    assert m.kdf.m_cost >= 65536, "默认 KDF 参数不应被调低（实测 19MiB 只需 3.8 分钟即可枚举）"
+    assert m.kdf.t_cost >= 3
 
 
 def test_manifest_rejects_weak_kdf() -> None:
     with pytest.raises(ValueError, match="m_cost 过低"):
-        Manifest(salt="00" * 16, sessions=[_session()], kdf={"m_cost": 8, "t_cost": 2, "p_cost": 1})
+        Manifest(salt="00" * 16, sessions=[_session()], kdf={"m_cost": 8, "t_cost": 3, "p_cost": 1})
 
 
 def test_manifest_rejects_low_t_cost() -> None:
@@ -81,7 +82,7 @@ def test_manifest_rejects_low_t_cost() -> None:
         Manifest(
             salt="00" * 16,
             sessions=[_session()],
-            kdf={"m_cost": 19456, "t_cost": 1, "p_cost": 1},
+            kdf={"m_cost": 65536, "t_cost": 1, "p_cost": 1},
         )
 
 

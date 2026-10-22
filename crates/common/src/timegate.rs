@@ -435,3 +435,275 @@ mod tests {
         assert_eq!(format_unix_utc(784111777), "1994-11-06 08:49:37");
     }
 }
+
+// ============================================================================
+// 场次门禁判定（纯函数，可离线单测）
+// ============================================================================
+
+/// 门禁拒绝的原因。**必须可区分**，否则学生无从判断是自己输错学号还是时间没到。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GateError {
+    #[error("考试尚未开始。当前网络时间 {now}，最早一场开始于 {first}")]
+    NotStarted { now: String, first: String },
+    #[error("当前网络时间 {now}，不在任何考试时间窗内（考试可能已结束）")]
+    NotInWindow { now: String },
+    #[error("包内没有任何场次")]
+    NoSessions,
+    #[error("场次 {id} 不存在")]
+    UnknownSession { id: u32 },
+    #[error("场次 {id} 不在当前时间窗内（该场时间为 {start} ~ {end}）")]
+    SessionOutOfWindow { id: u32, start: String, end: String },
+}
+
+/// 一个可参与门禁判定的场次视图。
+#[derive(Debug, Clone)]
+pub struct SessionWindow {
+    pub session_id: u32,
+    pub start: u64,
+    pub end: u64,
+}
+
+/// 门禁判定结果。
+#[derive(Debug, Clone)]
+pub struct GateDecision {
+    /// 命中的场次编号
+    pub session_id: u32,
+    /// 当前网络时间
+    pub now: u64,
+    /// 是否因为时间窗重叠而自动取了一场
+    pub overlapped: bool,
+}
+
+/// **门禁核心**：给定网络时间和候选场次，决定能进哪一场。
+///
+/// 安全约束（按重要性排序）：
+///
+/// 1. **时间窗是硬约束**：`explicit` 指定的场次如果不在当前时间窗内，
+///    一律拒绝。这是 P0-A 的修复点——旧实现里 `explicit` 会直接返回，
+///    完全跳过时间检查。
+/// 2. 未指定场次时，只在时间窗内的场次里选；多个重叠时取 session_id 最小。
+/// 3. 拒绝原因必须可区分（未开始 / 已结束 / 场次不存在 / 不在窗口）。
+///
+/// `now` 必须是**网络时间**，调用方不得用本机时钟。
+pub fn decide_session(
+    sessions: &[SessionWindow],
+    explicit: Option<u32>,
+    now: u64,
+) -> Result<GateDecision, GateError> {
+    if sessions.is_empty() {
+        return Err(GateError::NoSessions);
+    }
+
+    // 先算时间窗内的场次——这是所有分支的共同前提。
+    let in_window: Vec<&SessionWindow> = sessions
+        .iter()
+        .filter(|s| now >= s.start && now <= s.end)
+        .collect();
+
+    // 指定了场次：必须在窗口内，否则拒绝。
+    if let Some(id) = explicit {
+        let target = sessions
+            .iter()
+            .find(|s| s.session_id == id)
+            .ok_or(GateError::UnknownSession { id })?;
+        if now < target.start || now > target.end {
+            return Err(GateError::SessionOutOfWindow {
+                id,
+                start: format_unix_utc(target.start),
+                end: format_unix_utc(target.end),
+            });
+        }
+        return Ok(GateDecision {
+            session_id: id,
+            now,
+            overlapped: in_window.len() > 1,
+        });
+    }
+
+    // 未指定：从窗口内选。
+    match in_window.len() {
+        0 => {
+            let first = sessions.iter().map(|s| s.start).min().unwrap_or(0);
+            if now < first {
+                Err(GateError::NotStarted {
+                    now: format_unix_utc(now),
+                    first: format_unix_utc(first),
+                })
+            } else {
+                Err(GateError::NotInWindow {
+                    now: format_unix_utc(now),
+                })
+            }
+        }
+        _ => {
+            let chosen = in_window.iter().min_by_key(|s| s.session_id).expect("非空");
+            Ok(GateDecision {
+                session_id: chosen.session_id,
+                now,
+                overlapped: in_window.len() > 1,
+            })
+        }
+    }
+}
+
+/// 解析 RFC3339 时间（供构建期校验与门禁用）。
+///
+/// 支持 `2026-12-20T09:00:00+08:00`、`...Z`、`2026-12-20 09:00:00+08:00`。
+pub fn parse_rfc3339(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (date_part, rest) = s.split_once('T').or_else(|| s.split_once(' '))?;
+    let d: Vec<&str> = date_part.split('-').collect();
+    if d.len() != 3 {
+        return None;
+    }
+    let (y, mo, da): (i64, i64, i64) = (d[0].parse().ok()?, d[1].parse().ok()?, d[2].parse().ok()?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&da) {
+        return None;
+    }
+
+    let (time_part, offset_secs) = if let Some(t) = rest.strip_suffix('Z') {
+        (t, 0i64)
+    } else if let Some(idx) = rest.rfind(['+', '-']) {
+        let (t, off) = rest.split_at(idx);
+        let sign = if off.starts_with('-') { -1 } else { 1 };
+        let o = &off[1..];
+        let (oh, om) = o.split_once(':').unwrap_or((o, "0"));
+        let secs = sign * (oh.parse::<i64>().ok()? * 3600 + om.parse::<i64>().ok()? * 60);
+        (t, secs)
+    } else {
+        (rest, 0)
+    };
+
+    let t: Vec<&str> = time_part.split(':').collect();
+    if t.len() < 2 {
+        return None;
+    }
+    let h: i64 = t[0].parse().ok()?;
+    let mi: i64 = t[1].parse().ok()?;
+    let se: i64 = match t.get(2) {
+        Some(x) => x.split('.').next().unwrap_or("0").parse().ok()?,
+        None => 0,
+    };
+    if h > 23 || mi > 59 || se > 60 {
+        return None;
+    }
+
+    let days = days_from_civil(y, mo, da) as i64;
+    let local = days * 86400 + h * 3600 + mi * 60 + se;
+    let utc = local - offset_secs;
+    if utc < 0 { None } else { Some(utc as u64) }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    fn win(id: u32, start: u64, end: u64) -> SessionWindow {
+        SessionWindow {
+            session_id: id,
+            start,
+            end,
+        }
+    }
+
+    // 2026-12-20T09:00:00+08:00（实测值，勿手算）
+    const T0900: u64 = 1_797_728_400;
+    const T1100: u64 = 1_797_735_600; // +2h
+    const T1300: u64 = 1_797_742_800; // +4h
+    const T1500: u64 = 1_797_750_000; // +6h
+
+    #[test]
+    fn inside_window_is_allowed() {
+        let s = [win(1, T0900, T1100)];
+        let d = decide_session(&s, None, T0900 + 60).unwrap();
+        assert_eq!(d.session_id, 1);
+    }
+
+    /// **P0-A 回归**：显式指定场次不能绕过时间窗。
+    #[test]
+    fn explicit_session_cannot_bypass_window() {
+        let s = [win(7, T0900, T1100)];
+        // 现在远早于窗口（模拟 2026-10 考 2027-06 的试）
+        let err = decide_session(&s, Some(7), T0900 - 86_400 * 200).unwrap_err();
+        assert!(
+            matches!(err, GateError::SessionOutOfWindow { id: 7, .. }),
+            "显式指定场次时，时间窗外必须拒绝，实际: {err:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_session_after_window_is_rejected() {
+        let s = [win(7, T0900, T1100)];
+        let err = decide_session(&s, Some(7), T1100 + 1).unwrap_err();
+        assert!(matches!(err, GateError::SessionOutOfWindow { .. }));
+    }
+
+    #[test]
+    fn explicit_unknown_session_is_rejected() {
+        let s = [win(1, T0900, T1100)];
+        let err = decide_session(&s, Some(99), T0900 + 60).unwrap_err();
+        assert!(matches!(err, GateError::UnknownSession { id: 99 }));
+    }
+
+    #[test]
+    fn explicit_session_inside_window_is_allowed() {
+        let s = [win(1, T0900, T1100), win(2, T1300, T1500)];
+        let d = decide_session(&s, Some(2), T1300 + 10).unwrap();
+        assert_eq!(d.session_id, 2);
+    }
+
+    #[test]
+    fn before_all_sessions_reports_not_started() {
+        let s = [win(1, T0900, T1100)];
+        let err = decide_session(&s, None, T0900 - 100).unwrap_err();
+        assert!(matches!(err, GateError::NotStarted { .. }));
+    }
+
+    #[test]
+    fn after_all_sessions_reports_not_in_window() {
+        let s = [win(1, T0900, T1100)];
+        let err = decide_session(&s, None, T1100 + 100).unwrap_err();
+        assert!(matches!(err, GateError::NotInWindow { .. }));
+    }
+
+    #[test]
+    fn empty_sessions_is_error() {
+        assert_eq!(
+            decide_session(&[], None, 0).unwrap_err(),
+            GateError::NoSessions
+        );
+    }
+
+    #[test]
+    fn overlapping_windows_pick_smallest_id_and_flag() {
+        let s = [win(5, T0900, T1100), win(3, T0900, T1100)];
+        let d = decide_session(&s, None, T0900 + 10).unwrap();
+        assert_eq!(d.session_id, 3);
+        assert!(d.overlapped, "重叠时应收起提示");
+    }
+
+    #[test]
+    fn boundary_is_inclusive() {
+        let s = [win(1, T0900, T1100)];
+        assert!(decide_session(&s, None, T0900).is_ok(), "开始瞬间应放行");
+        assert!(decide_session(&s, None, T1100).is_ok(), "结束瞬间应放行");
+        assert!(
+            decide_session(&s, None, T0900 - 1).is_err(),
+            "开始前 1 秒应拒绝"
+        );
+        assert!(
+            decide_session(&s, None, T1100 + 1).is_err(),
+            "结束后 1 秒应拒绝"
+        );
+    }
+
+    #[test]
+    fn parse_rfc3339_offsets() {
+        assert_eq!(parse_rfc3339("2026-12-20T09:00:00+08:00"), Some(T0900));
+        assert_eq!(parse_rfc3339("2026-12-20T01:00:00Z"), Some(T0900));
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339("1994-11-06T08:49:37Z"), Some(784111777));
+        assert!(parse_rfc3339("not-a-date").is_none());
+        assert!(parse_rfc3339("2026-13-01T00:00:00Z").is_none());
+    }
+}
