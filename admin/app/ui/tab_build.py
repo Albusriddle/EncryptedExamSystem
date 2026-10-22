@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,27 @@ from PySide6.QtWidgets import (
 from app.core.state import ProjectState
 
 
+def builder_exe_root() -> Path:
+    """返回 client 产物所在目录（与 builder_exe 的搜索规则一致）。"""
+    name = "exam-client.exe" if os.name == "nt" else "exam-client"
+    return builder_exe().parent if builder_exe().name == name else _client_dir()
+
+
+def _client_dir() -> Path:
+    root = Path(__file__).resolve().parents[3]
+    name = "exam-client.exe" if os.name == "nt" else "exam-client"
+    for cand in (
+        root / "target" / "release" / name,
+        root / "target" / "x86_64-pc-windows-msvc" / "release" / name,
+    ):
+        if cand.is_file():
+            return cand.parent
+    for d in sorted((root / "target").glob("*/release")):
+        if (d / name).is_file():
+            return d
+    return root / "target" / "release"
+
+
 def builder_exe() -> Path:
     """定位 exam-builder 可执行文件。
 
@@ -52,7 +74,33 @@ def builder_exe() -> Path:
         if p.exists():
             return p
     root = Path(__file__).resolve().parents[3]  # admin/app/ui → 仓库根
+    # cargo 产物可能在 target/release 或 target/<triple>/release，
+    # 取决于构建时是否加了 --target。两种都要认。
+    for cand in (
+        root / "target" / "release" / name,
+        root / "target" / "x86_64-pc-windows-msvc" / "release" / name,
+    ):
+        if cand.is_file():
+            return cand
+    for d in sorted((root / "target").glob("*/release")):
+        if (d / name).is_file():
+            return d / name
     return root / "target" / "release" / name
+
+
+def write_temp_banks(banks: dict, tmpdir: Path) -> None:
+    """把题库写到临时目录（**剥掉 answer**）。
+
+    独立成纯函数是为了能脱离 Qt 测试——这段逻辑关系到"答案会不会
+    泄漏到磁盘"，必须有回归测试守着。
+    """
+    for exam_id, bank in banks.items():
+        stripped = bank.model_copy(deep=True)
+        for q in stripped.questions:
+            q.answer = None
+        (tmpdir / f"{exam_id}.json").write_text(
+            stripped.model_dump_json(by_alias=True), encoding="utf-8"
+        )
 
 
 class BuildWorker(QThread):
@@ -141,6 +189,8 @@ class BuildTab(QWidget):
         super().__init__()
         self.state = state
         self.worker: BuildWorker | None = None
+        #: 本次打包用的临时目录，结束后必须删除（里面有题目原文）
+        self._tmpdir: Path | None = None
         self._build_ui()
         self.refresh_preview()
 
@@ -220,9 +270,8 @@ class BuildTab(QWidget):
     # ---------------------------------------------------------------- 默认值
 
     def _default_stub(self) -> str:
-        root = Path(__file__).resolve().parents[3]
         name = "exam-client.exe" if os.name == "nt" else "exam-client"
-        return str(root / "target" / "release" / name)
+        return str(builder_exe_root() / name)
 
     def _default_out(self) -> Path:
         root = Path(__file__).resolve().parents[3]
@@ -316,13 +365,18 @@ class BuildTab(QWidget):
         out = Path(self.edit_out.text())
         out.parent.mkdir(parents=True, exist_ok=True)
 
-        # 题库目录：取所有题库路径的公共父目录太多变，改用临时目录扁平复制
+        # 题库目录：各题库路径的公共父目录太多变，改用临时目录扁平复制。
+        #
+        # ⚠ 安全：这些临时文件里是**题目原文**。旧实现直接
+        # `bank.model_dump_json()` 落盘，会把 `answer` 字段一起写出去，
+        # 而且打包结束后从不删除——等于把标准答案永久留在 %TEMP% 里。
+        # 现在做两件事：
+        #   1. 写盘前剥掉 answer（builder 本来也会剥，这里提前剥是纵深防御）；
+        #   2. 打包结束（成功/失败/取消）一律删除临时目录。
         tmpdir = Path(tempfile.mkdtemp(prefix="examadm-"))
+        self._tmpdir = tmpdir
         try:
-            for exam_id, bank in self.state.banks.items():
-                (tmpdir / f"{exam_id}.json").write_text(
-                    bank.model_dump_json(by_alias=True), encoding="utf-8"
-                )
+            write_temp_banks(self.state.banks, tmpdir)
             manifest_path = tmpdir / "manifest.json"
             manifest_path.write_text(
                 json.dumps(
@@ -333,6 +387,7 @@ class BuildTab(QWidget):
                 encoding="utf-8",
             )
         except OSError as e:
+            self._cleanup_tmp()
             QMessageBox.critical(self, "准备打包数据失败", str(e))
             return
 
@@ -352,6 +407,16 @@ class BuildTab(QWidget):
         self.edit_master.clear()
         self.worker.start()
 
+    def _cleanup_tmp(self) -> None:
+        """删除打包用的临时目录。
+
+        里面有题目原文（虽已剥掉 answer），不该留在磁盘上。
+        `ignore_errors=True`：删除失败也不该让打包流程报错。
+        """
+        if self._tmpdir is not None:
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
+            self._tmpdir = None
+
     def cancel_build(self) -> None:
         if self.worker:
             self.worker.cancel()
@@ -361,6 +426,7 @@ class BuildTab(QWidget):
         self.log_view.appendPlainText(line)
 
     def _on_done(self, ok: bool, info: str) -> None:
+        self._cleanup_tmp()
         self.btn_build.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self.progress.setVisible(False)

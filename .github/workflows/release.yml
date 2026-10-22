@@ -70,6 +70,12 @@ jobs:
           set -euo pipefail
           python admin/packaging/build_exe.py
 
+      - name: 压缩管理端（连同 _internal，教师解压即可用）
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/ExamAdmin -DestinationPath release/ExamAdmin-windows.zip -Force
+          Get-Item release/ExamAdmin-windows.zip | Select-Object Name, Length
+
       - name: 收集产物
         shell: bash
         run: |
@@ -77,9 +83,6 @@ jobs:
           mkdir -p release
           cp target/x86_64-pc-windows-msvc/release/exam-builder.exe release/
           cp target/x86_64-pc-windows-msvc/release/exam-client.exe release/stub-template.exe
-          # 管理端：连同 _internal 一起压缩，教师解压即可用
-          cd dist && 7z a -tzip ../release/ExamAdmin-windows.zip ExamAdmin > /dev/null
-          cd ..
           ls -la release/
 
       - uses: actions/upload-artifact@v4

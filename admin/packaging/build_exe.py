@@ -29,14 +29,39 @@ except (AttributeError, OSError):
 ROOT = Path(__file__).resolve().parents[2]  # 仓库根
 ADMIN = ROOT / "admin"
 EXE = ".exe" if os.name == "nt" else ""
-BUILDER = ROOT / "target" / "release" / f"exam-builder{EXE}"
 DIST = ROOT / "dist"
 
 
+def find_artifact(name: str) -> Path | None:
+    """在 target 下找 cargo 产物。
+
+    cargo 产物位置取决于是否指定了 `--target`：
+      - `cargo build --release`              → target/release/
+      - `cargo build --release --target XYZ` → target/XYZ/release/
+
+    GitHub Actions 的 release 工作流用的是后者。若只认前者，
+    CI 发布会因"找不到 exam-builder"直接失败。这里按优先级搜索。
+    """
+    candidates = [
+        ROOT / "target" / "release" / name,  # 本机默认构建
+        ROOT / "target" / "x86_64-pc-windows-msvc" / "release" / name,
+    ]
+    for d in sorted((ROOT / "target").glob("*/release")):
+        candidates.append(d / name)
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
+
+
+BUILDER = find_artifact(f"exam-builder{EXE}")
+
+
 def main() -> int:
-    if not BUILDER.exists():
-        print(f"✗ 找不到 {BUILDER}")
+    if BUILDER is None:
+        print("✗ 找不到 exam-builder 可执行文件")
         print("  请先运行：cargo build --release -p builder")
+        print("  （已搜索 target/release 与 target/*/release）")
         return 1
 
     # 确认 builder 能跑，避免把坏二进制打进去
@@ -101,8 +126,8 @@ def main() -> int:
 
     # 学生端模板与手册放进同一目录：教师只需拷贝这一个文件夹
     rel = out.parent
-    src = ROOT / "target" / "release" / f"exam-client{EXE}"
-    if src.exists():
+    src = find_artifact(f"exam-client{EXE}")
+    if src is not None:
         shutil.copy2(src, rel / f"stub-template{EXE}")
         print(f"✓ 已附带学生端模板 {rel.name}/stub-template{EXE}")
 

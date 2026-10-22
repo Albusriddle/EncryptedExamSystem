@@ -143,3 +143,44 @@ def test_timeout_propagates(paths, monkeypatch: pytest.MonkeyPatch) -> None:
     builder_exe, manifest, banks, stub = paths
     with pytest.raises(subprocess.TimeoutExpired):
         build_package(builder_exe, manifest, banks, stub, stub, MASTER)
+
+
+# ---------------------------------------------------------------- 答案泄漏防线
+
+
+def test_temp_banks_have_no_answers(tmp_path: Path) -> None:
+    """打包用的临时题库**绝不能**带 answer。
+
+    旧实现直接 model_dump_json 落盘，把标准答案留在 %TEMP% 里；
+    且打包结束从不删除目录。这条测试守住"写出去的文件不含答案"。
+    """
+    import json
+
+    from app.core.models import ExamBank
+    from app.ui.tab_build import write_temp_banks
+
+    bank = ExamBank.model_validate(
+        {
+            "exam_id": "math",
+            "title": "数学",
+            "pick": 1,
+            "questions": [
+                {
+                    "id": "q1",
+                    "type": "single",
+                    "stem": "1+1=?",
+                    "options": ["1", "2"],
+                    "answer": "B",
+                    "score": 2,
+                }
+            ],
+        }
+    )
+    write_temp_banks({"math": bank}, tmp_path)
+
+    text = (tmp_path / "math.json").read_text(encoding="utf-8")
+    obj = json.loads(text)
+    assert obj["questions"][0]["answer"] is None, "临时题库里仍带答案"
+
+    # 源对象不能被就地改动（必须 deep copy）
+    assert bank.questions[0].answer == "B"
