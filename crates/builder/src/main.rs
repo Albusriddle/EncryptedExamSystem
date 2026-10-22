@@ -145,9 +145,9 @@ fn build(
     // 这类错误必须在打包时就炸，绝不能留到考场上。
     let master = crypto::master_from_hex(master_hex).context("解析主密钥")?;
     let salt = hex::decode(&manifest.salt).context("manifest.salt 必须是 hex")?;
-    if manifest.sessions.is_empty() {
-        anyhow::bail!("清单里没有任何场次");
-    }
+    // 清单自身校验（时间窗倒挂、重复学号、场次编号重复）。
+    // build_payload 内部也会做，这里提前给出带上下文的报错。
+    container::validate_sessions(&manifest.sessions).context("清单校验失败")?;
 
     // 收集所有场次引用到的题库文件。
     let mut files: Vec<String> = manifest
@@ -189,17 +189,24 @@ fn build(
     // 注意：不再在这里改写 bank.pick。清单的 pick 覆盖由 build_payload
     // 解析成 picks 表写入 data 段，客户端抽题时读取该表。
     // 之前在这里改写 bank.pick 的做法是错的：exam_id 与文件名对不上时会静默失效。
-    let payload = container::build_payload(&master, &banks, &manifest.sessions, &salt)
-        .context("构建 payload")?;
+    let payload =
+        container::build_payload(&master, &banks, &manifest.sessions, &salt, manifest.kdf)
+            .context("构建 payload")?;
     let stub =
         std::fs::read(&stub_path).with_context(|| format!("读取 stub {}", stub_path.display()))?;
     let sfx = container::append_payload_to_exe(&stub, &payload)?;
     std::fs::write(&out_path, &sfx).with_context(|| format!("写出 {}", out_path.display()))?;
 
+    let total_students: usize = manifest.sessions.iter().map(|s| s.students.len()).sum();
     println!("✔ 已生成 {}", out_path.display());
     println!("  payload 大小: {} 字节", payload.len());
     println!("  payload SHA256: {}", container::payload_hash(&payload));
     println!("  场次: {}", manifest.sessions.len());
+    println!("  学生信封: {total_students} 个（每个学生一个，包内不含学号明文）");
+    println!(
+        "  KDF: Argon2id(m={}, t={}, p={})",
+        manifest.kdf.m_cost, manifest.kdf.t_cost, manifest.kdf.p_cost
+    );
     Ok(())
 }
 
@@ -208,34 +215,43 @@ fn verify(package: PathBuf, master_hex: &str) -> Result<()> {
     let payload = container::extract_payload(&bytes).context("提取 payload")?;
     let master = crypto::master_from_hex(master_hex)?;
 
-    // K_manifest 用空 salt 派生，所以这里能直接解开 header 做真正的校验。
+    // K_manifest 用空 salt 派生，所以这里能直接解开 header。
     let k_manifest = crypto::hkdf_derive(&master, b"", "manifest");
-    let (header, data_ct) = container::parse_payload(payload, &k_manifest)
+    let (header, blob_area) = container::parse_header(payload, &k_manifest)
         .context("解 header 失败：主密钥错误或包已损坏")?;
-    let salt = hex::decode(&header.salt).context("header.salt 不是合法 hex")?;
-    let data = container::decrypt_data(&master, &salt, &data_ct)
-        .context("解题库失败：主密钥错误或包已损坏")?;
+    let _salt = hex::decode(&header.salt).context("header.salt 不是合法 hex")?;
 
-    println!("✔ 包校验通过");
+    println!("✔ 包结构校验通过");
     println!("  版本: {}", header.version);
+    println!(
+        "  KDF: Argon2id(m={}, t={}, p={})",
+        header.kdf.m_cost, header.kdf.t_cost, header.kdf.p_cost
+    );
     println!("  场次: {}", header.sessions.len());
+
     for s in &header.sessions {
-        println!("    #{} {} ~ {}", s.session_id, s.start, s.end);
-    }
-    println!("  题库: {}", data.banks.len());
-    for b in &data.banks {
-        let pick = data.pick_for(&b.exam_id, b.pick);
         println!(
-            "    {} 共 {} 题，抽 {} 题{}",
-            b.exam_id,
-            b.questions.len(),
-            pick,
-            if b.questions.iter().any(|q| q.answer.is_some()) {
-                "  ⚠ 答案未剥离！"
-            } else {
-                ""
-            }
+            "    #{} {} ~ {}  信封 {} 个",
+            s.session_id,
+            s.start,
+            s.end,
+            s.envelopes.len()
+        );
+        // 用第一个信封对应的学号无法直接得知（这正是设计目标），
+        // 因此这里只能校验数据结构完整性，不能解出内容。
+        let off = s.data_off as usize;
+        let len = s.data_len as usize;
+        anyhow::ensure!(
+            off.checked_add(len)
+                .is_some_and(|end| end <= blob_area.len()),
+            "场次 {} 的 data 偏移越界（包损坏）",
+            s.session_id
         );
     }
+
+    // 泄露自检：包里不应出现任何可识别为学号的十进制串。
+    // 这里只做启发式提示，真正断言在单元测试里。
+    println!("\n⚠ 提示：verify 无法验证信封内容（设计如此——包里没有学号明文）。");
+    println!("   完整校验请用真实学号运行学生端，或跑 cargo test。");
     Ok(())
 }

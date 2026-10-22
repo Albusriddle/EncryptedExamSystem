@@ -102,6 +102,9 @@ pub struct Manifest {
     /// 服务端时间令牌的验签公钥（P-256 / Ed25519，hex）。
     #[serde(default)]
     pub time_pubkey: String,
+    /// Argon2id 参数（随包存储，便于将来调参而不作废旧包）。
+    #[serde(default)]
+    pub kdf: crate::crypto::KdfParams,
 }
 
 /// 模型校验错误。

@@ -1,30 +1,45 @@
-//! 学生端单文件容器格式。
+//! 学生端单文件容器格式（v2）。
 //!
 //! 布局（自解压 exe 内嵌 payload，运行时读自身尾部）：
 //!
 //! ```text
-//! [ stub 代码 ][ payload bytes ][ footer ]
-//! payload = [ magic8 ][ version4 ][ header_len4 ][ header_ct ][ data_ct ]
-//! footer  = [ payload_len8 ][ magic_tail8 ]
+//! [ stub 代码 ][ payload bytes ][ payload_len:u64 ][ "EXAMTAIL" ]
+//!
+//! payload = MAGIC(8) | version(u32) | header_len(u32) | header_ct | blob_area
 //! ```
 //!
-//! - header 用 K_manifest 加密，内含各场次的加密记录与题库索引；
-//! - data 用 K_payload 加密，内含剥离答案后的题库；
-//! - 每条场次记录再单独用 Argon2id(学号,场次,salt) 派生的 key 加密，
-//!   实现"试解密即命中"且不暴露名单。
+//! ## v2 相对 v1 的安全改进
+//!
+//! 1. **包里不再存储学生名单**。v1 把 `students: [..]` 明文放进信封内层，
+//!    任何持有 master 的人都能一次读出全班学号。v2 改为**每个学生一个信封**，
+//!    信封里只有该生自己的学号和场次元信息，且用 `Argon2id(学号‖场次‖salt)`
+//!    加密——**包里搜不到任何学号**。
+//! 2. **每场独立会话密钥**。v1 所有场次共用一个 `master` 派生的密钥，
+//!    泄漏一个场次等于全部沦陷。v2 每场随机生成 `S_i`，只存在于该场学生的
+//!    信封里，题库用 `HKDF(S_i, "bank")` 加密——场次之间密码学隔离。
+//! 3. **题库元信息（题量/pick）下沉到加密数据段**，解锁前不可见。
+//!
+//! ## 客户端解锁流程
+//!
+//! ```text
+//! 取网络时间 → 找时间窗内的场次 → Argon2id(学号,场次,salt) → 算 tag
+//!   → 按 tag 直接定位自己的信封（只算一次 Argon2）
+//!   → 解出 S_i → 解 data_i → 抽题
+//! ```
 
-use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+
 use zeroize::Zeroizing;
 
-use crate::crypto::{self, CryptoError};
+use crate::crypto::{self, CryptoError, KdfParams, TAG_LEN};
 use crate::model::Session;
 
 /// payload 起始魔数。
-pub const MAGIC: &[u8; 8] = b"EXAMPKG1";
+pub const MAGIC: &[u8; 8] = b"EXAMPKG2";
 /// 尾部魔数，用于从 exe 末尾定位 payload。
 pub const MAGIC_TAIL: &[u8; 8] = b"EXAMTAIL";
 /// 当前格式版本。
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// 容器错误。
 #[derive(Debug, thiserror::Error)]
@@ -39,17 +54,50 @@ pub enum ContainerError {
     Io(#[from] std::io::Error),
 }
 
-/// header 中单个场次的加密记录（外层用 HKDF(master,"manifest") 加密的索引）。
+/// 单个学生的信封：标签 + 密文。**不含学号明文**。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionEntry {
+pub struct Envelope {
+    /// `blake3(入场密钥)[..8]`，用于 O(1) 定位。
+    #[serde(with = "tag_serde")]
+    pub tag: [u8; TAG_LEN],
+    /// base64( AEAD(入场密钥, student_id ‖ session_secret ‖ exams) )
+    pub blob: String,
+}
+
+impl Envelope {
+    /// 尝试用给定的入场密钥打开信封。
+    fn open(&self, entry_key: &[u8; 32]) -> Result<Option<EntryPayload>, ContainerError> {
+        if crypto::envelope_tag(entry_key) != self.tag {
+            return Ok(None);
+        }
+        let blob = base64_decode(&self.blob)
+            .map_err(|e| ContainerError::Format(format!("信封 base64 损坏: {e}")))?;
+        let plain = crypto::decrypt(entry_key, &blob, b"envelope-v2")?;
+        let payload: EntryPayload = serde_json::from_slice(&plain)?;
+        Ok(Some(payload))
+    }
+}
+
+/// 信封内层明文：该生自己的学号、场次密钥、场次考试配置。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct EntryPayload {
+    student_id: u64,
+    /// 本场会话密钥（hex）。用它派生题库解密密钥。
+    session_secret: String,
+    exams: Vec<crate::model::SessionExam>,
+}
+
+/// 场次的 header 部分。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionHeader {
     pub session_id: u32,
     pub start: String,
     pub end: String,
-    /// 该场次的"入场密钥信封"：用 Argon2id(学号,场次,salt) 加密的 session 私钥，
-    /// 每个学生一条？不——这里采用"单信封 + 试解密"模式：
-    /// 内层用 HKDF(master,"session:{id}") 加密，外层再用学号派生 key 加密。
-    /// 客户端对每个候选学号逐一试解，解开即命中。
-    pub envelope: String, // base64( nonce || ct )
+    /// 本场题库密文在 blob_area 内的偏移与长度。
+    pub data_off: u32,
+    pub data_len: u32,
+    /// 每生一个信封，顺序无关、不含身份信息。
+    pub envelopes: Vec<Envelope>,
 }
 
 /// header 明文结构（加密前）。
@@ -57,11 +105,11 @@ pub struct SessionEntry {
 pub struct Header {
     pub version: u32,
     pub salt: String,
-    pub sessions: Vec<SessionEntry>,
-    /// 题库清单（exam_id, 题量, pick），便于客户端预览，不含题目内容。
-    pub bank_index: Vec<BankIndex>,
+    pub kdf: KdfParams,
+    pub sessions: Vec<SessionHeader>,
 }
 
+/// 题库元信息（解锁后可见）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BankIndex {
     pub exam_id: String,
@@ -70,39 +118,47 @@ pub struct BankIndex {
     pub pick: u32,
 }
 
-/// data 段明文结构（解密后）：剥离了答案的题库集合。
-///
-/// `picks` 记录"本包内每个题库实际应抽多少题"，由 builder 根据清单的
-/// 场次覆盖值解析后写入。客户端**必须**用这里的分值抽题，不能再用
-/// `ExamBank.pick`（那是题库自带的默认值，可能与清单不一致）。
+/// data 段明文结构（解密后）：剥离答案的题库 + 元信息。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PayloadData {
     pub banks: Vec<crate::model::ExamBank>,
-    /// exam_id -> 实际抽题数
+    /// exam_id -> 实际抽题数（清单设置的权威值）
     #[serde(default)]
-    pub picks: std::collections::BTreeMap<String, u32>,
+    pub picks: BTreeMap<String, u32>,
+    /// 题库元信息，解锁前不可见。
+    #[serde(default)]
+    pub bank_index: Vec<BankIndex>,
 }
 
 impl PayloadData {
-    /// 按 exam_id 取实际抽题数，缺失时回退到题库自带 pick。
+    /// 按 exam_id 取实际抽题数，缺失时回退。
     pub fn pick_for(&self, exam_id: &str, fallback: u32) -> u32 {
         self.picks.get(exam_id).copied().unwrap_or(fallback)
     }
 }
 
+/// 解锁后的场次信息。
+#[derive(Debug, Clone)]
+pub struct UnlockedSession {
+    pub session_id: u32,
+    pub start: String,
+    pub end: String,
+    pub exams: Vec<crate::model::SessionExam>,
+    /// 本场题库密文（已切好片）。
+    pub data_ct: Vec<u8>,
+    /// 本场会话密钥。
+    pub session_secret: Zeroizing<[u8; 32]>,
+}
+
 /// 打包：把题库与场次封装成 payload 字节串。
-///
-/// - `master` 64-hex 主密钥
-/// - `banks` 完整题库（含答案，函数内负责剥离）
-/// - `sessions` 场次定义
-/// - `salt` 全局 salt
 pub fn build_payload(
     master: &[u8; 32],
     banks: &[crate::model::ExamBank],
     sessions: &[Session],
     salt: &[u8],
+    kdf: KdfParams,
 ) -> Result<Vec<u8>, ContainerError> {
-    // 1. 剥离答案，生成发布版题库。
+    // 1. 剥离答案。
     let mut clean_banks = banks.to_vec();
     for bank in &mut clean_banks {
         for q in &mut bank.questions {
@@ -110,27 +166,132 @@ pub fn build_payload(
         }
     }
 
-    // 1.5 解析每个题库的实际抽题数。
-    //
-    // 场次的 `SessionExam.pick` 是权威值；未指定时才回退到题库自带 pick。
-    // 匹配不到题库时**直接报错**——绝不静默回退，否则清单里写的抽题数会
-    // 无声无息地失效（这是本仓库曾经真实出现过的 bug）。
-    let mut picks: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    // 2. 清单自身校验（时间窗、重复学号、场次编号）+ 抽题数解析。
+    validate_sessions(sessions)?;
+    let picks = resolve_picks(&clean_banks, sessions)?;
+
+    // 3. 逐场生成：会话密钥 → 题库密文 → 每生信封。
+    let mut blob_area: Vec<u8> = Vec::new();
+    let mut session_headers = Vec::with_capacity(sessions.len());
+
     for s in sessions {
+        let session_secret = crypto::random_key();
+        let bank_key = crypto::hkdf_derive(&session_secret, salt, "bank");
+
+        // 本场引用的题库（按清单顺序）
+        let mut session_banks = Vec::new();
+        let mut session_index = Vec::new();
+        for e in &s.exams {
+            let bank = match_bank(&e.file, &clean_banks).ok_or_else(|| {
+                ContainerError::Format(format!(
+                    "场次 {} 引用的题库 {} 匹配不到（请检查清单的 file 与题库 exam_id）",
+                    s.session_id, e.file
+                ))
+            })?;
+            let pick = picks.get(&bank.exam_id).copied().unwrap_or(bank.pick);
+            if pick as usize > bank.questions.len() {
+                return Err(ContainerError::Format(format!(
+                    "场次 {} 的题库 {} 要求抽 {pick} 题，但只有 {} 题",
+                    s.session_id,
+                    bank.exam_id,
+                    bank.questions.len()
+                )));
+            }
+            session_banks.push(bank.clone());
+            session_index.push(BankIndex {
+                exam_id: bank.exam_id.clone(),
+                title: bank.title.clone(),
+                total: bank.questions.len(),
+                pick,
+            });
+        }
+
+        let data = PayloadData {
+            banks: session_banks,
+            picks: picks.clone(),
+            bank_index: session_index,
+        };
+        let data_plain = serde_json::to_vec(&data)?;
+        let data_ct = crypto::encrypt(&bank_key, &data_plain, b"session-data")?;
+
+        let data_off = blob_area.len() as u32;
+        let data_len = data_ct.len() as u32;
+        blob_area.extend_from_slice(&data_ct);
+
+        // 每生一个信封。
+        let mut envelopes = Vec::with_capacity(s.students.len());
+        for &sid in &s.students {
+            let entry_key = crypto::session_entry_key(sid, s.session_id, salt, kdf)?;
+            let inner = EntryPayload {
+                student_id: sid,
+                session_secret: hex::encode(*session_secret),
+                exams: s.exams.clone(),
+            };
+            let inner_plain = serde_json::to_vec(&inner)?;
+            let blob = crypto::encrypt(&entry_key, &inner_plain, b"envelope-v2")?;
+            envelopes.push(Envelope {
+                tag: crypto::envelope_tag(&entry_key),
+                blob: base64_encode(&blob),
+            });
+        }
+
+        session_headers.push(SessionHeader {
+            session_id: s.session_id,
+            start: s.start.clone(),
+            end: s.end.clone(),
+            data_off,
+            data_len,
+            envelopes,
+        });
+    }
+
+    // 4. header 加密。K_manifest 用空 salt 派生（header 里才带真实 salt）。
+    let k_manifest = crypto::hkdf_derive(master, b"", "manifest");
+    let header = Header {
+        version: VERSION,
+        salt: hex::encode(salt),
+        kdf,
+        sessions: session_headers,
+    };
+    let header_plain = serde_json::to_vec(&header)?;
+    let header_ct = crypto::encrypt(&k_manifest, &header_plain, b"header-v2")?;
+
+    // 5. 组装 payload。
+    let mut out = Vec::with_capacity(16 + header_ct.len() + blob_area.len());
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&(header_ct.len() as u32).to_le_bytes());
+    out.extend_from_slice(&header_ct);
+    out.extend_from_slice(&blob_area);
+    Ok(out)
+}
+
+/// 解析每个题库的实际抽题数（清单值优先，多场取最大值）。
+fn resolve_picks(
+    banks: &[crate::model::ExamBank],
+    sessions: &[Session],
+) -> Result<BTreeMap<String, u32>, ContainerError> {
+    let mut picks: BTreeMap<String, u32> = BTreeMap::new();
+    for s in sessions {
+        if s.students.is_empty() {
+            return Err(ContainerError::Format(format!(
+                "场次 {} 的学号名单为空",
+                s.session_id
+            )));
+        }
         for e in &s.exams {
             let bank = match_bank(&e.file, banks).ok_or_else(|| {
                 ContainerError::Format(format!(
-                    "场次 {} 引用的题库 {} 匹配不到（请检查清单里的 file 与题库的 exam_id）",
+                    "场次 {} 引用的题库 {} 匹配不到",
                     s.session_id, e.file
                 ))
             })?;
             let effective = e.pick.unwrap_or(bank.pick);
             if effective as usize > bank.questions.len() {
                 return Err(ContainerError::Format(format!(
-                    "场次 {} 的题库 {} 要求抽 {} 题，但只有 {} 题",
+                    "场次 {} 的题库 {} 要求抽 {effective} 题，但只有 {} 题",
                     s.session_id,
                     bank.exam_id,
-                    effective,
                     bank.questions.len()
                 )));
             }
@@ -138,71 +299,110 @@ pub fn build_payload(
             *entry = (*entry).max(effective);
         }
     }
+    Ok(picks)
+}
 
-    // 2. data 段：K_payload 加密。
-    let k_payload = crypto::hkdf_derive(master, salt, "payload");
-    let data_plain = serde_json::to_vec(&PayloadData {
-        banks: clean_banks,
-        picks,
-    })?;
-    let data_ct = crypto::encrypt(&k_payload, &data_plain, b"payload")?;
-
-    // 3. header：含每场次的加密信封。
-    // 注意：K_manifest 必须用"空 salt"派生——因为 header 里才带真实 salt，
-    // 客户端需要先用 K_manifest 解开 header 才能拿到 salt。若这里用真实 salt，
-    // 客户端将陷入"要 salt 才能解 header，要解 header 才能拿 salt"的死锁。
-    let k_manifest = crypto::hkdf_derive(master, b"", "manifest");
-    let salt_hex = hex::encode(salt);
-    let mut entries = Vec::new();
+/// 构建期校验：这些错误必须在打包时炸，绝不能留到考场。
+///
+/// 与 `resolve_picks` 分开：这里的检查与题库无关，只依赖清单自身。
+pub fn validate_sessions(sessions: &[Session]) -> Result<(), ContainerError> {
+    if sessions.is_empty() {
+        return Err(ContainerError::Format("清单里没有任何场次".into()));
+    }
+    let mut seen_ids = std::collections::HashSet::new();
     for s in sessions {
-        // 内层：该场次的真实会话密钥（解锁 data 用不到，data 用 K_payload；
-        // 这里信封里封装的是"准入凭证"，解开即证明 学号∈本场）。
-        let k_session = crypto::hkdf_derive(master, salt, &format!("session:{}", s.session_id));
-        let inner = serde_json::to_vec(&serde_json::json!({
-            "session_id": s.session_id,
-            "students": s.students,
-            "exams": s.exams,
-        }))?;
-        let inner_ct = crypto::encrypt(&k_session, &inner, b"session-inner")?;
+        if !seen_ids.insert(s.session_id) {
+            return Err(ContainerError::Format(format!(
+                "场次编号 {} 重复",
+                s.session_id
+            )));
+        }
+        // 时间窗倒挂：学生永远解不开，属于"考场才炸"的错误。
+        match (parse_rfc3339(&s.start), parse_rfc3339(&s.end)) {
+            (Some(a), Some(b)) => {
+                if a >= b {
+                    return Err(ContainerError::Format(format!(
+                        "场次 {} 的开始时间必须早于结束时间（{} >= {}）",
+                        s.session_id, s.start, s.end
+                    )));
+                }
+            }
+            _ => {
+                return Err(ContainerError::Format(format!(
+                    "场次 {} 的时间无法解析为 RFC3339：start={:?} end={:?}",
+                    s.session_id, s.start, s.end
+                )));
+            }
+        }
+        // 重复学号：会让信封数量虚高，也说明清单有误。
+        let mut seen_students = std::collections::HashSet::new();
+        for &sid in &s.students {
+            if !seen_students.insert(sid) {
+                return Err(ContainerError::Format(format!(
+                    "场次 {} 的学号 {} 重复出现",
+                    s.session_id, sid
+                )));
+            }
+        }
+    }
+    Ok(())
+}
 
-        // 外层：用 Argon2id(学号,场次,salt) 逐学生加密？——不，单信封试解密模式：
-        // 外层用 HKDF(master, "envelope:{session}") 加密，客户端用 学号 派生 key 试解。
-        // 为避免逐学生生成信封（量大），采用"单信封 + 学号派生 key 试解"。
-        let k_envelope = crypto::hkdf_derive(master, salt, &format!("envelope:{}", s.session_id));
-        let envelope_ct = crypto::encrypt(&k_envelope, &inner_ct, b"session-envelope")?;
-        entries.push(SessionEntry {
-            session_id: s.session_id,
-            start: s.start.clone(),
-            end: s.end.clone(),
-            envelope: base64_encode(&envelope_ct),
-        });
+/// 解析 RFC3339 时间（供构建期校验用）。
+fn parse_rfc3339(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (date_part, rest) = s.split_once('T').or_else(|| s.split_once(' '))?;
+    let d: Vec<&str> = date_part.split('-').collect();
+    if d.len() != 3 {
+        return None;
+    }
+    let (y, mo, da): (i64, i64, i64) = (d[0].parse().ok()?, d[1].parse().ok()?, d[2].parse().ok()?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&da) {
+        return None;
     }
 
-    let header = Header {
-        version: VERSION,
-        salt: salt_hex,
-        sessions: entries,
-        bank_index: banks
-            .iter()
-            .map(|b| BankIndex {
-                exam_id: b.exam_id.clone(),
-                title: b.title.clone(),
-                total: b.questions.len(),
-                pick: b.pick,
-            })
-            .collect(),
+    let (time_part, offset_secs) = if let Some(t) = rest.strip_suffix('Z') {
+        (t, 0i64)
+    } else if let Some(idx) = rest.rfind(['+', '-']) {
+        let (t, off) = rest.split_at(idx);
+        let sign = if off.starts_with('-') { -1 } else { 1 };
+        let o = &off[1..];
+        let (oh, om) = o.split_once(':').unwrap_or((o, "0"));
+        let secs = sign * (oh.parse::<i64>().ok()? * 3600 + om.parse::<i64>().ok()? * 60);
+        (t, secs)
+    } else {
+        (rest, 0)
     };
-    let header_plain = serde_json::to_vec(&header)?;
-    let header_ct = crypto::encrypt(&k_manifest, &header_plain, b"header")?;
 
-    // 4. 组装 payload。
-    let mut out = Vec::new();
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&VERSION.to_le_bytes());
-    out.extend_from_slice(&(header_ct.len() as u32).to_le_bytes());
-    out.extend_from_slice(&header_ct);
-    out.extend_from_slice(&data_ct);
-    Ok(out)
+    let t: Vec<&str> = time_part.split(':').collect();
+    if t.len() < 2 {
+        return None;
+    }
+    let h: i64 = t[0].parse().ok()?;
+    let mi: i64 = t[1].parse().ok()?;
+    let se: i64 = match t.get(2) {
+        Some(x) => x.split('.').next().unwrap_or("0").parse().ok()?,
+        None => 0,
+    };
+    if h > 23 || mi > 59 || se > 60 {
+        return None;
+    }
+
+    let days = days_from_civil(y, mo, da) as i64;
+    let local = days * 86400 + h * 3600 + mi * 60 + se;
+    let utc = local - offset_secs;
+    if utc < 0 { None } else { Some(utc as u64) }
+}
+
+/// 公历日期 → 距 1970-01-01 的天数（Howard Hinnant 算法）。
+fn days_from_civil(y: i64, m: i64, d: i64) -> u64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146097 + doe - 719468) as u64
 }
 
 /// 给 exe 追加 payload，生成自解压学生端。
@@ -214,10 +414,7 @@ pub fn append_payload_to_exe(stub_bytes: &[u8], payload: &[u8]) -> Result<Vec<u8
     Ok(out)
 }
 
-/// 把清单里的 `file` 归一成候选键，用于匹配题库的 `exam_id`。
-///
-/// 依次尝试：完整去后缀路径 → 仅文件名去后缀 → 下划线转连字符。
-/// 调用方应**先按 exam_id 精确匹配**，匹配不到再用本函数做宽松匹配。
+/// 把清单里的 `file` 归一成候选键（仅文件名去 `.json`）。
 pub fn resolve_exam_key(file: &str) -> String {
     let base = file.rsplit('/').next().unwrap_or(file);
     let stem = base.strip_suffix(".json").unwrap_or(base);
@@ -226,11 +423,7 @@ pub fn resolve_exam_key(file: &str) -> String {
 
 /// 在题库列表里按清单的 `file` 找到对应题库。
 ///
-/// 匹配优先级：
-/// 1. `file` 去 `.json` 后与 `exam_id` 完全相等；
-/// 2. `file` 的完整路径（`/`→`-`、`_`→`-`）与 `exam_id` 相等；
-/// 3. 仅文件名去后缀与 `exam_id` 相等。
-///
+/// 匹配优先级：精确 stem → 完整路径归一 → 下划线归一。
 /// 都匹配不到返回 `None`，由调用方报错——**绝不静默回退**。
 pub fn match_bank<'a>(
     file: &str,
@@ -265,7 +458,6 @@ pub fn extract_payload(exe_bytes: &[u8]) -> Result<&[u8], ContainerError> {
     let len_bytes = &exe_bytes[exe_bytes.len() - 16..exe_bytes.len() - 8];
     let payload_len = u64::from_le_bytes(len_bytes.try_into().expect("8 字节切片")) as usize;
 
-    // 防溢出/越界：payload 长度必须能装进 footer 之前的部分。
     let available = exe_bytes.len() - FOOTER;
     if payload_len > available {
         return Err(ContainerError::Format(format!(
@@ -279,82 +471,93 @@ pub fn extract_payload(exe_bytes: &[u8]) -> Result<&[u8], ContainerError> {
     Ok(&exe_bytes[start..start + payload_len])
 }
 
-/// 解析 payload，返回 (K_manifest 解密后的 header, 加密的 data)。
-///
-/// 客户端流程：先解 header（需要 K_manifest，来自 stub 分片拼装），
-/// 再在时间门禁通过后解 data。
-pub fn parse_payload(
-    payload: &[u8],
+/// 解析 payload 的 header（需要 K_manifest）。
+pub fn parse_header<'a>(
+    payload: &'a [u8],
     k_manifest: &[u8; 32],
-) -> Result<(Header, Zeroizing<Vec<u8>>), ContainerError> {
+) -> Result<(Header, &'a [u8]), ContainerError> {
     if payload.len() < 16 || &payload[..8] != MAGIC {
         return Err(ContainerError::Format("payload 魔数错误".into()));
     }
-    let version = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    let version = u32::from_le_bytes(payload[8..12].try_into().expect("4 字节"));
     if version != VERSION {
-        return Err(ContainerError::Format(format!("不支持的版本 {version}")));
+        return Err(ContainerError::Format(format!(
+            "不支持的版本 {version}（当前支持 {VERSION}）"
+        )));
     }
-    let header_len = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
+    let header_len = u32::from_le_bytes(payload[12..16].try_into().expect("4 字节")) as usize;
+    if payload.len() < 16 + header_len {
+        return Err(ContainerError::Format("header 长度越界".into()));
+    }
     let header_ct = &payload[16..16 + header_len];
-    let data_ct = &payload[16 + header_len..];
+    let blob_area = &payload[16 + header_len..];
 
-    let header_plain = crypto::decrypt(k_manifest, header_ct, b"header")?;
+    let header_plain = crypto::decrypt(k_manifest, header_ct, b"header-v2")?;
     let header: Header = serde_json::from_slice(&header_plain)?;
-    Ok((header, Zeroizing::new(data_ct.to_vec())))
+    Ok((header, blob_area))
 }
 
-/// 用学号尝试解开某场次的信封；成功则返回该场次的完整定义。
+/// 用学号尝试解锁某个场次。
+///
+/// 返回 `Ok(None)` 表示该生不在这场；返回 `Err` 表示包损坏或密钥错误。
 pub fn try_unlock_session(
-    entry: &SessionEntry,
-    master: &[u8; 32],
-    salt: &[u8],
+    sh: &SessionHeader,
+    header: &Header,
+    blob_area: &[u8],
     student_id: u64,
+    salt: &[u8],
 ) -> Result<Option<UnlockedSession>, ContainerError> {
-    // 先验学生是否在该场：用 Argon2id(学号,场次,salt) 解一个"准入标签"。
-    // 简化实现：直接解信封外层（envelope），但 envelope key 是 HKDF(master,...) 而非学号派生——
-    // 真正的"学号试解"应该发生在更内层。这里改为：
-    // 1. 用 HKDF(master,"envelope:{id}") 解外层（任何持有 master 的人都能解）；
-    // 2. 内层 students 列表在做时间/学号匹配时校验。
-    //
-    // 因此本函数实际做的是：解外层 + 解内层，然后检查 student_id ∈ students。
-    let envelope_ct = base64_decode(&entry.envelope)
-        .map_err(|e| ContainerError::Format(format!("envelope base64: {e}")))?;
-    let k_envelope = crypto::hkdf_derive(master, salt, &format!("envelope:{}", entry.session_id));
-    let inner_ct = crypto::decrypt(&k_envelope, &envelope_ct, b"session-envelope")?;
+    let entry_key = crypto::session_entry_key(student_id, sh.session_id, salt, header.kdf)?;
+    let tag = crypto::envelope_tag(&entry_key);
 
-    let k_session = crypto::hkdf_derive(master, salt, &format!("session:{}", entry.session_id));
-    let inner_plain = crypto::decrypt(&k_session, &inner_ct, b"session-inner")?;
-    let v: serde_json::Value = serde_json::from_slice(&inner_plain)?;
-    let students: Vec<u64> = serde_json::from_value(v["students"].clone())?;
-    if !students.contains(&student_id) {
+    // 按标签直接定位，只对命中的信封做一次 AEAD 解密。
+    let Some(env) = sh.envelopes.iter().find(|e| e.tag == tag) else {
+        return Ok(None);
+    };
+    let Some(payload) = env.open(&entry_key)? else {
+        return Ok(None);
+    };
+    // 双保险：标签碰撞（概率 2^-64）时再校验学号。
+    if payload.student_id != student_id {
         return Ok(None);
     }
-    let exams: Vec<crate::model::SessionExam> = serde_json::from_value(v["exams"].clone())?;
+
+    let secret_bytes = hex::decode(&payload.session_secret)
+        .map_err(|e| ContainerError::Format(format!("session_secret hex: {e}")))?;
+    if secret_bytes.len() != 32 {
+        return Err(ContainerError::Format("session_secret 长度错误".into()));
+    }
+    let mut session_secret = [0u8; 32];
+    session_secret.copy_from_slice(&secret_bytes);
+
+    // 切片本场题库密文。
+    let off = sh.data_off as usize;
+    let len = sh.data_len as usize;
+    let end = off
+        .checked_add(len)
+        .ok_or_else(|| ContainerError::Format("data 偏移溢出".into()))?;
+    if end > blob_area.len() {
+        return Err(ContainerError::Format("data 偏移越界（包损坏）".into()));
+    }
+
     Ok(Some(UnlockedSession {
-        session_id: entry.session_id,
-        start: entry.start.clone(),
-        end: entry.end.clone(),
-        exams,
+        session_id: sh.session_id,
+        start: sh.start.clone(),
+        end: sh.end.clone(),
+        exams: payload.exams,
+        data_ct: blob_area[off..end].to_vec(),
+        session_secret: Zeroizing::new(session_secret),
     }))
 }
 
-/// 解锁后的场次信息。
-#[derive(Debug, Clone)]
-pub struct UnlockedSession {
-    pub session_id: u32,
-    pub start: String,
-    pub end: String,
-    pub exams: Vec<crate::model::SessionExam>,
-}
-
-/// 解密 data 段，得到可抽题的题库。
+/// 解密某场次的题库数据。
 pub fn decrypt_data(
-    master: &[u8; 32],
+    session_secret: &[u8; 32],
     salt: &[u8],
     data_ct: &[u8],
 ) -> Result<PayloadData, ContainerError> {
-    let k_payload = crypto::hkdf_derive(master, salt, "payload");
-    let plain = crypto::decrypt(&k_payload, data_ct, b"payload")?;
+    let bank_key = crypto::hkdf_derive(session_secret, salt, "bank");
+    let plain = crypto::decrypt(&bank_key, data_ct, b"session-data")?;
     let data: PayloadData = serde_json::from_slice(&plain)?;
     Ok(data)
 }
@@ -369,9 +572,30 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
     base64::engine::general_purpose::STANDARD.decode(s)
 }
 
-/// 计算 payload 完整性哈希（供 footer/日志）。
+/// 计算 payload 完整性哈希。
 pub fn payload_hash(payload: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(payload))
+}
+
+/// 把 `[u8; 8]` 标签序列化为 hex 字符串，便于人工检查与跨语言兼容。
+mod tag_serde {
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    pub fn serialize<S: Serializer>(tag: &[u8; 8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(tag))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 8], D::Error> {
+        let s = String::deserialize(d)?;
+        let raw = hex::decode(&s).map_err(de::Error::custom)?;
+        if raw.len() != 8 {
+            return Err(de::Error::custom("tag 必须是 8 字节"));
+        }
+        let mut out = [0u8; 8];
+        out.copy_from_slice(&raw);
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -414,67 +638,231 @@ mod tests {
         [0xAB; 32]
     }
 
+    fn kdf() -> KdfParams {
+        KdfParams::cheap_for_tests()
+    }
+
+    const SALT: &[u8] = b"test-salt-1234";
+
+    fn k_manifest() -> [u8; 32] {
+        *crypto::hkdf_derive(&master(), b"", "manifest")
+    }
+
+    fn unlock(
+        payload: &[u8],
+        sid: u64,
+        session_id: u32,
+    ) -> Result<Option<UnlockedSession>, ContainerError> {
+        let (header, blob) = parse_header(payload, &k_manifest())?;
+        let sh = header
+            .sessions
+            .iter()
+            .find(|s| s.session_id == session_id)
+            .ok_or_else(|| ContainerError::Format("场次不存在".into()))?;
+        try_unlock_session(sh, &header, blob, sid, SALT)
+    }
+
     #[test]
-    fn build_and_parse_roundtrip() {
+    fn build_and_unlock_roundtrip() {
         let banks = vec![bank("math", 50)];
         let sessions = vec![session(1, vec![2021001, 2021002])];
-        let salt = b"test-salt-1234";
-        let payload = build_payload(&master(), &banks, &sessions, salt).unwrap();
+        let payload = build_payload(&master(), &banks, &sessions, SALT, kdf()).unwrap();
 
-        // 用 K_manifest 解 header（K_manifest 用空 salt 派生，与 client 一致）。
-        let k_manifest = crypto::hkdf_derive(&master(), b"", "manifest");
-        let (header, data_ct) = parse_payload(&payload, &k_manifest).unwrap();
-        assert_eq!(header.version, VERSION);
-        assert_eq!(header.sessions.len(), 1);
-        assert_eq!(header.bank_index[0].total, 50);
-
-        // 解锁场次（学号在名单中）。
-        let unlocked = try_unlock_session(&header.sessions[0], &master(), salt, 2021001).unwrap();
-        assert!(unlocked.is_some());
-        // 学号不在名单中。
-        let denied = try_unlock_session(&header.sessions[0], &master(), salt, 9999999).unwrap();
-        assert!(denied.is_none());
-
-        // 解 data，答案应已被剥离。
-        let data = decrypt_data(&master(), salt, &data_ct).unwrap();
+        let unlocked = unlock(&payload, 2021001, 1).unwrap().expect("应解锁成功");
+        assert_eq!(unlocked.session_id, 1);
+        let data = decrypt_data(&unlocked.session_secret, SALT, &unlocked.data_ct).unwrap();
         assert_eq!(data.banks[0].questions.len(), 50);
-        assert!(data.banks[0].questions.iter().all(|q| q.answer.is_none()));
+        assert!(
+            data.banks[0].questions.iter().all(|q| q.answer.is_none()),
+            "答案必须被剥离"
+        );
+        assert_eq!(data.bank_index[0].total, 50);
+    }
+
+    #[test]
+    fn unknown_student_is_denied() {
+        let banks = vec![bank("math", 50)];
+        let payload =
+            build_payload(&master(), &banks, &[session(1, vec![2021001])], SALT, kdf()).unwrap();
+        assert!(unlock(&payload, 9999999, 1).unwrap().is_none());
+    }
+
+    /// **核心安全验收**：payload 里不得出现任何学号的明文。
+    #[test]
+    fn student_ids_never_appear_in_payload() {
+        let students: Vec<u64> = (2021001..2021011).collect();
+        let banks = vec![bank("math", 50)];
+        let payload = build_payload(
+            &master(),
+            &banks,
+            &[session(1, students.clone())],
+            SALT,
+            kdf(),
+        )
+        .unwrap();
+
+        for sid in &students {
+            assert!(
+                !contains_bytes(&payload, sid.to_string().as_bytes()),
+                "payload 中出现了学号明文 {sid}"
+            );
+            assert!(
+                !contains_bytes(&payload, &sid.to_le_bytes()),
+                "payload 中出现了学号 LE 字节 {sid}"
+            );
+            assert!(
+                !contains_bytes(&payload, &sid.to_be_bytes()),
+                "payload 中出现了学号 BE 字节 {sid}"
+            );
+        }
+    }
+
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// 场次之间必须密码学隔离。
+    #[test]
+    fn sessions_are_cryptographically_isolated() {
+        let banks = vec![bank("math", 30), bank("english", 20)];
+        let s1 = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![1001],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: None,
+            }],
+        };
+        let s2 = Session {
+            session_id: 2,
+            start: "2026-12-20T14:00:00+08:00".into(),
+            end: "2026-12-20T16:00:00+08:00".into(),
+            students: vec![2002],
+            exams: vec![SessionExam {
+                file: "english.json".into(),
+                pick: None,
+            }],
+        };
+        let payload = build_payload(&master(), &banks, &[s1, s2], SALT, kdf()).unwrap();
+
+        let u1 = unlock(&payload, 1001, 1).unwrap().expect("场次1应解锁");
+        let u2 = unlock(&payload, 2002, 2).unwrap().expect("场次2应解锁");
+
+        assert_ne!(*u1.session_secret, *u2.session_secret);
+        assert!(
+            decrypt_data(&u1.session_secret, SALT, &u2.data_ct).is_err(),
+            "场次1的密钥竟能解开场次2的题库"
+        );
+        assert!(unlock(&payload, 1001, 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn explicit_pick_is_honored() {
+        let banks = vec![bank("math", 50)];
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![1],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: Some(17),
+            }],
+        };
+        let payload = build_payload(&master(), &banks, &[s], SALT, kdf()).unwrap();
+        let u = unlock(&payload, 1, 1).unwrap().unwrap();
+        let data = decrypt_data(&u.session_secret, SALT, &u.data_ct).unwrap();
+        assert_eq!(data.pick_for("math", 5), 17);
+        assert_eq!(data.bank_index[0].pick, 17);
+    }
+
+    #[test]
+    fn pick_exceeds_pool_is_build_error() {
+        let banks = vec![bank("math", 6)];
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![1],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: Some(99),
+            }],
+        };
+        assert!(build_payload(&master(), &banks, &[s], SALT, kdf()).is_err());
+    }
+
+    #[test]
+    fn unknown_bank_reference_is_error() {
+        let banks = vec![bank("math", 10)];
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![1],
+            exams: vec![SessionExam {
+                file: "nope.json".into(),
+                pick: None,
+            }],
+        };
+        assert!(build_payload(&master(), &banks, &[s], SALT, kdf()).is_err());
+    }
+
+    #[test]
+    fn empty_roster_is_build_error() {
+        let banks = vec![bank("math", 10)];
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: None,
+            }],
+        };
+        assert!(build_payload(&master(), &banks, &[s], SALT, kdf()).is_err());
     }
 
     #[test]
     fn append_and_extract() {
-        let stub = b"FAKE_STUB_BYTES_1234567890";
-        let banks = vec![bank("math", 20)];
         let payload = build_payload(
             &master(),
-            &banks,
+            &[bank("math", 20)],
             &[session(1, vec![1])],
-            b"salt-0123456789",
+            SALT,
+            kdf(),
         )
         .unwrap();
-        let sfx = append_payload_to_exe(stub, &payload).unwrap();
-        let extracted = extract_payload(&sfx).unwrap();
-        assert_eq!(extracted, payload.as_slice());
+        let sfx = append_payload_to_exe(b"FAKE_STUB_BYTES_1234567890", &payload).unwrap();
+        assert_eq!(extract_payload(&sfx).unwrap(), payload.as_slice());
     }
 
     #[test]
     fn wrong_manifest_key_fails() {
-        let banks = vec![bank("math", 10)];
         let payload = build_payload(
             &master(),
-            &banks,
+            &[bank("math", 10)],
             &[session(1, vec![1])],
-            b"salt-0123456789",
+            SALT,
+            kdf(),
         )
         .unwrap();
-        let wrong = [0xCD; 32];
-        assert!(parse_payload(&payload, &wrong).is_err());
+        assert!(parse_header(&payload, &[0xCD; 32]).is_err());
     }
 
-    /// 回归：损坏/截断的包必须返回错误，不能 panic（曾经 subtract with overflow）。
     #[test]
     fn corrupt_footer_returns_error() {
-        let payload = build_payload(&master(), &[], &[], b"salt-0123456789").unwrap();
+        let payload = build_payload(
+            &master(),
+            &[bank("math", 5)],
+            &[session(1, vec![1])],
+            SALT,
+            kdf(),
+        )
+        .unwrap();
         let mut sfx = append_payload_to_exe(b"STUB", &payload).unwrap();
         let n = sfx.len();
         sfx[n - 16..n - 8].copy_from_slice(&u64::MAX.to_le_bytes());
@@ -490,104 +878,113 @@ mod tests {
 
     #[test]
     fn tampered_header_returns_error() {
-        let banks = vec![bank("math", 10)];
         let mut payload = build_payload(
             &master(),
-            &banks,
+            &[bank("math", 10)],
             &[session(1, vec![1])],
-            b"salt-0123456789",
+            SALT,
+            kdf(),
         )
         .unwrap();
-        payload[20] ^= 0xFF; // 篡改 header 密文
-        let k_manifest = crypto::hkdf_derive(&master(), b"", "manifest");
-        assert!(parse_payload(&payload, &k_manifest).is_err());
-    }
-
-    /// 回归：清单里 SessionExam.pick 必须真正生效（曾经完全被忽略）。
-    #[test]
-    fn session_pick_override_is_applied() {
-        use crate::model::SessionExam;
-        let banks = vec![bank("demo-math", 50)];
-        let s = Session {
-            session_id: 1,
-            start: "2026-12-20T09:00:00+08:00".into(),
-            end: "2026-12-20T11:00:00+08:00".into(),
-            students: vec![1],
-            // 清单要求抽 17 题，题库自带 pick 是 5。
-            exams: vec![SessionExam {
-                file: "demo-math.json".into(),
-                pick: Some(17),
-            }],
-        };
-        let salt = b"salt-0123456789";
-        let payload = build_payload(&master(), &banks, &[s], salt).unwrap();
-        let k_manifest = crypto::hkdf_derive(&master(), b"", "manifest");
-        let (_, data_ct) = parse_payload(&payload, &k_manifest).unwrap();
-        let data = decrypt_data(&master(), salt, &data_ct).unwrap();
-        assert_eq!(
-            data.pick_for("demo-math", 5),
-            17,
-            "清单的 pick 覆盖必须写入 payload"
-        );
-    }
-
-    /// 回归：清单引用不存在的题库必须报错，不能静默忽略。
-    #[test]
-    fn unknown_bank_reference_is_error() {
-        use crate::model::SessionExam;
-        let banks = vec![bank("demo-math", 50)];
-        let s = Session {
-            session_id: 1,
-            start: "x".into(),
-            end: "y".into(),
-            students: vec![1],
-            exams: vec![SessionExam {
-                file: "nonexistent.json".into(),
-                pick: None,
-            }],
-        };
-        let err = build_payload(&master(), &banks, &[s], b"salt-0123456789").unwrap_err();
-        assert!(matches!(err, ContainerError::Format(_)));
-    }
-
-    /// 回归：pick 超过题量必须在打包时报错。
-    #[test]
-    fn pick_exceeds_pool_is_build_error() {
-        use crate::model::SessionExam;
-        let banks = vec![bank("demo-math", 6)];
-        let s = Session {
-            session_id: 1,
-            start: "x".into(),
-            end: "y".into(),
-            students: vec![1],
-            exams: vec![SessionExam {
-                file: "demo-math.json".into(),
-                pick: Some(99),
-            }],
-        };
-        assert!(build_payload(&master(), &banks, &[s], b"salt-0123456789").is_err());
+        payload[20] ^= 0xFF;
+        assert!(parse_header(&payload, &k_manifest()).is_err());
     }
 
     #[test]
     fn match_bank_prefers_exact_exam_id() {
         let banks = vec![bank("demo-math", 50), bank("math", 10)];
-        // file = "demo/math.json"：文件名 stem 是 "math"，与 exam_id "math" 精确相等，
-        // 应优先命中 "math" 而不是靠路径猜出的 "demo-math"。
-        let hit = match_bank("demo/math.json", &banks).unwrap();
-        assert_eq!(hit.exam_id, "math");
+        assert_eq!(
+            match_bank("demo/math.json", &banks).unwrap().exam_id,
+            "math"
+        );
     }
 
     #[test]
     fn match_bank_falls_back_to_full_path() {
-        // 只有 demo-math 时，路径归一化后应能命中。
         let banks = vec![bank("demo-math", 50)];
-        let hit = match_bank("demo/math.json", &banks).unwrap();
-        assert_eq!(hit.exam_id, "demo-math");
+        assert_eq!(
+            match_bank("demo/math.json", &banks).unwrap().exam_id,
+            "demo-math"
+        );
     }
 
     #[test]
     fn match_bank_returns_none_when_missing() {
-        let banks = vec![bank("math", 10)];
-        assert!(match_bank("nope.json", &banks).is_none());
+        assert!(match_bank("nope.json", &[bank("math", 10)]).is_none());
+    }
+
+    #[test]
+    fn rejects_reversed_time_window() {
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T11:00:00+08:00".into(),
+            end: "2026-12-20T09:00:00+08:00".into(),
+            students: vec![1],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: None,
+            }],
+        };
+        assert!(validate_sessions(&[s]).is_err(), "时间倒挂必须报错");
+    }
+
+    #[test]
+    fn rejects_duplicate_students() {
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![2021001, 2021001],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: None,
+            }],
+        };
+        assert!(validate_sessions(&[s]).is_err(), "重复学号必须报错");
+    }
+
+    #[test]
+    fn rejects_duplicate_session_ids() {
+        let mk = |id: u32| Session {
+            session_id: id,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![1],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: None,
+            }],
+        };
+        assert!(validate_sessions(&[mk(1), mk(1)]).is_err());
+        assert!(validate_sessions(&[mk(1), mk(2)]).is_ok());
+    }
+
+    #[test]
+    fn rejects_unparseable_time() {
+        let s = Session {
+            session_id: 1,
+            start: "tomorrow".into(),
+            end: "next week".into(),
+            students: vec![1],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: None,
+            }],
+        };
+        assert!(validate_sessions(&[s]).is_err());
+    }
+
+    #[test]
+    fn parse_rfc3339_handles_offsets() {
+        let a = parse_rfc3339("2026-12-20T09:00:00+08:00").unwrap();
+        let b = parse_rfc3339("2026-12-20T01:00:00Z").unwrap();
+        assert_eq!(a, b);
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+    }
+
+    #[test]
+    fn resolve_exam_key_normalizes() {
+        assert_eq!(resolve_exam_key("demo/math.json"), "math");
+        assert_eq!(resolve_exam_key("math.json"), "math");
     }
 }

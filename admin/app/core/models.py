@@ -78,12 +78,38 @@ class Session(BaseModel):
         return self
 
 
+class KdfParams(BaseModel):
+    """Argon2id 参数。与 Rust 端 crypto::KdfParams 对应。
+
+    这些值同时决定"打包耗时"与"攻击者枚举名单的成本"：
+    - 默认 m=19456(19MiB) / t=2 / p=1，单次约 40ms；
+    - 1000 名学生的包约 5 秒（8 线程）；
+    - 攻击者枚举 10^5 个学号约 67 分钟。
+    **不要为了"打包快"把这些值调低。**
+    """
+
+    m_cost: int = 19456
+    t_cost: int = 2
+    p_cost: int = 1
+
+    @model_validator(mode="after")
+    def _check(self) -> KdfParams:
+        if self.m_cost < 8192:
+            raise ValueError(f"m_cost 过低（{self.m_cost}），会让学号枚举变得廉价")
+        if self.t_cost < 2:
+            raise ValueError(f"t_cost 过低（{self.t_cost}）")
+        if self.p_cost < 1:
+            raise ValueError("p_cost 必须 ≥ 1")
+        return self
+
+
 class Manifest(BaseModel):
-    version: int = 1
+    version: int = 2
     salt: str
     sessions: list[Session]
     time_sources: list[str] = Field(default_factory=list)
     time_pubkey: str = ""
+    kdf: KdfParams = Field(default_factory=KdfParams)
 
     @field_validator("salt")
     @classmethod

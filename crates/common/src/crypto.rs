@@ -19,10 +19,60 @@ pub enum CryptoError {
     BadKeyLen(usize),
     #[error("hex 解码失败: {0}")]
     Hex(#[from] hex::FromHexError),
+    #[error("KDF 参数非法: {0}")]
+    Kdf(String),
 }
 
 /// AES-256-GCM 随机 nonce 长度（96 bit）。
 pub const NONCE_LEN: usize = 12;
+
+/// 信封标签长度（字节）。
+pub const TAG_LEN: usize = 8;
+
+/// Argon2id 参数。
+///
+/// **参数随包一起存储**（写在 header 里），因此将来调参不会让旧包失效，
+/// 单元测试也可以用廉价参数跑得飞快。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KdfParams {
+    /// 内存成本（KiB）
+    pub m_cost: u32,
+    /// 迭代次数
+    pub t_cost: u32,
+    /// 并行度
+    pub p_cost: u32,
+}
+
+impl Default for KdfParams {
+    /// 生产参数：19 MiB / 2 轮 / 1 路 ≈ 单次 40ms（release）。
+    ///
+    /// 这个值同时决定"打包耗时"与"攻击者枚举成本"：
+    /// - 1000 名学生的包，8 线程约 5 秒；
+    /// - 攻击者枚举 10^5 个学号约 67 分钟，10^6 约 11 小时。
+    fn default() -> Self {
+        Self {
+            m_cost: 19456,
+            t_cost: 2,
+            p_cost: 1,
+        }
+    }
+}
+
+impl KdfParams {
+    /// 仅供测试使用的最低成本参数。
+    pub fn cheap_for_tests() -> Self {
+        Self {
+            m_cost: 8,
+            t_cost: 1,
+            p_cost: 1,
+        }
+    }
+
+    fn to_argon2(self) -> Result<argon2::Params, CryptoError> {
+        argon2::Params::new(self.m_cost, self.t_cost, self.p_cost, Some(32))
+            .map_err(|e| CryptoError::Kdf(e.to_string()))
+    }
+}
 
 /// 从 64 位十六进制字符串解析主密钥（32 字节）。
 pub fn master_from_hex(s: &str) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
@@ -37,15 +87,20 @@ pub fn master_from_hex(s: &str) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
 
 /// 生成随机主密钥，返回 64 位 hex 字符串。
 pub fn generate_master_hex() -> String {
+    hex::encode(*random_key())
+}
+
+/// 生成 32 字节随机密钥。
+pub fn random_key() -> Zeroizing<[u8; 32]> {
     use rand::RngCore;
     let mut key = [0u8; 32];
     rand::rng().fill_bytes(&mut key);
-    hex::encode(key)
+    Zeroizing::new(key)
 }
 
 /// HKDF-SHA256 派生子密钥。
 ///
-/// `ikm` 为主密钥，`info` 为用途标签（如 "payload" / "stub" / "manifest"）。
+/// `ikm` 为主密钥，`info` 为用途标签（如 "payload" / "bank" / "manifest"）。
 pub fn hkdf_derive(ikm: &[u8; 32], salt: &[u8], info: &str) -> Zeroizing<[u8; 32]> {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut okm = [0u8; 32];
@@ -97,22 +152,40 @@ pub fn decrypt(key: &[u8; 32], data: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<
     Ok(Zeroizing::new(pt))
 }
 
-/// 学号入场密钥派生：用 Argon2id 拉慢离线爆破。
+/// 学号入场密钥派生。
 ///
-/// 用于"逐条试解密"的场次记录外层加密。每次尝试约 100ms，
-/// 把 10^10 学号空间的爆破从几小时拉到数十年。
-pub fn session_entry_key(student_id: u64, session_id: u32, salt: &[u8]) -> Zeroizing<[u8; 32]> {
+/// 用 Argon2id 把"每个候选学号一次尝试"的成本抬到约 40ms，
+/// 从而把离线枚举名单的成本从"瞬间"抬到"数十分钟以上"。
+pub fn session_entry_key(
+    student_id: u64,
+    session_id: u32,
+    salt: &[u8],
+    kdf: KdfParams,
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
     let mut input = Vec::with_capacity(12);
     input.extend_from_slice(&student_id.to_le_bytes());
     input.extend_from_slice(&session_id.to_le_bytes());
-    // Argon2id 默认参数即可；对单条记录解密足够快，对爆破足够慢。
-    let params = argon2::Params::new(8192, 3, 1, Some(32)).expect("argon2 params");
+    let params = kdf.to_argon2()?;
     let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut out = [0u8; 32];
     argon
         .hash_password_into(&input, salt, &mut out)
-        .expect("argon2 hash");
-    Zeroizing::new(out)
+        .map_err(|e| CryptoError::Kdf(e.to_string()))?;
+    Ok(Zeroizing::new(out))
+}
+
+/// 由入场密钥算出信封标签。
+///
+/// 标签让客户端 **只算一次 Argon2** 就能定位自己的信封，
+/// 而不是对全部信封逐个尝试（1000 人时那是 40 秒 vs 40 毫秒的差别）。
+///
+/// 标签本身不额外泄漏信息：攻击者想用标签反查学号，
+/// 仍然必须对每个候选学号跑一次 Argon2。
+pub fn envelope_tag(key: &[u8; 32]) -> [u8; TAG_LEN] {
+    let h = blake3::hash(key);
+    let mut tag = [0u8; TAG_LEN];
+    tag.copy_from_slice(&h.as_bytes()[..TAG_LEN]);
+    tag
 }
 
 #[cfg(test)]
@@ -174,10 +247,29 @@ mod tests {
 
     #[test]
     fn session_entry_key_deterministic() {
-        let a = session_entry_key(2021001, 1, b"salt-123456789012");
-        let b = session_entry_key(2021001, 1, b"salt-123456789012");
+        let kdf = KdfParams::cheap_for_tests();
+        let a = session_entry_key(2021001, 1, b"salt-123456789012", kdf).unwrap();
+        let b = session_entry_key(2021001, 1, b"salt-123456789012", kdf).unwrap();
         assert_eq!(*a, *b);
-        let c = session_entry_key(2021002, 1, b"salt-123456789012");
+        let c = session_entry_key(2021002, 1, b"salt-123456789012", kdf).unwrap();
         assert_ne!(*a, *c);
+        let d = session_entry_key(2021001, 2, b"salt-123456789012", kdf).unwrap();
+        assert_ne!(*a, *d);
+    }
+
+    /// 生产参数必须明显强于测试参数，防止有人误把 cheap 参数用于发布。
+    #[test]
+    fn production_kdf_params_are_strong() {
+        let p = KdfParams::default();
+        assert!(p.m_cost >= 19456, "内存成本过低，枚举会变得廉价");
+        assert!(p.t_cost >= 2, "迭代次数过低");
+    }
+
+    #[test]
+    fn envelope_tag_is_stable_and_short() {
+        let k = [3u8; 32];
+        assert_eq!(envelope_tag(&k), envelope_tag(&k));
+        assert_eq!(envelope_tag(&k).len(), TAG_LEN);
+        assert_ne!(envelope_tag(&k), envelope_tag(&[4u8; 32]));
     }
 }

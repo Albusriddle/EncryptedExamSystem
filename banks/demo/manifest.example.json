@@ -1,8 +1,9 @@
 {
-  "version": 1,
+  "version": 2,
   "salt": "00112233445566778899aabbccddeeff",
-  "time_sources": ["https://time.example.com/api/time"],
+  "time_sources": [],
   "time_pubkey": "",
+  "kdf": { "m_cost": 19456, "t_cost": 2, "p_cost": 1 },
   "sessions": [
     {
       "session_id": 1,
