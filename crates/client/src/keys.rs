@@ -34,6 +34,28 @@ pub fn is_embedded() -> bool {
     EMBEDDED
 }
 
+/// **供 builder 检测 stub 状态用的标记字符串**。
+///
+/// builder 打包时会扫描 stub 二进制，确认它是否已嵌入密钥：
+/// - 找到 `EXAMKEY:EMBEDDED` → 学生端免输密钥，正常；
+/// - 找到 `EXAMKEY:PLAIN` → 学生端需要 `--master`，builder 必须**明确警告**；
+/// - 两个都没有 → 不是本项目的 client 构建产物。
+///
+/// ⚠ 关键：**同一时刻只能有一个标记出现在二进制里**。
+/// 早期实现把两个常量都定义成 `static`，结果两个字符串都进了二进制，
+/// 导致未嵌入的 stub 也被误判为"已嵌入"。现在用 `cfg` 条件编译，
+/// 保证只有一个标记存在。
+#[cfg(any())]
+const _UNREACHABLE: () = ();
+
+/// 嵌入状态标记（只会在其中一种构建里存在）。
+#[used]
+pub static KEY_STATE_MARKER: &str = if EMBEDDED {
+    "EXAMKEY:EMBEDDED"
+} else {
+    "EXAMKEY:PLAIN"
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,6 +64,16 @@ mod tests {
     fn mask_length_matches_shards() {
         assert_eq!(MASK.len(), 32);
         assert_eq!(SHARDS.len(), 32);
+    }
+
+    #[test]
+    fn marker_matches_embedded_state() {
+        let expected = if EMBEDDED {
+            "EXAMKEY:EMBEDDED"
+        } else {
+            "EXAMKEY:PLAIN"
+        };
+        assert_eq!(KEY_STATE_MARKER, expected, "标记必须与嵌入状态一致");
     }
 
     /// 未设置 EXAM_KEYFILE 时（CI/开发默认）应为开发模式。

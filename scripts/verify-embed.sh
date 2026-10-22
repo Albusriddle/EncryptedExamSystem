@@ -111,4 +111,33 @@ ok "不一致的 master 被拒绝"
 cargo build --release -p client >/dev/null 2>&1
 
 echo
+echo "== stub 状态检测（防止误发未嵌入的包）=="
+# 未嵌入的 stub 打包时必须警告
+cargo build --release -p client >/dev/null 2>&1
+OUT=$("$BIN/exam-builder.exe" build --manifest "$TMP/live.json" --banks banks/ \
+      --stub "$BIN/exam-client.exe" --out "$TMP/plain.exe" --master "$MASTER" 2>&1)
+echo "$OUT" | grep -q "未内嵌密钥" || fail "未嵌入的 stub 未被警告"
+ok "未嵌入 stub 被正确警告"
+
+# 已嵌入的 stub 打包时必须确认
+OUT=$("$BIN/exam-builder.exe" build --manifest "$TMP/live.json" --banks banks/ \
+      --stub "$TMP/stub_emb.exe" --out "$TMP/emb.exe" --master "$MASTER" 2>&1)
+echo "$OUT" | grep -q "已内嵌密钥" || fail "已嵌入的 stub 未被识别"
+ok "已嵌入 stub 被正确识别"
+
+# 非本项目的 exe 必须提示无标记
+printf 'NOT_A_CLIENT' > "$TMP/fake.exe"
+OUT=$("$BIN/exam-builder.exe" build --manifest "$TMP/live.json" --banks banks/ \
+      --stub "$TMP/fake.exe" --out "$TMP/fake_out.exe" --master "$MASTER" 2>&1)
+echo "$OUT" | grep -q "没有密钥状态标记" || fail "非本项目 exe 未被识别"
+ok "非本项目 exe 被正确识别"
+
+# 二进制里两个标记不能同时存在
+grep -aq "EXAMKEY:EMBEDDED" "$TMP/stub_emb.exe" || fail "嵌入版缺少 EMBEDDED 标记"
+if grep -aq "EXAMKEY:PLAIN" "$TMP/stub_emb.exe"; then
+  fail "嵌入版同时含有 PLAIN 标记（状态判定会出错）"
+fi
+ok "标记互斥"
+
+echo
 echo "✓ 密钥嵌入验收全部通过"

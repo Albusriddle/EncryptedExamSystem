@@ -149,6 +149,9 @@ fn main() -> Result<()> {
     .context("抽题失败")?;
 
     // 7. 展示。
+    // 触碰标记常量，确保它被链接进二进制（builder 依赖它判断 stub 状态）。
+    std::hint::black_box(keys::KEY_STATE_MARKER);
+
     println!("✔ 解锁成功");
     println!("  学号: {}", cli.student);
     if !keys::is_embedded() {

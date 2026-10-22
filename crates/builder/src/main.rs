@@ -201,6 +201,20 @@ fn build(
             .context("构建 payload")?;
     let stub =
         std::fs::read(&stub_path).with_context(|| format!("读取 stub {}", stub_path.display()))?;
+
+    // 检测 stub 是否已嵌入密钥。
+    // 这一步非常重要：若 stub 未嵌入，学生端运行时会报"缺少密钥"，
+    // 而管理员很可能以为已经嵌入——直到考场上才发现。
+    let stub_embedded = contains_bytes(&stub, b"EXAMKEY:EMBEDDED");
+    let stub_plain = contains_bytes(&stub, b"EXAMKEY:PLAIN");
+    if !stub_embedded && !stub_plain {
+        println!(
+            "⚠ 警告：stub 里没有密钥状态标记（{}）。\n\
+             这可能不是本项目的 client 构建产物，或版本过旧。",
+            stub_path.display()
+        );
+    }
+
     let sfx = container::append_payload_to_exe(&stub, &payload)?;
     std::fs::write(&out_path, &sfx).with_context(|| format!("写出 {}", out_path.display()))?;
 
@@ -215,6 +229,17 @@ fn build(
         manifest.kdf.m_cost, manifest.kdf.t_cost, manifest.kdf.p_cost
     );
 
+    if stub_embedded {
+        println!("  ✔ 学生端已内嵌密钥：学生运行后只需输入学号");
+    } else {
+        println!();
+        println!("⚠⚠ 注意：这个学生端**未内嵌密钥**，学生必须提供 --master 才能解锁。");
+        println!("   若要学生免输密钥，请：");
+        println!("     1. 用本命令加上 --emit-keyfile kf.txt 导出 K_manifest；");
+        println!("     2. 设置 EXAM_KEYFILE=kf.txt 后重新编译 client；");
+        println!("     3. 用新编译出的 client 作为 --stub 重新打包。");
+    }
+
     // 输出 K_manifest，供学生端编译时嵌入（使其免输 master）。
     if let Some(path) = emit_keyfile {
         let k_manifest = container::manifest_key(&master);
@@ -227,6 +252,14 @@ fn build(
         println!("  ⚠ 这是 K_manifest 而非 master：泄漏后只能看到场次安排，拿不到题目。");
     }
     Ok(())
+}
+
+/// 在字节流里查找子串（stub 里嵌入了状态标记，用于判断是否已内嵌密钥）。
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 fn verify(package: PathBuf, master_hex: &str) -> Result<()> {
