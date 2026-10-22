@@ -1,0 +1,8 @@
+# 文本文件统一 LF，避免 Windows 上反复的 CRLF 警告
+* text=auto eol=lf
+
+# 二进制
+*.exe binary
+*.png binary
+*.jpg binary
+*.pdf binary
