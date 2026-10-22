@@ -1,0 +1,29 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+# 打 tag 才出 Windows 包，节省私有仓库的 Actions 分钟。
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build（release 用 msvc，GitHub runner 自带 VS）
+        run: cargo build --release --workspace --target x86_64-pc-windows-msvc
+      - name: 打包产物
+        run: |
+          mkdir release
+          copy target\x86_64-pc-windows-msvc\release\exam-builder.exe release\
+          copy target\x86_64-pc-windows-msvc\release\exam-client.exe release\
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exam-tools-windows
+          path: release/
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.exe

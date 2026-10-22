@@ -1,0 +1,16 @@
+[package]
+name = "builder"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "exam-builder"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }

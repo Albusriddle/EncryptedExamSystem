@@ -1,0 +1,13 @@
+{
+  "exam_id": "demo-math",
+  "title": "演示题库 · 数学",
+  "pick": 3,
+  "questions": [
+    { "id": "m001", "type": "single", "stem": "1+1=?", "options": ["1", "2", "3", "4"], "answer": "B", "score": 2 },
+    { "id": "m002", "type": "single", "stem": "2*3=?", "options": ["5", "6", "7", "8"], "answer": "B", "score": 2 },
+    { "id": "m003", "type": "judge",  "stem": "0 是自然数。", "options": ["对", "错"], "answer": "A", "score": 1 },
+    { "id": "m004", "type": "single", "stem": "9 的平方根是?", "options": ["2", "3", "4", "6"], "answer": "B", "score": 2 },
+    { "id": "m005", "type": "single", "stem": "10/2=?", "options": ["2", "3", "4", "5"], "answer": "D", "score": 2 },
+    { "id": "m006", "type": "judge",  "stem": "三角形内角和为 180 度。", "options": ["对", "错"], "answer": "A", "score": 1 }
+  ]
+}

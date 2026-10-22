@@ -1,0 +1,18 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "exam-client"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+zeroize = { workspace = true }
+clap = { workspace = true }
+# GUI 与时间门禁在后续里程碑接入（egui / reqwest）。

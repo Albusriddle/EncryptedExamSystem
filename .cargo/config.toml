@@ -1,0 +1,7 @@
+# 本机开发默认用 GNU target + MinGW 链接器（可装 D 盘，不占 C 盘）。
+# 发布正式版时切回 MSVC：
+#   rustup target add x86_64-pc-windows-msvc
+#   cargo build --release --target x86_64-pc-windows-msvc   # 需 VS Build Tools
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"

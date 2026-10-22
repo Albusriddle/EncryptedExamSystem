@@ -1,0 +1,44 @@
+# ---- Rust ----
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# ---- Python ----
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+
+# ---- Node / Worker ----
+node_modules/
+.wrangler/
+.dev.vars
+
+# ---- 密钥与真题（绝不入库）----
+*.key
+*.pem
+secrets/
+.env
+.env.*
+!.env.example
+# 真题库：只保留 demo/ 下的假题供 CI
+banks/*
+!banks/demo/
+!banks/demo/**
+!banks/.gitkeep
+
+# ---- 构建产物（走 GitHub Releases，不入库）----
+*.exe
+*.msi
+release/
+out/
+
+# ---- IDE / 系统 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
