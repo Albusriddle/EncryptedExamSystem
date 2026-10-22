@@ -46,7 +46,26 @@ struct Cli {
     skip_timegate: bool,
 }
 
+/// 让"下游提前关闭管道"不再 panic。
+///
+/// 典型场景：`exam-client ... | head -3`，或脚本里 `grep -q` 命中后立即退出。
+/// Rust 的 `println!` 在 stdout 写入失败时会 panic，打出
+/// `failed printing to stdout: 管道正在被关闭`，但这不是程序错误。
+/// 这里把这类 panic 静默转为正常退出（与 `yes | head` 行为一致）。
+fn install_broken_pipe_guard() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let text = info.to_string();
+        if text.contains("failed printing to stdout") || text.contains("failed printing to stderr")
+        {
+            std::process::exit(0);
+        }
+        default(info);
+    }));
+}
+
 fn main() -> Result<()> {
+    install_broken_pipe_guard();
     // 触碰标记常量，确保它被链接进二进制（builder 依赖它判断 stub 状态）。
     std::hint::black_box(keys::KEY_STATE_MARKER);
 
@@ -86,8 +105,8 @@ fn print_result(unlocked: &Unlocked) {
     println!("  时间窗: {} ~ {}", unlocked.start, unlocked.end);
     if let Some(t) = &unlocked.net {
         println!(
-            "  网络时间: {} UTC（{} 个源，分歧 {} 秒）",
-            timegate::format_unix_utc(t.unix),
+            "  网络时间: {}（{} 个源，分歧 {} 秒）",
+            timegate::format_unix_local_zoned(t.unix),
             t.sources,
             t.spread
         );

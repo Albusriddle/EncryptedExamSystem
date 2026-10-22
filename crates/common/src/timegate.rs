@@ -329,16 +329,80 @@ pub fn fetch_network_time(
     })
 }
 
-/// 把 Unix 时间戳格式化为 `YYYY-MM-DD HH:MM:SS`（UTC），用于日志与提示。
+/// 把 Unix 时间戳格式化为 `YYYY-MM-DD HH:MM:SS`（UTC）。
+///
+/// 注意：给**学生看的提示**不要用它——学生会看到 UTC 而不是自己的时间。
+/// 用 [`format_unix_local_zoned`]。
 pub fn format_unix_utc(unix: u64) -> String {
-    let days = (unix / 86400) as i64;
-    let secs = unix % 86400;
+    format_unix_at_offset(unix, 0)
+}
+
+/// 按指定时区偏移（秒）格式化。纯函数，便于跨时区测试。
+pub fn format_unix_at_offset(unix: u64, offset_secs: i32) -> String {
+    let shifted = unix as i64 + offset_secs as i64;
+    let days = shifted.div_euclid(86400);
+    let secs = shifted.rem_euclid(86400);
     let (y, m, d) = civil_from_days(days);
     format!(
         "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
         secs / 3600,
         (secs % 3600) / 60,
         secs % 60
+    )
+}
+
+/// 时区标签，例如 `UTC+8`、`UTC-5`、`UTC`。
+pub fn offset_label(offset_secs: i32) -> String {
+    if offset_secs == 0 {
+        return "UTC".to_string();
+    }
+    let sign = if offset_secs > 0 { '+' } else { '-' };
+    let a = offset_secs.abs();
+    let h = a / 3600;
+    let m = (a % 3600) / 60;
+    if m == 0 {
+        format!("UTC{sign}{h}")
+    } else {
+        format!("UTC{sign}{h}:{m:02}")
+    }
+}
+
+/// 本机时区相对 UTC 的偏移秒数（东八区 = +28800）。
+///
+/// Windows 走 `GetTimeZoneInformation`（含夏令时修正）；
+/// 其他平台返回 0（按 UTC 显示）——学生端只发 Windows，够用。
+#[cfg(windows)]
+pub fn local_offset_secs() -> i32 {
+    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+    // TIME_ZONE_ID_STANDARD = 1, TIME_ZONE_ID_DAYLIGHT = 2
+    unsafe {
+        let mut tzi: TIME_ZONE_INFORMATION = std::mem::zeroed();
+        let id = GetTimeZoneInformation(&mut tzi);
+        let bias_min = match id {
+            1 => tzi.Bias + tzi.StandardBias,
+            2 => tzi.Bias + tzi.DaylightBias,
+            _ => tzi.Bias,
+        };
+        // Windows 的 Bias 定义是 UTC = local + Bias，所以要取反
+        -(bias_min * 60)
+    }
+}
+
+/// 非 Windows：按 UTC 显示（偏移 0）。
+#[cfg(not(windows))]
+pub fn local_offset_secs() -> i32 {
+    0
+}
+
+/// 格式化为**本机时间**并标注时区，例如 `2026-10-22 18:28:57（UTC+8）`。
+///
+/// 学生看到的必须是自己的时间；只写 UTC 会让人以为程序算错了时间。
+pub fn format_unix_local_zoned(unix: u64) -> String {
+    let off = local_offset_secs();
+    format!(
+        "{}（{}）",
+        format_unix_at_offset(unix, off),
+        offset_label(off)
     )
 }
 
@@ -429,6 +493,52 @@ mod tests {
         assert!(parse_http_date("Sun, 06 Xxx 1994 08:49:37 GMT").is_none());
     }
 
+    /// 东八区：UTC 时间 +8 小时，日期可能跨天。
+    #[test]
+    fn format_at_offset_shifts_correctly() {
+        let t = 1_704_067_200; // 2024-01-01 00:00:00 UTC
+        assert_eq!(format_unix_at_offset(t, 0), "2024-01-01 00:00:00");
+        assert_eq!(format_unix_at_offset(t, 8 * 3600), "2024-01-01 08:00:00");
+        assert_eq!(format_unix_at_offset(t, -5 * 3600), "2023-12-31 19:00:00");
+    }
+
+    /// 负偏移不能因取模写出错误日期。
+    #[test]
+    fn format_at_offset_negative_offset_keeps_date_valid() {
+        let t = 1_704_067_200; // 2024-01-01
+        assert_eq!(
+            format_unix_at_offset(t, -(12 * 3600)),
+            "2023-12-31 12:00:00"
+        );
+    }
+
+    #[test]
+    fn offset_labels() {
+        assert_eq!(offset_label(0), "UTC");
+        assert_eq!(offset_label(8 * 3600), "UTC+8");
+        assert_eq!(offset_label(-5 * 3600), "UTC-5");
+        assert_eq!(offset_label(5 * 3600 + 30 * 60), "UTC+5:30");
+        assert_eq!(offset_label(-(3 * 3600 + 30 * 60)), "UTC-3:30");
+    }
+
+    /// 本机偏移必须落在现实范围内，否则说明系统调用取错了。
+    #[test]
+    fn local_offset_is_plausible() {
+        let off = local_offset_secs();
+        assert!(
+            (-12 * 3600..=14 * 3600).contains(&off),
+            "本机时区偏移异常: {off} 秒"
+        );
+        assert_eq!(off % 900, 0, "偏移应是 15 分钟的整数倍，实际 {off}");
+    }
+
+    /// 学生看到的提示必须带时区标签，不能是裸 UTC。
+    #[test]
+    fn zoned_format_includes_offset() {
+        let s = format_unix_local_zoned(1_704_067_200);
+        assert!(s.contains("（UTC"), "缺少时区标注: {s}");
+    }
+
     #[test]
     fn civil_roundtrip() {
         assert_eq!(format_unix_utc(0), "1970-01-01 00:00:00");
@@ -509,8 +619,8 @@ pub fn decide_session(
         if now < target.start || now > target.end {
             return Err(GateError::SessionOutOfWindow {
                 id,
-                start: format_unix_utc(target.start),
-                end: format_unix_utc(target.end),
+                start: format_unix_local_zoned(target.start),
+                end: format_unix_local_zoned(target.end),
             });
         }
         return Ok(GateDecision {
@@ -526,12 +636,12 @@ pub fn decide_session(
             let first = sessions.iter().map(|s| s.start).min().unwrap_or(0);
             if now < first {
                 Err(GateError::NotStarted {
-                    now: format_unix_utc(now),
-                    first: format_unix_utc(first),
+                    now: format_unix_local_zoned(now),
+                    first: format_unix_local_zoned(first),
                 })
             } else {
                 Err(GateError::NotInWindow {
-                    now: format_unix_utc(now),
+                    now: format_unix_local_zoned(now),
                 })
             }
         }

@@ -280,8 +280,8 @@ fn render_paper(ui: &mut egui::Ui, unlocked: &Unlocked) {
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(format!(
-                    "网络时间 {} UTC（{} 个源，分歧 {} 秒）",
-                    common::timegate::format_unix_utc(net.unix),
+                    "网络时间 {}（{} 个源，分歧 {} 秒）",
+                    common::timegate::format_unix_local_zoned(net.unix),
                     net.sources,
                     net.spread
                 ))

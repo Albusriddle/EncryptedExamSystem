@@ -96,7 +96,26 @@ fn resolve_master(master: Option<String>, master_file: Option<PathBuf>) -> Resul
     anyhow::bail!("缺少主密钥：请用 --master-file、--master 或环境变量 EXAM_MASTER 提供")
 }
 
+/// 让"下游提前关闭管道"不再 panic。
+///
+/// 典型场景：`exam-client ... | head -3`，或脚本里 `grep -q` 命中后立即退出。
+/// Rust 的 `println!` 在 stdout 写入失败时会 panic，打出
+/// `failed printing to stdout: 管道正在被关闭`，但这不是程序错误。
+/// 这里把这类 panic 静默转为正常退出（与 `yes | head` 行为一致）。
+fn install_broken_pipe_guard() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let text = info.to_string();
+        if text.contains("failed printing to stdout") || text.contains("failed printing to stderr")
+        {
+            std::process::exit(0);
+        }
+        default(info);
+    }));
+}
+
 fn main() -> Result<()> {
+    install_broken_pipe_guard();
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Keygen => {

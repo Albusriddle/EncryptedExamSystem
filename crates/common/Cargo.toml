@@ -25,6 +25,8 @@ rayon = { workspace = true }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Networking_WinHttp",
+    # 本机时区偏移（GetTimeZoneInformation）：学生端提示必须显示本地时间
+    "Win32_System_Time",
 ] }
 
 [dev-dependencies]
