@@ -117,7 +117,7 @@ mod tests {
     fn encrypt_decrypt_roundtrip() {
         let key = [42u8; 32];
         let aad = b"test-aad";
-        let msg = b"保密考试系统 payload";
+        let msg = "保密考试系统 payload".as_bytes();
         let ct = encrypt(&key, msg, aad).unwrap();
         assert_ne!(&ct[NONCE_LEN..], msg);
         let pt = decrypt(&key, &ct, aad).unwrap();

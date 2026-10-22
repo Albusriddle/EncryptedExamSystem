@@ -102,7 +102,10 @@ pub fn build_payload(
     let data_ct = crypto::encrypt(&k_payload, &data_plain, b"payload")?;
 
     // 3. header：含每场次的加密信封。
-    let k_manifest = crypto::hkdf_derive(master, salt, "manifest");
+    // 注意：K_manifest 必须用"空 salt"派生——因为 header 里才带真实 salt，
+    // 客户端需要先用 K_manifest 解开 header 才能拿到 salt。若这里用真实 salt，
+    // 客户端将陷入"要 salt 才能解 header，要解 header 才能拿 salt"的死锁。
+    let k_manifest = crypto::hkdf_derive(master, b"", "manifest");
     let salt_hex = hex::encode(salt);
     let mut entries = Vec::new();
     for s in sessions {
@@ -325,8 +328,8 @@ mod tests {
         let salt = b"test-salt-1234";
         let payload = build_payload(&master(), &banks, &sessions, salt).unwrap();
 
-        // 用 K_manifest 解 header。
-        let k_manifest = crypto::hkdf_derive(&master(), salt, "manifest");
+        // 用 K_manifest 解 header（K_manifest 用空 salt 派生，与 client 一致）。
+        let k_manifest = crypto::hkdf_derive(&master(), b"", "manifest");
         let (header, data_ct) = parse_payload(&payload, &k_manifest).unwrap();
         assert_eq!(header.version, VERSION);
         assert_eq!(header.sessions.len(), 1);
