@@ -13,13 +13,41 @@ use rand_chacha::rand_core::SeedableRng;
 
 use crate::model::ExamBank;
 
-/// 抽题结果：每门考试选中的题目 ID 列表。
+/// 试卷中的一道题（题干快照）。
+///
+/// **类型层面不含 `answer` 字段**——这是刻意的设计：
+/// 答案不可能通过这个类型泄漏，比"运行时记得过滤"可靠得多。
+/// 即使上游 `Question.answer` 未被剥离，也无法进入试卷。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct PaperItem {
+    pub id: String,
+    /// 题型：single / multiple / judge / fill / essay
+    pub qtype: String,
+    pub stem: String,
+    pub options: Vec<String>,
+    pub score: u32,
+}
+
+impl From<&crate::model::Question> for PaperItem {
+    fn from(q: &crate::model::Question) -> Self {
+        Self {
+            id: q.id.clone(),
+            qtype: q.qtype.clone(),
+            stem: q.stem.clone(),
+            options: q.options.clone(),
+            score: q.score,
+            // 注意：`q.answer` 被有意忽略，且本结构没有对应字段可放。
+        }
+    }
+}
+
+/// 抽题结果：每门考试选中的题目（含题干）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Paper {
     pub student_id: u64,
     pub session_id: u32,
-    /// (exam_id, 选中的题目 id 列表)
-    pub sections: Vec<(String, Vec<String>)>,
+    /// (exam_id, 选中的题目列表)
+    pub sections: Vec<(String, Vec<PaperItem>)>,
 }
 
 impl Paper {
@@ -33,11 +61,13 @@ impl Paper {
         h.update(&self.student_id.to_le_bytes());
         h.update(&self.session_id.to_le_bytes());
         h.update(&(self.sections.len() as u32).to_le_bytes());
-        for (exam_id, ids) in &self.sections {
+        for (exam_id, items) in &self.sections {
             write_len_prefixed(&mut h, exam_id.as_bytes());
-            h.update(&(ids.len() as u32).to_le_bytes());
-            for id in ids {
-                write_len_prefixed(&mut h, id.as_bytes());
+            h.update(&(items.len() as u32).to_le_bytes());
+            // 只哈希题目 ID：指纹语义是"选了哪几题"，
+            // 题干错别字修正不应改变试卷指纹（否则溯源记录会失效）。
+            for item in items {
+                write_len_prefixed(&mut h, item.id.as_bytes());
             }
         }
         h.finalize().to_hex().to_string()
@@ -100,7 +130,7 @@ fn pick_from_bank(
     bank: &ExamBank,
     pick: u32,
     rng: &mut ChaCha8Rng,
-) -> Result<Vec<String>, PickError> {
+) -> Result<Vec<PaperItem>, PickError> {
     let pool_len = bank.questions.len();
     let n = pick as usize;
     if n > pool_len {
@@ -114,7 +144,7 @@ fn pick_from_bank(
     fisher_yates_shuffle(&mut pool, rng);
     Ok(pool[..n]
         .iter()
-        .map(|&i| bank.questions[i].id.clone())
+        .map(|&i| PaperItem::from(&bank.questions[i]))
         .collect())
 }
 
@@ -168,6 +198,17 @@ mod tests {
         }
     }
 
+    /// 测试用的最小 PaperItem（只有 id 有意义）。
+    fn item(id: &str) -> PaperItem {
+        PaperItem {
+            id: id.into(),
+            qtype: "single".into(),
+            stem: format!("题干 {id}"),
+            options: vec![],
+            score: 2,
+        }
+    }
+
     /// 用题库自带 pick 抽题的便捷封装（测试用）。
     fn paper_default(student: u64, session: u32, salt: &[u8], banks: &[ExamBank]) -> Paper {
         generate_paper(student, session, salt, banks, |_, fallback| fallback).expect("抽题不应失败")
@@ -202,12 +243,12 @@ mod tests {
     fn pick_count_and_uniqueness() {
         let banks = vec![demo_bank("math", 100, 20)];
         let p = paper_default(2021001, 1, b"salt", &banks);
-        let ids = &p.sections[0].1;
-        assert_eq!(ids.len(), 20);
-        let mut sorted = ids.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(sorted.len(), 20, "抽题结果不应有重复");
+        let items = &p.sections[0].1;
+        assert_eq!(items.len(), 20);
+        let mut ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 20, "抽题结果不应有重复");
     }
 
     /// 回归：清单里设置的抽题数必须真正生效（曾经被题库自带 pick 覆盖）。
@@ -239,12 +280,12 @@ mod tests {
         let a = Paper {
             student_id: 1,
             session_id: 1,
-            sections: vec![("ab".into(), vec!["c".into()])],
+            sections: vec![("ab".into(), vec![item("c")])],
         };
         let b = Paper {
             student_id: 1,
             session_id: 1,
-            sections: vec![("a".into(), vec!["bc".into()])],
+            sections: vec![("a".into(), vec![item("bc")])],
         };
         assert_ne!(a.fingerprint(), b.fingerprint(), "拼接歧义必须被消除");
 
@@ -252,14 +293,66 @@ mod tests {
         let c = Paper {
             student_id: 1,
             session_id: 1,
-            sections: vec![("x".into(), vec!["ab".into(), "c".into()])],
+            sections: vec![("x".into(), vec![item("ab"), item("c")])],
         };
         let d = Paper {
             student_id: 1,
             session_id: 1,
-            sections: vec![("x".into(), vec!["a".into(), "bc".into()])],
+            sections: vec![("x".into(), vec![item("a"), item("bc")])],
         };
         assert_ne!(c.fingerprint(), d.fingerprint());
+    }
+
+    /// 试卷必须携带题干（此前只返回 ID，学生看不到题目）。
+    #[test]
+    fn paper_items_carry_stem_and_options() {
+        let banks = vec![demo_bank("math", 20, 3)];
+        let p = paper_default(2021001, 1, b"salt", &banks);
+        let items = &p.sections[0].1;
+        assert_eq!(items.len(), 3);
+        for it in items {
+            assert!(!it.stem.is_empty(), "题干不能为空");
+            assert!(!it.qtype.is_empty(), "题型不能为空");
+            assert_eq!(it.options.len(), 4, "选项应被带出");
+            assert!(it.score > 0);
+        }
+    }
+
+    /// 指纹只依赖题目 ID：改题干不应改变指纹（溯源记录保持有效）。
+    #[test]
+    fn fingerprint_ignores_stem_changes() {
+        let banks = vec![demo_bank("math", 20, 3)];
+        let p1 = paper_default(2021001, 1, b"salt", &banks);
+        let mut p2 = p1.clone();
+        for (_, items) in &mut p2.sections {
+            for it in items {
+                it.stem = format!("【改过的题干】{}", it.stem);
+            }
+        }
+        assert_eq!(p1.fingerprint(), p2.fingerprint(), "题干变化不应影响指纹");
+
+        // 但换题必须影响指纹
+        let mut p3 = p1.clone();
+        p3.sections[0].1[0].id = "different-id".into();
+        assert_ne!(p1.fingerprint(), p3.fingerprint(), "换题必须改变指纹");
+    }
+
+    /// 答案绝不能进入试卷：PaperItem 没有 answer 字段，
+    /// 即使源题库带着答案也带不出来（编译期保证）。
+    #[test]
+    fn paper_items_never_expose_answer() {
+        let mut bank = demo_bank("math", 10, 3);
+        // 源题库故意保留答案
+        for q in &mut bank.questions {
+            q.answer = Some("SECRET_ANSWER".into());
+        }
+        let p = paper_default(2021001, 1, b"salt", &[bank]);
+        let json = serde_json::to_string(&p.sections).unwrap();
+        assert!(
+            !json.contains("SECRET_ANSWER"),
+            "试卷序列化结果中出现了答案"
+        );
+        assert!(!json.contains("answer"), "试卷结构不应含 answer 字段");
     }
 
     /// 黄金向量：锁定算法，一旦改动会立刻在 CI 报警。

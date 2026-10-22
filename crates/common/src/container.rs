@@ -318,7 +318,10 @@ pub fn validate_sessions(sessions: &[Session]) -> Result<(), ContainerError> {
             )));
         }
         // 时间窗倒挂：学生永远解不开，属于"考场才炸"的错误。
-        match (parse_rfc3339(&s.start), parse_rfc3339(&s.end)) {
+        match (
+            crate::timegate::parse_rfc3339(&s.start),
+            crate::timegate::parse_rfc3339(&s.end),
+        ) {
             (Some(a), Some(b)) => {
                 if a >= b {
                     return Err(ContainerError::Format(format!(
@@ -348,62 +351,9 @@ pub fn validate_sessions(sessions: &[Session]) -> Result<(), ContainerError> {
     Ok(())
 }
 
-/// 解析 RFC3339 时间（供构建期校验用）。
-fn parse_rfc3339(s: &str) -> Option<u64> {
-    let s = s.trim();
-    let (date_part, rest) = s.split_once('T').or_else(|| s.split_once(' '))?;
-    let d: Vec<&str> = date_part.split('-').collect();
-    if d.len() != 3 {
-        return None;
-    }
-    let (y, mo, da): (i64, i64, i64) = (d[0].parse().ok()?, d[1].parse().ok()?, d[2].parse().ok()?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&da) {
-        return None;
-    }
-
-    let (time_part, offset_secs) = if let Some(t) = rest.strip_suffix('Z') {
-        (t, 0i64)
-    } else if let Some(idx) = rest.rfind(['+', '-']) {
-        let (t, off) = rest.split_at(idx);
-        let sign = if off.starts_with('-') { -1 } else { 1 };
-        let o = &off[1..];
-        let (oh, om) = o.split_once(':').unwrap_or((o, "0"));
-        let secs = sign * (oh.parse::<i64>().ok()? * 3600 + om.parse::<i64>().ok()? * 60);
-        (t, secs)
-    } else {
-        (rest, 0)
-    };
-
-    let t: Vec<&str> = time_part.split(':').collect();
-    if t.len() < 2 {
-        return None;
-    }
-    let h: i64 = t[0].parse().ok()?;
-    let mi: i64 = t[1].parse().ok()?;
-    let se: i64 = match t.get(2) {
-        Some(x) => x.split('.').next().unwrap_or("0").parse().ok()?,
-        None => 0,
-    };
-    if h > 23 || mi > 59 || se > 60 {
-        return None;
-    }
-
-    let days = days_from_civil(y, mo, da) as i64;
-    let local = days * 86400 + h * 3600 + mi * 60 + se;
-    let utc = local - offset_secs;
-    if utc < 0 { None } else { Some(utc as u64) }
-}
-
-/// 公历日期 → 距 1970-01-01 的天数（Howard Hinnant 算法）。
-fn days_from_civil(y: i64, m: i64, d: i64) -> u64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    (era * 146097 + doe - 719468) as u64
-}
+// 时间解析统一到 `crate::timegate::parse_rfc3339`。
+// 这里曾有一份逐字节相同的副本（含 days_from_civil），属于复制粘贴冗余，
+// 已删除——两处实现若将来不同步会引发隐蔽 bug。
 
 /// 由 master 派生 **header 加密密钥**（K_manifest）。
 ///
@@ -991,10 +941,13 @@ mod tests {
 
     #[test]
     fn parse_rfc3339_handles_offsets() {
-        let a = parse_rfc3339("2026-12-20T09:00:00+08:00").unwrap();
-        let b = parse_rfc3339("2026-12-20T01:00:00Z").unwrap();
+        let a = crate::timegate::parse_rfc3339("2026-12-20T09:00:00+08:00").unwrap();
+        let b = crate::timegate::parse_rfc3339("2026-12-20T01:00:00Z").unwrap();
         assert_eq!(a, b);
-        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            crate::timegate::parse_rfc3339("1970-01-01T00:00:00Z"),
+            Some(0)
+        );
     }
 
     #[test]

@@ -176,8 +176,19 @@ fn main() -> Result<()> {
         println!("  ⚠⚠ 已跳过时间门禁（仅 debug 构建可用）⚠⚠");
     }
     println!("  试卷指纹: {}", paper.fingerprint());
-    for (exam_id, ids) in &paper.sections {
-        println!("  [{exam_id}] 抽中 {} 题: {:?}", ids.len(), ids);
+    println!();
+    for (exam_id, items) in &paper.sections {
+        let total: u32 = items.iter().map(|i| i.score).sum();
+        println!("【{exam_id}】共 {} 题，{} 分", items.len(), total);
+        for (n, item) in items.iter().enumerate() {
+            println!("  {}. ({}) {}", n + 1, item.score, item.stem);
+            for (j, opt) in item.options.iter().enumerate() {
+                // 选项序号用 A/B/C/... 而非 1/2/3
+                let label = (b'A' + (j as u8).min(25)) as char;
+                println!("       {label}. {opt}");
+            }
+        }
+        println!();
     }
     Ok(())
 }
