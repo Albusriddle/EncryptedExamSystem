@@ -39,6 +39,12 @@ enum Stage {
 pub struct ExamApp {
     stage: Stage,
     opts: UnlockOpts,
+    /// 是否需要在下一帧把焦点交给学号输入框。
+    ///
+    /// 只在**首次启动**与**从错误返回 Idle** 时置 `true`。
+    /// 早期实现是每帧都 `request_focus()`，结果学生按 Tab 或点击别处后
+    /// 焦点立刻被抢回，根本无法离开输入框。
+    focus_pending: bool,
 }
 
 impl ExamApp {
@@ -52,6 +58,7 @@ impl ExamApp {
                 error: None,
             },
             opts,
+            focus_pending: true,
         }
     }
 
@@ -86,6 +93,8 @@ impl ExamApp {
                     input: String::new(),
                     error: Some(msg),
                 };
+                // 回到输入态时重新聚焦，方便学生改学号。
+                self.focus_pending = true;
                 true
             }
             Err(TryRecvError::Empty) => false,
@@ -94,6 +103,7 @@ impl ExamApp {
                     input: String::new(),
                     error: Some("后台线程异常退出（可能是内存不足）".into()),
                 };
+                self.focus_pending = true;
                 true
             }
         }
@@ -128,6 +138,9 @@ impl eframe::App for ExamApp {
         // 真正的状态切换放到闭包外面——否则 `self.start_unlock(...)`
         // 会和 `&mut self.stage` 的借用冲突。
         let mut submit: Option<String> = None;
+        // 焦点标志要在闭包内外传递，先取到局部变量：
+        // 闭包里已经 `&mut self.stage`，不能再借 `self.focus_pending`。
+        let mut want_focus = self.focus_pending;
 
         egui::CentralPanel::default().show(ctx, |ui| match &mut self.stage {
             Stage::Idle { input, error } => {
@@ -142,9 +155,10 @@ impl eframe::App for ExamApp {
                             .desired_width(240.0)
                             .font(egui::TextStyle::Heading),
                     );
-                    // 自动聚焦，学生打开就能直接敲。
-                    if !resp.has_focus() {
+                    // 只在需要时聚焦一次（不是每帧），否则无法用 Tab 切走。
+                    if want_focus {
                         resp.request_focus();
+                        want_focus = false;
                     }
 
                     ui.add_space(16.0);
@@ -200,6 +214,8 @@ impl eframe::App for ExamApp {
             Stage::Paper(unlocked) => render_paper(ui, unlocked),
         });
 
+        self.focus_pending = want_focus;
+
         // 闭包结束后再切状态。
         if let Some(raw) = submit {
             let trimmed = raw.trim();
@@ -209,6 +225,7 @@ impl eframe::App for ExamApp {
                         input: raw,
                         error: Some("学号必须是正整数".into()),
                     };
+                    self.focus_pending = true;
                 }
                 Ok(sid) => self.start_unlock(sid),
                 Err(_) => {
@@ -216,6 +233,7 @@ impl eframe::App for ExamApp {
                         input: raw,
                         error: Some("学号必须是纯数字".into()),
                     };
+                    self.focus_pending = true;
                 }
             }
         }

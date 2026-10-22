@@ -15,6 +15,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # client 引入了 eframe → winit/glutin，Linux 上需要 X11/Wayland 开发头文件。
+      # 即使上游用的是 dlopen 加载方式、实际不链接这些库，装上也无害（约 5 秒），
+      # 能消除"CI 因缺系统库变红"的不确定性。
+      - name: 安装 Linux GUI 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
