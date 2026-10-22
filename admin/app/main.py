@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -94,6 +95,35 @@ def selftest() -> int:
 def main() -> int:
     if "--selftest" in sys.argv:
         return selftest()
+    if "--dump-ui" in sys.argv:
+        # 诊断用：把主窗口与工具栏渲染成 PNG，并打印水印控件状态。
+        # 打包后无法从外部检查 Qt 控件，只能让程序自己报告。
+        from PySide6.QtWidgets import QToolBar
+
+        app = QApplication(sys.argv)
+        win = MainWindow()
+        win.show()
+        for _ in range(10):
+            app.processEvents()
+        out = Path(sys.argv[sys.argv.index("--dump-ui") + 1])
+        win.grab().save(str(out / "window.png"))
+        bar = win.findChild(QToolBar)
+        if bar is not None:
+            bar.grab().save(str(out / "toolbar.png"))
+        lbl = getattr(win, "watermark_label", None)
+        info = {
+            "window": [win.width(), win.height()],
+            "toolbar": [bar.width(), bar.height()] if bar else None,
+            "label_text": lbl.text() if lbl else None,
+            "label_geom": [lbl.x(), lbl.y(), lbl.width(), lbl.height()] if lbl else None,
+            "label_visible": lbl.isVisible() if lbl else None,
+            "style": lbl.styleSheet() if lbl else None,
+        }
+        (out / "info.json").write_text(
+            json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(json.dumps(info, ensure_ascii=False))
+        return 0
     if "--version" in sys.argv:
         # 供构建自检读取，确认 VERSION 真的被打进包里
         from app.version import app_version
