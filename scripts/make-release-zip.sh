@@ -17,6 +17,11 @@
 
 set -euo pipefail
 
+# 脚本里内嵌的 Python 会打印中文。Windows runner 的 Python 默认用
+# cp1252/cp936 编码 stdout，遇到中文直接 UnicodeEncodeError。
+# 统一强制 UTF-8，避免"本地能跑、CI 报编码错"。
+export PYTHONIOENCODING=utf-8
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
