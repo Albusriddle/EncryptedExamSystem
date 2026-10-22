@@ -41,13 +41,31 @@ impl From<&crate::model::Question> for PaperItem {
     }
 }
 
+/// 试卷的一个科目部分。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct PaperSection {
+    /// 内部稳定标识（用于指纹）。**不要用 title 做指纹**——
+    /// title 是给人看的，改名不应让已发试卷的溯源记录失效。
+    pub exam_id: String,
+    /// 学生可见的科目名（如「高等数学」）。
+    pub title: String,
+    /// 本部分抽中的题目。
+    pub items: Vec<PaperItem>,
+}
+
+impl PaperSection {
+    /// 本部分总分。
+    pub fn total_score(&self) -> u32 {
+        self.items.iter().map(|i| i.score).sum()
+    }
+}
+
 /// 抽题结果：每门考试选中的题目（含题干）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Paper {
     pub student_id: u64,
     pub session_id: u32,
-    /// (exam_id, 选中的题目列表)
-    pub sections: Vec<(String, Vec<PaperItem>)>,
+    pub sections: Vec<PaperSection>,
 }
 
 impl Paper {
@@ -61,12 +79,14 @@ impl Paper {
         h.update(&self.student_id.to_le_bytes());
         h.update(&self.session_id.to_le_bytes());
         h.update(&(self.sections.len() as u32).to_le_bytes());
-        for (exam_id, items) in &self.sections {
-            write_len_prefixed(&mut h, exam_id.as_bytes());
-            h.update(&(items.len() as u32).to_le_bytes());
+        for sec in &self.sections {
+            // 用 exam_id 而非 title：title 可能被改写（如加「A卷」后缀），
+            // 而指纹必须锚定稳定标识。
+            write_len_prefixed(&mut h, sec.exam_id.as_bytes());
+            h.update(&(sec.items.len() as u32).to_le_bytes());
             // 只哈希题目 ID：指纹语义是"选了哪几题"，
             // 题干错别字修正不应改变试卷指纹（否则溯源记录会失效）。
-            for item in items {
+            for item in &sec.items {
                 write_len_prefixed(&mut h, item.id.as_bytes());
             }
         }
@@ -167,7 +187,11 @@ where
     for b in banks {
         let pick = pick_for(&b.exam_id, b.pick);
         let ids = pick_from_bank(b, pick, &mut rng)?;
-        sections.push((b.exam_id.clone(), ids));
+        sections.push(PaperSection {
+            exam_id: b.exam_id.clone(),
+            title: b.title.clone(),
+            items: ids,
+        });
     }
     Ok(Paper {
         student_id,
@@ -195,6 +219,15 @@ mod tests {
                     score: 2,
                 })
                 .collect(),
+        }
+    }
+
+    /// 测试用的最小 PaperSection。
+    fn section(exam_id: &str, items: Vec<PaperItem>) -> PaperSection {
+        PaperSection {
+            exam_id: exam_id.into(),
+            title: format!("{exam_id} 科目"),
+            items,
         }
     }
 
@@ -243,7 +276,7 @@ mod tests {
     fn pick_count_and_uniqueness() {
         let banks = vec![demo_bank("math", 100, 20)];
         let p = paper_default(2021001, 1, b"salt", &banks);
-        let items = &p.sections[0].1;
+        let items = &p.sections[0].items;
         assert_eq!(items.len(), 20);
         let mut ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
         ids.sort_unstable();
@@ -256,7 +289,11 @@ mod tests {
     fn explicit_pick_overrides_bank_default() {
         let banks = vec![demo_bank("math", 100, 3)];
         let p = generate_paper(2021001, 1, b"salt", &banks, |_, _| 25).unwrap();
-        assert_eq!(p.sections[0].1.len(), 25, "应遵循显式 pick 而非题库默认值");
+        assert_eq!(
+            p.sections[0].items.len(),
+            25,
+            "应遵循显式 pick 而非题库默认值"
+        );
     }
 
     /// 回归：pick 超过题量必须返回错误，而不是 panic（曾经会越界 panic）。
@@ -280,12 +317,12 @@ mod tests {
         let a = Paper {
             student_id: 1,
             session_id: 1,
-            sections: vec![("ab".into(), vec![item("c")])],
+            sections: vec![section("ab", vec![item("c")])],
         };
         let b = Paper {
             student_id: 1,
             session_id: 1,
-            sections: vec![("a".into(), vec![item("bc")])],
+            sections: vec![section("a", vec![item("bc")])],
         };
         assert_ne!(a.fingerprint(), b.fingerprint(), "拼接歧义必须被消除");
 
@@ -293,12 +330,12 @@ mod tests {
         let c = Paper {
             student_id: 1,
             session_id: 1,
-            sections: vec![("x".into(), vec![item("ab"), item("c")])],
+            sections: vec![section("x", vec![item("ab"), item("c")])],
         };
         let d = Paper {
             student_id: 1,
             session_id: 1,
-            sections: vec![("x".into(), vec![item("a"), item("bc")])],
+            sections: vec![section("x", vec![item("a"), item("bc")])],
         };
         assert_ne!(c.fingerprint(), d.fingerprint());
     }
@@ -308,7 +345,7 @@ mod tests {
     fn paper_items_carry_stem_and_options() {
         let banks = vec![demo_bank("math", 20, 3)];
         let p = paper_default(2021001, 1, b"salt", &banks);
-        let items = &p.sections[0].1;
+        let items = &p.sections[0].items;
         assert_eq!(items.len(), 3);
         for it in items {
             assert!(!it.stem.is_empty(), "题干不能为空");
@@ -324,8 +361,8 @@ mod tests {
         let banks = vec![demo_bank("math", 20, 3)];
         let p1 = paper_default(2021001, 1, b"salt", &banks);
         let mut p2 = p1.clone();
-        for (_, items) in &mut p2.sections {
-            for it in items {
+        for sec in &mut p2.sections {
+            for it in &mut sec.items {
                 it.stem = format!("【改过的题干】{}", it.stem);
             }
         }
@@ -333,7 +370,7 @@ mod tests {
 
         // 但换题必须影响指纹
         let mut p3 = p1.clone();
-        p3.sections[0].1[0].id = "different-id".into();
+        p3.sections[0].items[0].id = "different-id".into();
         assert_ne!(p1.fingerprint(), p3.fingerprint(), "换题必须改变指纹");
     }
 
@@ -353,6 +390,38 @@ mod tests {
             "试卷序列化结果中出现了答案"
         );
         assert!(!json.contains("answer"), "试卷结构不应含 answer 字段");
+    }
+
+    /// 试卷部分必须携带学生可见的科目名（title），而非只有 exam_id。
+    #[test]
+    fn section_carries_title_and_score() {
+        let banks = vec![demo_bank("math", 20, 3)];
+        let p = paper_default(2021001, 1, b"salt", &banks);
+        let sec = &p.sections[0];
+        assert_eq!(sec.exam_id, "math");
+        assert_eq!(sec.title, "math"); // demo_bank 里 title == exam_id
+        assert!(!sec.title.is_empty(), "科目名不能为空");
+        assert_eq!(sec.total_score(), 3 * 2, "总分应为 3 题 × 2 分");
+    }
+
+    /// 指纹锚定 exam_id 而非 title：改科目名不应改变指纹
+    /// （否则「高等数学」改成「高等数学（A卷）」会让溯源记录失效）。
+    #[test]
+    fn fingerprint_ignores_title_changes() {
+        let banks = vec![demo_bank("math", 20, 3)];
+        let p1 = paper_default(2021001, 1, b"salt", &banks);
+        let mut p2 = p1.clone();
+        p2.sections[0].title = "高等数学（A卷）".into();
+        assert_eq!(p1.fingerprint(), p2.fingerprint(), "改 title 不应影响指纹");
+
+        // 但改 exam_id 必须影响
+        let mut p3 = p1.clone();
+        p3.sections[0].exam_id = "different".into();
+        assert_ne!(
+            p1.fingerprint(),
+            p3.fingerprint(),
+            "改 exam_id 必须改变指纹"
+        );
     }
 
     /// 黄金向量：锁定算法，一旦改动会立刻在 CI 报警。

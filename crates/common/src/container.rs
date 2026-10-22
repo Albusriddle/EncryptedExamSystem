@@ -167,7 +167,8 @@ pub fn build_payload(
     }
 
     // 2. 清单自身校验（时间窗、重复学号、场次编号）+ 抽题数解析。
-    validate_sessions(sessions)?;
+    //    用静默版：builder 层已校验并打印过警告，这里重复打印会让管理员困惑。
+    validate_sessions_silent(sessions)?;
     let picks = resolve_picks(&clean_banks, sessions)?;
 
     // 3. 逐场生成：会话密钥 → 题库密文 → 每生信封。
@@ -306,6 +307,18 @@ fn resolve_picks(
 ///
 /// 与 `resolve_picks` 分开：这里的检查与题库无关，只依赖清单自身。
 pub fn validate_sessions(sessions: &[Session]) -> Result<(), ContainerError> {
+    validate_sessions_impl(sessions, true)
+}
+
+/// 同 [`validate_sessions`]，但可选是否打印警告。
+///
+/// `build_payload` 内部调用时传 `false`——因为 builder 层已经调用过一次
+/// 并打印过警告了，重复打印会让管理员困惑。
+pub fn validate_sessions_silent(sessions: &[Session]) -> Result<(), ContainerError> {
+    validate_sessions_impl(sessions, false)
+}
+
+fn validate_sessions_impl(sessions: &[Session], emit_warnings: bool) -> Result<(), ContainerError> {
     if sessions.is_empty() {
         return Err(ContainerError::Format("清单里没有任何场次".into()));
     }
@@ -347,8 +360,65 @@ pub fn validate_sessions(sessions: &[Session]) -> Result<(), ContainerError> {
                 )));
             }
         }
+        // 同一场次不得重复引用同一题库：否则试卷里会出现两个同名科目，
+        // 且抽题数按 max 取值，学生看到的是一份重复的卷子。
+        let mut seen_exams = std::collections::HashSet::new();
+        for e in &s.exams {
+            let key = resolve_exam_key(&e.file);
+            if !seen_exams.insert(key.clone()) {
+                return Err(ContainerError::Format(format!(
+                    "场次 {} 重复引用题库 {}（同一场次只能考一次）",
+                    s.session_id, e.file
+                )));
+            }
+        }
+        if s.exams.is_empty() {
+            return Err(ContainerError::Format(format!(
+                "场次 {} 没有任何考试科目",
+                s.session_id
+            )));
+        }
     }
+
+    // 时间窗重叠：**只警告不报错**。
+    // 重叠可能是管理员有意为之（例如同一场次分两个班），
+    // 但必须提示——因为客户端遇到重叠会取 session_id 最小的一场，
+    // 学生可能被分到自己没想到的那场。
+    if emit_warnings {
+        warn_overlapping_windows(sessions);
+    }
+
     Ok(())
+}
+
+/// 检测并警告时间窗重叠的场次对。
+fn warn_overlapping_windows(sessions: &[Session]) {
+    for i in 0..sessions.len() {
+        for j in (i + 1)..sessions.len() {
+            let a = &sessions[i];
+            let b = &sessions[j];
+            let (Some(a_start), Some(a_end)) = (
+                crate::timegate::parse_rfc3339(&a.start),
+                crate::timegate::parse_rfc3339(&a.end),
+            ) else {
+                continue;
+            };
+            let (Some(b_start), Some(b_end)) = (
+                crate::timegate::parse_rfc3339(&b.start),
+                crate::timegate::parse_rfc3339(&b.end),
+            ) else {
+                continue;
+            };
+            // 两个闭区间相交：a_start < b_end && b_start < a_end
+            if a_start < b_end && b_start < a_end {
+                eprintln!(
+                    "⚠ 警告：场次 {}（{} ~ {}）与场次 {}（{} ~ {}）时间窗重叠。\n\
+                     学生若同时在这两场，客户端会取 session_id 较小的一场。",
+                    a.session_id, a.start, a.end, b.session_id, b.start, b.end
+                );
+            }
+        }
+    }
 }
 
 // 时间解析统一到 `crate::timegate::parse_rfc3339`。
@@ -876,6 +946,92 @@ mod tests {
     #[test]
     fn match_bank_returns_none_when_missing() {
         assert!(match_bank("nope.json", &[bank("math", 10)]).is_none());
+    }
+
+    /// 回归：同一场次重复引用同一题库必须报错（会产生两份同名试卷）。
+    #[test]
+    fn rejects_duplicate_exam_in_same_session() {
+        use crate::model::SessionExam;
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![1],
+            exams: vec![
+                SessionExam {
+                    file: "demo/math.json".into(),
+                    pick: Some(2),
+                },
+                SessionExam {
+                    file: "demo/math.json".into(),
+                    pick: Some(3),
+                },
+            ],
+        };
+        let err = validate_sessions(&[s]).unwrap_err();
+        assert!(
+            matches!(err, ContainerError::Format(ref m) if m.contains("重复引用")),
+            "实际: {err}"
+        );
+    }
+
+    /// 不同题库的同一场次应当允许。
+    #[test]
+    fn allows_distinct_exams_in_same_session() {
+        use crate::model::SessionExam;
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![1],
+            exams: vec![
+                SessionExam {
+                    file: "math.json".into(),
+                    pick: None,
+                },
+                SessionExam {
+                    file: "english.json".into(),
+                    pick: None,
+                },
+            ],
+        };
+        assert!(validate_sessions(&[s]).is_ok());
+    }
+
+    /// 场次没有任何科目应当报错。
+    #[test]
+    fn rejects_session_without_exams() {
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![1],
+            exams: vec![],
+        };
+        assert!(validate_sessions(&[s]).is_err());
+    }
+
+    /// 时间窗重叠**只警告不报错**（可能是有意配置）。
+    #[test]
+    fn overlapping_windows_do_not_fail_validation() {
+        use crate::model::SessionExam;
+        let mk = |id: u32, start: &str, end: &str| Session {
+            session_id: id,
+            start: start.into(),
+            end: end.into(),
+            students: vec![1],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: None,
+            }],
+        };
+        // 两场完全重叠
+        let a = mk(1, "2026-12-20T09:00:00+08:00", "2026-12-20T11:00:00+08:00");
+        let b = mk(2, "2026-12-20T10:00:00+08:00", "2026-12-20T12:00:00+08:00");
+        assert!(
+            validate_sessions(&[a, b]).is_ok(),
+            "重叠应只警告，不应阻止打包"
+        );
     }
 
     #[test]

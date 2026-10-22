@@ -125,8 +125,23 @@ fn load_banks(dir: &std::path::Path, files: &[String]) -> Result<Vec<ExamBank>> 
     let mut out = Vec::new();
     for f in files {
         let path = dir.join(f);
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("读取题库 {}", path.display()))?;
+        let bytes = std::fs::read(&path).with_context(|| {
+            format!(
+                "读取题库 {} 失败（请确认文件存在，且清单里的 file 是相对 --banks 目录的路径）",
+                path.display()
+            )
+        })?;
+        // 单独处理编码错误：`read_to_string` 只会报 "stream did not contain
+        // valid UTF-8"，管理员看到会一头雾水。中文题库最常见的坑就是用
+        // 记事本存成了 GBK。
+        let text = String::from_utf8(bytes).map_err(|_| {
+            anyhow::anyhow!(
+                "题库 {} 不是 UTF-8 编码。\n\
+                 请用支持 UTF-8 的编辑器另存（Windows 记事本选「UTF-8」；\n\
+                 VS Code 右下角点击编码 → Save with Encoding → UTF-8）。",
+                path.display()
+            )
+        })?;
         let bank: ExamBank =
             serde_json::from_str(&text).with_context(|| format!("解析题库 {}", path.display()))?;
         bank.validate()

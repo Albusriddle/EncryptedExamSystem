@@ -177,20 +177,35 @@ fn main() -> Result<()> {
     }
     println!("  试卷指纹: {}", paper.fingerprint());
     println!();
-    for (exam_id, items) in &paper.sections {
-        let total: u32 = items.iter().map(|i| i.score).sum();
-        println!("【{exam_id}】共 {} 题，{} 分", items.len(), total);
-        for (n, item) in items.iter().enumerate() {
+    for sec in &paper.sections {
+        println!(
+            "【{}】共 {} 题，{} 分",
+            sec.title,
+            sec.items.len(),
+            sec.total_score()
+        );
+        for (n, item) in sec.items.iter().enumerate() {
             println!("  {}. ({}) {}", n + 1, item.score, item.stem);
             for (j, opt) in item.options.iter().enumerate() {
-                // 选项序号用 A/B/C/... 而非 1/2/3
-                let label = (b'A' + (j as u8).min(25)) as char;
-                println!("       {label}. {opt}");
+                println!("       {}. {opt}", option_label(j));
             }
         }
         println!();
     }
     Ok(())
+}
+
+/// 选项序号：A-Z，超过 26 个改用数字。
+///
+/// 原先用 `(b'A' + j.min(25))`，第 26 个之后全部显示为 Z，
+/// 学生无法区分（实测：opt25 到 opt29 都是 `Z.`）。
+/// 考试题极少超过 26 个选项，但既然可能，就必须正确显示。
+fn option_label(j: usize) -> String {
+    if j < 26 {
+        ((b'A' + j as u8) as char).to_string()
+    } else {
+        format!("{}", j + 1)
+    }
 }
 
 /// 执行时间门禁，返回 (场次编号, 网络时间信息)。
