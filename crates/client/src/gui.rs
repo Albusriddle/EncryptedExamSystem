@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::nav::NavState;
 use crate::welcome::Welcome;
 use crate::workflow::{self, KeySource, UnlockOpts, Unlocked};
 
@@ -46,6 +47,13 @@ pub struct ExamApp {
     watermark: String,
     /// 启动欢迎弹窗（含"不再提示"）
     welcome: Welcome,
+    /// 右侧题号导航卡
+    nav: NavState,
+    /// 诊断用：启动即自动解锁指定学号（`EES_AUTOLOGIN=<学号>`）。
+    /// 仅供自动化验证/远程排障，正常启动不设置该变量。
+    autologin: Option<u64>,
+    /// 诊断用：首帧模拟点击题号 `EES_NAV_JUMP=<N>`
+    jump_once: Option<usize>,
     /// 是否需要在下一帧把焦点交给学号输入框。
     ///
     /// 只在**首次启动**与**从错误返回 Idle** 时置 `true`。
@@ -69,6 +77,15 @@ impl ExamApp {
             key_hint,
             watermark: common::watermark(),
             welcome: Welcome::new(),
+            nav: NavState::default(),
+            jump_once: std::env::var("EES_NAV_JUMP")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|v| *v > 0),
+            autologin: std::env::var("EES_AUTOLOGIN")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|v| *v > 0),
             focus_pending: true,
         }
     }
@@ -126,6 +143,11 @@ impl eframe::App for ExamApp {
         // 欢迎弹窗置顶绘制；关闭时把焦点还给学号输入框
         if self.welcome.show(ctx) {
             self.focus_pending = true;
+        }
+
+        // 诊断：启动即自动解锁（跳过人工输入学号）
+        if let Some(sid) = self.autologin.take() {
+            self.start_unlock(sid);
         }
 
         // 后台工作期间主动请求重绘，否则界面不刷新。
@@ -244,10 +266,43 @@ impl eframe::App for ExamApp {
                 });
             }
 
-            Stage::Paper(unlocked) => render_paper(ui, unlocked),
+            Stage::Paper(_) => {}
         });
 
         self.focus_pending = want_focus;
+
+        // 试卷阶段：题号卡与试卷需要在同一个 pass 里按顺序渲染，
+        // 因此不放进 CentralPanel 的闭包，而是单独处理。
+        if let Stage::Paper(unlocked) = &self.stage {
+            let sections: Vec<(String, usize)> = unlocked
+                .paper
+                .sections
+                .iter()
+                .map(|s| (s.title.clone(), s.items.len()))
+                .collect();
+
+            // 诊断：模拟点击某个题号（验证跳转链路）
+            if let Some(idx) = self.jump_once.take() {
+                self.nav.debug_jump(idx);
+            }
+
+            // ① 题号卡（点击只写 pending，不立即滚动）
+            self.nav.show(ctx, &sections);
+
+            // ② 试卷：逐题记录矩形；渲染完成后在同一个 Ui 里消费 pending。
+            //    必须同一个 CentralPanel：一个 pass 只能有一个 CentralPanel。
+            let mut scroll_offset = egui::Vec2::ZERO;
+            egui::CentralPanel::default().show(ctx, |ui| {
+                scroll_offset = render_paper(ui, unlocked, &mut self.nav);
+            });
+
+            // 诊断：EES_DEBUG_NAV=<文件> 时输出题号卡与题目矩形，
+            // 便于验证"跳转目标是否被正确记录"（截屏在 DPI 下不可靠）。
+            if let Some(path) = std::env::var_os("EES_DEBUG_NAV") {
+                self.nav
+                    .dump_debug(&sections, scroll_offset, std::path::Path::new(&path));
+            }
+        }
 
         // 闭包结束后再切状态。
         if let Some(raw) = submit {
@@ -274,8 +329,16 @@ impl eframe::App for ExamApp {
 }
 
 /// 渲染试卷。
-fn render_paper(ui: &mut egui::Ui, unlocked: &Unlocked) {
-    egui::ScrollArea::vertical().show(ui, |ui| {
+/// 试卷底部留白（pt）。约一屏高度，让最后一题也能贴顶。
+const BOTTOM_PAD: f32 = 900.0;
+
+/// 渲染试卷。返回滚动区域的当前偏移，便于诊断验证"跳转是否真的滚动了"。
+fn render_paper(
+    ui: &mut egui::Ui,
+    unlocked: &Unlocked,
+    nav: &mut crate::nav::NavState,
+) -> egui::Vec2 {
+    let out = egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(format!("学号 {}", unlocked.student_id)).strong());
@@ -325,20 +388,46 @@ fn render_paper(ui: &mut egui::Ui, unlocked: &Unlocked) {
             ui.add_space(6.0);
             for item in &sec.items {
                 seq += 1;
-                ui.label(
-                    egui::RichText::new(format!("{seq}. ({}) {}", item.score, item.stem))
-                        .size(15.0),
-                );
-                ui.indent(format!("q{seq}"), |ui| {
-                    for (j, opt) in item.options.iter().enumerate() {
-                        ui.label(format!("{}. {opt}", workflow::option_label(j)));
-                    }
-                });
+                // 记录整道题（题干 + 选项）的矩形，供题号卡跳转用。
+                // 用 group 把一道题的控件包起来，拿到的是一个整体 rect，
+                // 比只取题干那一行的 rect 更准确（跳过去能看到完整题目）。
+                let resp = ui
+                    .push_id(format!("item{seq}"), |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{seq}. ({}) {}",
+                                    item.score, item.stem
+                                ))
+                                .size(15.0),
+                            );
+                            ui.indent(format!("q{seq}"), |ui| {
+                                for (j, opt) in item.options.iter().enumerate() {
+                                    ui.label(format!("{}. {opt}", workflow::option_label(j)));
+                                }
+                            });
+                        })
+                    })
+                    .response;
+                nav.record(seq, resp.rect);
                 ui.add_space(8.0);
             }
         }
-        ui.add_space(20.0);
+        // 底部留白：让**最后一题也能真正置顶**。
+        //
+        // 滚动区最多只能滚到 `内容高 - 视窗高`；若最后几道题之后的空白
+        // 不足一屏，跳过去时会被"顶到上限"，题号卡点了也到不了顶部。
+        // 实测 10 道题时第 10 题只能滚到 553，而它的目标位置是 1124。
+        // 这里按视窗高度留出一屏空白，使任意题目都能贴顶。
+        // 固定留白一屏：ScrollArea 内部的 available_height() 在内容撑开后
+        // 会变成 0，用它算留白几乎不生效（实测只多了 20pt）。
+        // 这里改用固定值，保证任意题目都能滚到顶部。
+        ui.add_space(BOTTOM_PAD);
+
+        // 全部题目渲染完毕，此时 rects 是本帧最新的，消费跳转请求。
+        nav.apply_pending_scroll(ui);
     });
+    out.state.offset
 }
 
 /// 安装中文字体。
