@@ -148,8 +148,34 @@ fn print_result(unlocked: &Unlocked) {
         );
         for (n, item) in sec.items.iter().enumerate() {
             println!("  {}. ({}) {}", n + 1, item.score, item.stem);
-            for (j, opt) in item.options.iter().enumerate() {
-                println!("       {}. {opt}", workflow::option_label(j));
+            // 正文按形态打印：CLI 是排障与自动化验证的主要出口，
+            // 只打 options 会让模板/代码题在命令行里"消失"。
+            match &item.body {
+                common::model::QuestionBody::Options { options } => {
+                    for opt in options {
+                        println!("       {}. {}", opt.key, opt.text);
+                    }
+                }
+                common::model::QuestionBody::Template {
+                    template,
+                    blank_count,
+                } => {
+                    println!("       [模板题 · {blank_count} 空]");
+                    for line in template.lines() {
+                        println!("       | {line}");
+                    }
+                }
+                common::model::QuestionBody::Code { code, blank_count } => {
+                    println!("       [改错题 · {blank_count} 处]");
+                    for (i, line) in code.iter().enumerate() {
+                        println!("       {:>3}| {line}", i + 1);
+                    }
+                }
+                common::model::QuestionBody::Text => {
+                    for (j, opt) in item.options.iter().enumerate() {
+                        println!("       {}. {opt}", workflow::option_label(j));
+                    }
+                }
             }
         }
         println!();

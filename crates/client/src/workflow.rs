@@ -219,11 +219,7 @@ fn build_time_sources() -> Vec<Box<dyn TimeSource>> {
 /// 原先用 `(b'A' + j.min(25))`，第 26 个之后全部显示为 Z，
 /// 学生无法区分（实测：opt25 到 opt29 都是 `Z.`）。
 pub fn option_label(j: usize) -> String {
-    if j < 26 {
-        ((b'A' + j as u8) as char).to_string()
-    } else {
-        format!("{}", j + 1)
-    }
+    common::model::option_label(j)
 }
 
 /// 取解 header 用的 K_manifest。

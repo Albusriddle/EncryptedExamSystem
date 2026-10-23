@@ -24,19 +24,42 @@ pub struct PaperItem {
     /// 题型：single / multiple / judge / fill / essay
     pub qtype: String,
     pub stem: String,
+    /// 旧格式的纯文本选项；新格式走 `body`。
     pub options: Vec<String>,
+    /// 题目正文形态（选项 / 代码模板 / 逐行代码）。
+    pub body: crate::model::QuestionBody,
     pub score: u32,
 }
 
 impl From<&crate::model::Question> for PaperItem {
     fn from(q: &crate::model::Question) -> Self {
+        use crate::model::{ChoiceOption, QuestionBody};
+
+        // 旧题库只有 `options: ["a","b"]`，没有 body —— 在这里补成带键的
+        // Options，让客户端只需处理一种形态。
+        let body = match &q.body {
+            QuestionBody::Text if !q.options.is_empty() => QuestionBody::Options {
+                options: q
+                    .options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, text)| ChoiceOption {
+                        key: crate::model::option_label(i),
+                        text: text.clone(),
+                    })
+                    .collect(),
+            },
+            other => other.clone(),
+        };
+
         Self {
             id: q.id.clone(),
             qtype: q.qtype.clone(),
             stem: q.stem.clone(),
             options: q.options.clone(),
+            body,
             score: q.score,
-            // 注意：`q.answer` 被有意忽略，且本结构没有对应字段可放。
+            // 注意：`q.answer` / `q.judge` 被有意忽略，本结构没有对应字段可放。
         }
     }
 }
@@ -215,11 +238,71 @@ mod tests {
                     qtype: "single".into(),
                     stem: format!("题目 {i}"),
                     options: vec!["A".into(), "B".into(), "C".into(), "D".into()],
-                    answer: Some("A".into()),
+                    body: Default::default(),
+                    kp: None,
+                    difficulty: None,
+                    answer: Some(serde_json::json!("A")),
+                    judge: None,
                     score: 2,
                 })
                 .collect(),
         }
+    }
+
+    /// 旧题库只有 `options: ["A","B",…]`，没有 body。
+    /// 进试卷时必须自动补成带键的 Options，否则学生端只剩一串裸文本。
+    #[test]
+    fn legacy_options_become_labelled_body() {
+        let bank = demo_bank("m", 1, 1);
+        let item = PaperItem::from(&bank.questions[0]);
+        match item.body {
+            crate::model::QuestionBody::Options { options } => {
+                let keys: Vec<_> = options.iter().map(|o| o.key.as_str()).collect();
+                assert_eq!(keys, ["A", "B", "C", "D"]);
+                assert_eq!(options[0].text, "A");
+            }
+            other => panic!("旧题库应被补成 Options，实际 {other:?}"),
+        }
+    }
+
+    /// 三种正文形态都要能序列化/反序列化，且 `text` 是缺省值。
+    #[test]
+    fn body_kinds_round_trip() {
+        let json = r#"{
+            "exam_id": "m", "title": "t", "pick": 3,
+            "questions": [
+                {"id": "1", "type": "single", "stem": "s", "options": ["甲", "乙"]},
+                {"id": "2", "type": "fill", "stem": "s",
+                 "body": {"kind": "template", "template": "x = ____①____;", "blank_count": 1}},
+                {"id": "3", "type": "fix", "stem": "s",
+                 "body": {"kind": "code", "code": ["a", "b"], "blank_count": 1}}
+            ]
+        }"#;
+        let bank: crate::model::ExamBank = serde_json::from_str(json).unwrap();
+        assert_eq!(bank.questions[0].body, crate::model::QuestionBody::Text);
+        match &bank.questions[1].body {
+            crate::model::QuestionBody::Template {
+                template,
+                blank_count,
+            } => {
+                assert!(template.contains("____①____"));
+                assert_eq!(*blank_count, 1);
+            }
+            other => panic!("应为 Template，实际 {other:?}"),
+        }
+        match &bank.questions[2].body {
+            crate::model::QuestionBody::Code { code, blank_count } => {
+                assert_eq!(code.len(), 2);
+                assert_eq!(*blank_count, 1);
+            }
+            other => panic!("应为 Code，实际 {other:?}"),
+        }
+
+        // 再序列化回去，形态不能丢
+        let back: crate::model::ExamBank =
+            serde_json::from_str(&serde_json::to_string(&bank).unwrap()).unwrap();
+        assert_eq!(back.questions[1].body, bank.questions[1].body);
+        assert_eq!(back.questions[2].body, bank.questions[2].body);
     }
 
     /// 测试用的最小 PaperSection。
@@ -238,6 +321,7 @@ mod tests {
             qtype: "single".into(),
             stem: format!("题干 {id}"),
             options: vec![],
+            body: Default::default(),
             score: 2,
         }
     }
@@ -381,13 +465,14 @@ mod tests {
         let mut bank = demo_bank("math", 10, 3);
         // 源题库故意保留答案
         for q in &mut bank.questions {
-            q.answer = Some("SECRET_ANSWER".into());
+            q.answer = Some(serde_json::json!("SECRET_ANSWER"));
+            q.judge = Some(serde_json::json!({"harness": "SECRET_JUDGE"}));
         }
         let p = paper_default(2021001, 1, b"salt", &[bank]);
         let json = serde_json::to_string(&p.sections).unwrap();
         assert!(
-            !json.contains("SECRET_ANSWER"),
-            "试卷序列化结果中出现了答案"
+            !json.contains("SECRET_ANSWER") && !json.contains("SECRET_JUDGE"),
+            "试卷序列化结果中出现了答案或判分材料"
         );
         assert!(!json.contains("answer"), "试卷结构不应含 answer 字段");
     }

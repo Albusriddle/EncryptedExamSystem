@@ -1,5 +1,24 @@
 {
   "$defs": {
+    "ChoiceOption": {
+      "description": "带键的选项。键（A/B/C…）是答案的坐标，必须原样保留。",
+      "properties": {
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "text"
+      ],
+      "title": "ChoiceOption",
+      "type": "object"
+    },
     "Question": {
       "properties": {
         "id": {
@@ -21,7 +40,10 @@
           "title": "Options",
           "type": "array"
         },
-        "answer": {
+        "body": {
+          "$ref": "#/$defs/QuestionBody"
+        },
+        "kp": {
           "anyOf": [
             {
               "type": "string"
@@ -31,7 +53,27 @@
             }
           ],
           "default": null,
+          "title": "Kp"
+        },
+        "difficulty": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Difficulty"
+        },
+        "answer": {
+          "default": null,
           "title": "Answer"
+        },
+        "judge": {
+          "default": null,
+          "title": "Judge"
         },
         "score": {
           "default": 2,
@@ -45,6 +87,55 @@
         "stem"
       ],
       "title": "Question",
+      "type": "object"
+    },
+    "QuestionBody": {
+      "description": "题目正文形态，与 Rust 的 `QuestionBody` 一一对应（serde tag = kind）。\n\n为什么要分形态：补全题是带占位符的代码模板、改错题是逐行代码，\n它们既不是选项、也不该压成一段纯文本（压了就没法渲染代码块、\n没法定位\"第几行\"）。`text` 是旧题库的默认值。",
+      "properties": {
+        "kind": {
+          "default": "text",
+          "enum": [
+            "text",
+            "options",
+            "template",
+            "code"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/ChoiceOption"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Template"
+        },
+        "code": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Code",
+          "type": "array"
+        },
+        "blank_count": {
+          "default": 0,
+          "title": "Blank Count",
+          "type": "integer"
+        }
+      },
+      "title": "QuestionBody",
       "type": "object"
     }
   },

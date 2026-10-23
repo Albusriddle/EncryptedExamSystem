@@ -560,6 +560,68 @@ fn render_locked(ui: &mut egui::Ui, unlocked: &Unlocked, now: Option<u64>) -> eg
     card
 }
 
+/// 按题目形态渲染正文。
+///
+/// 三种形态的差别不是"排版喜好"，而是**信息结构**：
+/// - 选项题：键（A/B/C/D）是答案的坐标，必须原样显示；
+/// - 补全题：`____①____` 是作答位置的锚点，必须等宽显示，否则对不齐；
+/// - 改错题：行号是"第几行错了"的唯一坐标，必须逐行带号。
+fn render_body(ui: &mut egui::Ui, item: &common::picker::PaperItem) {
+    use common::model::QuestionBody;
+
+    match &item.body {
+        QuestionBody::Options { options } => {
+            for opt in options {
+                ui.label(format!("{}. {}", opt.key, opt.text));
+            }
+        }
+        QuestionBody::Template {
+            template,
+            blank_count,
+        } => {
+            ui.label(
+                egui::RichText::new(format!(
+                    "本小题有 {blank_count} 处空白，请在答题纸上按 ①②③ 顺序作答"
+                ))
+                .size(12.0)
+                .color(egui::Color32::GRAY),
+            );
+            egui::Frame::none()
+                .fill(ui.visuals().extreme_bg_color)
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(template).monospace().size(13.0));
+                });
+        }
+        QuestionBody::Code { code, blank_count } => {
+            ui.label(
+                egui::RichText::new(format!("本小题有 {blank_count} 处错误，请指出行号并改正"))
+                    .size(12.0)
+                    .color(egui::Color32::GRAY),
+            );
+            egui::Frame::none()
+                .fill(ui.visuals().extreme_bg_color)
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    for (i, line) in code.iter().enumerate() {
+                        // 行号右对齐到 3 位，代码才能对齐成块
+                        ui.label(
+                            egui::RichText::new(format!("{:>3}  {}", i + 1, line))
+                                .monospace()
+                                .size(13.0),
+                        );
+                    }
+                });
+        }
+        QuestionBody::Text => {
+            // 旧题库：没有 body，只有 options 数组
+            for (j, opt) in item.options.iter().enumerate() {
+                ui.label(format!("{}. {opt}", workflow::option_label(j)));
+            }
+        }
+    }
+}
+
 /// 渲染试卷。返回滚动区域的当前偏移，便于诊断验证"跳转是否真的滚动了"。
 fn render_paper(
     ui: &mut egui::Ui,
@@ -645,9 +707,7 @@ fn render_paper(
                                 .size(15.0),
                             );
                             ui.indent(format!("q{seq}"), |ui| {
-                                for (j, opt) in item.options.iter().enumerate() {
-                                    ui.label(format!("{}. {opt}", workflow::option_label(j)));
-                                }
+                                render_body(ui, item);
                             });
                         })
                     })

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Any, Literal
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.timeparse import parse_rfc3339
@@ -14,12 +16,60 @@ from app.core.timeparse import parse_rfc3339
 U64_MAX = 2**64 - 1
 
 
+class ChoiceOption(BaseModel):
+    """带键的选项。键（A/B/C…）是答案的坐标，必须原样保留。"""
+
+    key: str
+    text: str
+
+
+class QuestionBody(BaseModel):
+    """题目正文形态，与 Rust 的 `QuestionBody` 一一对应（serde tag = kind）。
+
+    为什么要分形态：补全题是带占位符的代码模板、改错题是逐行代码，
+    它们既不是选项、也不该压成一段纯文本（压了就没法渲染代码块、
+    没法定位"第几行"）。`text` 是旧题库的默认值。
+    """
+
+    kind: Literal["text", "options", "template", "code"] = "text"
+    options: list[ChoiceOption] = Field(default_factory=list)
+    template: str | None = None
+    code: list[str] = Field(default_factory=list)
+    blank_count: int = 0
+
+    @model_validator(mode="after")
+    def _check(self) -> QuestionBody:
+        if self.kind == "options":
+            if not self.options:
+                raise ValueError("kind=options 时 options 不能为空")
+            keys = [o.key for o in self.options]
+            if len(keys) != len(set(keys)):
+                raise ValueError("选项键重复")
+        elif self.kind == "template":
+            if not (self.template or "").strip():
+                raise ValueError("kind=template 时 template 不能为空")
+            if self.blank_count < 1:
+                raise ValueError("kind=template 时 blank_count 必须 ≥ 1")
+        elif self.kind == "code":
+            if not self.code:
+                raise ValueError("kind=code 时 code 不能为空")
+            if self.blank_count < 1:
+                raise ValueError("kind=code 时 blank_count 必须 ≥ 1")
+        return self
+
+
 class Question(BaseModel):
     id: str
     qtype: str = Field(alias="type")
     stem: str
     options: list[str] = Field(default_factory=list)
-    answer: str | None = None
+    body: QuestionBody = Field(default_factory=QuestionBody)
+    kp: str | None = None
+    difficulty: int | None = None
+    #: 结构化答案（single/multi/blanks/fixes）。打包时会被剥离。
+    answer: Any = None
+    #: 判分材料（entry/harness/tests）。**绝不进包**，打包时会被剥离。
+    judge: Any = None
     score: int = 2
 
     model_config = {"populate_by_name": True}

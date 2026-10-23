@@ -14,7 +14,7 @@ from app.core.models import ExamBank, validate_exam_id
 
 
 def write_temp_banks(banks: dict[str, ExamBank], tmpdir: Path) -> None:
-    """把题库写到临时目录，**剥掉 answer**。
+    """把题库写到临时目录，**剥掉 answer 与 judge**。
 
     打包时 builder 本来也会剥离答案，这里提前剥是纵深防御：
     万一 builder 被绕过或将来改动，临时文件本身也是干净的。
@@ -33,4 +33,10 @@ def write_temp_banks(banks: dict[str, ExamBank], tmpdir: Path) -> None:
         stripped = bank.model_copy(deep=True)
         for q in stripped.questions:
             q.answer = None
-        (tmpdir / name).write_text(stripped.model_dump_json(by_alias=True), encoding="utf-8")
+            # judge 里有完整 main() 与预期输出，同样绝不能进包
+            q.judge = None
+        # exclude_none：答案/判分材料是 None 时连键都不写，
+        # 而不是留一个 `"judge": null`——少一个字段就少一次被误读的机会。
+        (tmpdir / name).write_text(
+            stripped.model_dump_json(by_alias=True, exclude_none=True), encoding="utf-8"
+        )

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.models import ExamBank
+from app.core.bank_import import load_paths
 from app.core.state import ProjectState
 
 
@@ -54,30 +54,20 @@ class BanksTab(QWidget):
     # ---------------------------------------------------------------- 动作
 
     def import_banks(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(self, "选择题库文件（可多选）", "", "JSON (*.json)")
+        """导入题库：支持本程序格式，也支持外部的 questions/answers 成对文件。"""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择题库文件（可多选；外部题库请同时选中 .questions 与 .answers）",
+            "",
+            "JSON (*.json)",
+        )
         if not paths:
             return
-        parsed: list[tuple[str, object]] = []
-        errors: list[str] = []
-        for p in paths:
-            try:
-                # 显式 UTF-8：中文题库最常见的坑就是被存成 GBK
-                text = Path(p).read_text(encoding="utf-8")
-                bank = ExamBank.model_validate_json(text)
-            except UnicodeDecodeError:
-                errors.append(
-                    f"{Path(p).name}：不是 UTF-8 编码。\n"
-                    "  请用支持 UTF-8 的编辑器另存（记事本选「UTF-8」；\n"
-                    "  VS Code 右下角点击编码 → Save with Encoding → UTF-8）。"
-                )
-                continue
-            except Exception as e:  # noqa: BLE001 - pydantic 的 ValidationError
-                errors.append(f"{Path(p).name}：\n{e}")
-                continue
-            parsed.append((str(Path(p).resolve()), bank))
+
+        loaded, errors, warns = load_paths([Path(p) for p in paths])
+        incoming = [x.bank for x in loaded]
 
         # 冲突确认：同一 exam_id 已存在时**不能静默覆盖**。
-        incoming = [b for _, b in parsed]
         conflicts = self.state.conflicting_bank_ids(incoming)
         overwrite = False
         if conflicts:
@@ -93,14 +83,20 @@ class BanksTab(QWidget):
             overwrite = ret == QMessageBox.StandardButton.Yes
 
         added, replaced, skipped = self.state.merge_banks(incoming, overwrite=overwrite)
-        for path_str, bank in parsed:
-            if bank.exam_id in self.state.banks and path_str:
-                self.state.bank_paths[bank.exam_id] = path_str
+        for item in loaded:
+            if item.bank.exam_id in self.state.banks:
+                self.state.bank_paths[item.bank.exam_id] = str(item.source.resolve())
         ok = added + replaced
 
         self.refresh()
         if ok or skipped:
             self.changed.emit()
+
+        detail = f"新增 {added} 个"
+        if replaced:
+            detail += f"，覆盖 {replaced} 个"
+        if skipped:
+            detail += f"，跳过 {skipped} 个（已存在）"
 
         if errors:
             QMessageBox.warning(
@@ -108,12 +104,14 @@ class BanksTab(QWidget):
                 f"导入完成：成功 {ok} 个，失败 {len(errors)} 个",
                 "\n\n".join(errors),
             )
+        elif warns:
+            # 有提示（例如外部题库缺 judge 判分材料）：仍算成功，但要说清楚
+            QMessageBox.information(
+                self,
+                "导入完成（有提示）",
+                detail + "。\n\n" + "\n".join(warns[:10]),
+            )
         else:
-            detail = f"新增 {added} 个"
-            if replaced:
-                detail += f"，覆盖 {replaced} 个"
-            if skipped:
-                detail += f"，跳过 {skipped} 个（已存在）"
             QMessageBox.information(self, "导入完成", detail + "。")
 
     def remove_selected(self) -> None:

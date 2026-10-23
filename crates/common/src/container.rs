@@ -208,11 +208,16 @@ pub fn build_payload(
     kdf: KdfParams,
     embed_k_manifest: bool,
 ) -> Result<Vec<u8>, ContainerError> {
-    // 1. 剥离答案。
+    // 1. 剥离答案与判分材料。
+    //
+    // 管理端写临时题库时已经剥过一次（纵深防御的第一层）；这里是第二层：
+    // 即使有人绕过管理端直接用 CLI 打包，答案也进不了包。
+    // `judge` 里含完整 main() 与预期输出，泄漏后果与答案相同。
     let mut clean_banks = banks.to_vec();
     for bank in &mut clean_banks {
         for q in &mut bank.questions {
             q.answer = None;
+            q.judge = None;
         }
     }
 
@@ -957,7 +962,11 @@ mod tests {
                     qtype: "single".into(),
                     stem: "s".into(),
                     options: vec!["A".into()],
-                    answer: Some("A".into()),
+                    body: Default::default(),
+                    kp: None,
+                    difficulty: None,
+                    answer: Some(serde_json::json!("A")),
+                    judge: None,
                     score: 2,
                 })
                 .collect(),

@@ -6,6 +6,43 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 一个选项。保留键（A/B/C…），顺序即呈现顺序。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChoiceOption {
+    pub key: String,
+    pub text: String,
+}
+
+/// 题目正文的形态。
+///
+/// 为什么不用"一个 `options` 数组打天下"：补全题是**带占位符的代码模板**，
+/// 改错题是**逐行代码 + 若干待改行**，它们既不是选项、也不该被压成一段
+/// 纯文本（压了就没法渲染代码块、没法定位第几行）。
+///
+/// `Text` 是默认值：老题库没有 `body` 字段，反序列化后落到这里，
+/// 渲染时回退到 `Question::options`，因此**旧题库一行都不用改**。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QuestionBody {
+    /// 纯题干（无选项、无代码块）
+    #[default]
+    Text,
+    /// 选择题：带键的选项
+    Options { options: Vec<ChoiceOption> },
+    /// 补全题：代码模板，内含 `____①____` 形式的占位符
+    Template {
+        template: String,
+        #[serde(default)]
+        blank_count: u8,
+    },
+    /// 改错题：逐行代码（行号从 1 开始，含空行）
+    Code {
+        code: Vec<String>,
+        #[serde(default)]
+        blank_count: u8,
+    },
+}
+
 /// 单道题目。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Question {
@@ -19,9 +56,28 @@ pub struct Question {
     /// 选项（选择/判断题使用）。
     #[serde(default)]
     pub options: Vec<String>,
-    /// 标准答案（打包进学生端时会被剥离）。
+    /// 题目正文形态（旧题库缺省为 `Text`，此时用 `options` 渲染）。
+    #[serde(default)]
+    pub body: QuestionBody,
+    /// 知识点编号（如 "1.1"，外部题库才有）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub answer: Option<String>,
+    pub kp: Option<String>,
+    /// 难度；外部题库约定 `0` 表示多选题。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub difficulty: Option<u8>,
+    /// 标准答案（结构化，打包进学生端时被剥离）。
+    ///
+    /// 用 `Value` 而不是具体枚举：答案只在管理端（Python）需要理解，
+    /// 学生端与 builder 都不读它。在 Rust 里再定义一套答案枚举只会
+    /// 产生"两端各写一遍、迟早不一致"的重复。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<serde_json::Value>,
+    /// 判分材料（`{entry, harness, tests}`，外部题库才有）。
+    ///
+    /// **绝不进包**：里面可能含完整 `main()` 与预期输出。打包前由管理端剥离，
+    /// 这里保留是为了将来做判分时不丢信息。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<serde_json::Value>,
     /// 分值。
     #[serde(default = "default_score")]
     pub score: u32,
@@ -29,6 +85,18 @@ pub struct Question {
 
 fn default_score() -> u32 {
     2
+}
+
+/// 选项序号 → 显示标签（0→A，25→Z，26→"27"）。
+///
+/// 放在 common 里是**唯一实现**：管理端导出、builder 校验、学生端渲染
+/// 都用它，避免"两处各写一份、边界处不一致"（旧代码在 client 里有一份）。
+pub fn option_label(j: usize) -> String {
+    if j < 26 {
+        ((b'A' + j as u8) as char).to_string()
+    } else {
+        format!("{}", j + 1)
+    }
 }
 
 /// 一个题库文件（对应一门考试 / 一个 json）。

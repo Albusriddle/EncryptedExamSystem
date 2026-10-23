@@ -107,7 +107,9 @@ def test_temp_banks_have_no_answers(tmp_path: Path) -> None:
 
     text = (tmp_path / "math.json").read_text(encoding="utf-8")
     obj = json.loads(text)
-    assert obj["questions"][0]["answer"] is None, "临时题库里仍带答案"
+    # exclude_none 之后连键都不写，比"值为 null"更彻底
+    assert "answer" not in obj["questions"][0], "临时题库里仍带答案"
+    assert "judge" not in obj["questions"][0], "临时题库里仍带判分材料"
 
     # 源对象不能被就地改动（必须 deep copy）
     assert bank.questions[0].answer == "B"
