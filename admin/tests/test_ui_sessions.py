@@ -7,7 +7,7 @@
 根因分别是：模型禁止空科目导致槽函数抛异常被吞、以及 refresh 里
 blockSignals 设置选中项导致表单没被填充（时间停在 2000-01-01）。
 
-没有 PySide6 时整个模块跳过（CI 的 python job 不装 GUI 依赖）。
+没有 PySide6 时整个模块跳过；CI 已安装 PySide6 并以 offscreen 平台真实运行。
 """
 
 from __future__ import annotations

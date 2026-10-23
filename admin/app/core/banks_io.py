@@ -1,8 +1,9 @@
 """题库文件读写的纯逻辑（**不依赖 Qt**）。
 
 独立于 `ui/` 的原因：这些函数关系到"标准答案会不会落盘"，
-必须有回归测试守着；而 CI 的 python job 不安装 PySide6，
-若写在 `ui/tab_build.py` 里，测试一导入就会 ModuleNotFoundError。
+必须有回归测试守着；写成 Qt-free 的纯函数后，测试不依赖 GUI，
+本地与 CI 都能直接跑（CI 现在也装了 PySide6 并真实运行 UI 测试，
+但核心逻辑保持 Qt-free 仍然是好设计：依赖越少越稳）。
 """
 
 from __future__ import annotations

@@ -51,7 +51,9 @@ bash scripts/preflight-release.sh          # 全过
 - 修 bug MUST 附带**能复现该 bug 的回归测试**。正确顺序：先写出失败的测试 → 确认它确实失败 → 再修 → 确认转绿。
 - 测试 MUST 断言**用户可见行为**，不能只断言内部数据结构。
   > 反例（真实教训）：场次保存后界面勾选消失，而只断言 `state.sessions[0].exams` 的用例一直是绿的。
-- 涉及 Qt 的测试 MUST 以 `pytest.importorskip("PySide6")` 开头——CI 的 python job 不安装 GUI 依赖。
+- 涉及 Qt 的测试 MUST 以 `pytest.importorskip("PySide6")` 开头：CI 已安装 PySide6
+  并以 `QT_QPA_PLATFORM=offscreen` 真实运行，但缺 GUI 依赖的环境（如精简容器）
+  应能跳过而不是整批失败。
 - 涉及信号联动的 UI bug，测试 MUST 复刻真实接线（如 `tab.changed.connect(refresh_choices)`），否则复现不出来。
 - **MUST NOT** 为了让测试通过而放宽断言、删除用例、跳过测试。
 - 测试写磁盘时 **MUST NOT** 用 `std::env::temp_dir()`（本机 MSYS 下指向 `/tmp`，原生进程写不进去）；用 `target/` 下的目录。
@@ -98,7 +100,7 @@ bash scripts/preflight-release.sh          # 全过
 | `VERSION` 是唯一版本来源，三处同步 | `VERSION` / `Cargo.toml` / `admin/pyproject.toml` |
 | 对外文案唯一来源 | `branding.json`（Rust `include_str!`，Python 运行时读） |
 | Python 与 Rust 的校验规则一致 | `ProjectState.validate()` ↔ `validate_sessions_impl()` |
-| `admin/app/core/` 不依赖 Qt | CI 的 python job 无 PySide6 |
+| `admin/app/core/` 不依赖 Qt | 核心逻辑可脱离 GUI 独立测试 |
 | 时间必须带显式时区 | 两端都拒绝无偏移时间（会被当成 UTC，静默偏移 8 小时） |
 | 同一学生不得同时出现在重叠场次 | Rust `check_student_overlap` + Python `_check_student_overlap` |
 
@@ -142,7 +144,7 @@ bash scripts/preflight-release.sh          # 全过
 | 提交密钥/真题/名册 | 公开仓库，永久泄漏 |
 | 用截图判断 GUI 布局 | DPI 下结论不可靠，已误判多次 |
 | 只断言模型、不断言界面 | 会出现"数据对、界面错"的绿测试 |
-| 在 `admin/app/core/` import Qt | CI 无 GUI 依赖，整批测试会挂 |
+| 在 `admin/app/core/` import Qt | 核心逻辑要保持可独立测试（CI 现在装了 Qt，但分层不能破） |
 | 在 release 里留 `EES_*` 开关 | 把测试钩子发给学生 |
 | 允许包内自定义时间源 | 时间门禁后门 |
 | 用字符串比较时间 | 跨时区会判错 |

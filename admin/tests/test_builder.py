@@ -346,11 +346,11 @@ def test_writable_detects_readonly_dir(tmp_path: Path) -> None:
 def _tab_build():
     """按需导入界面模块。
 
-    这些用例测的是 `tab_build` 里的路径推断，必须有 PySide6；
-    而 CI 的 python job 不装 GUI 依赖——旧写法在 CI 里直接
-    ModuleNotFoundError，导致 python job 连续多次失败。
+    这些用例测的是 `tab_build` 里的路径推断，必须有 PySide6。
+    保留 importorskip 是为了"没装 GUI 依赖的环境也能跑完其余测试"
+    （CI 现在装了 PySide6，这些用例会真正执行）。
     """
     pytest.importorskip("PySide6")
-    from app.ui import tab_build  # noqa: PLC0415 - 延迟导入，避免 CI 无 PySide6 时整文件失败
+    from app.ui import tab_build  # noqa: PLC0415 - 延迟导入，缺 GUI 依赖时只跳过本组用例
 
     return tab_build

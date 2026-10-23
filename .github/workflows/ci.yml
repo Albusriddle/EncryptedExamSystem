@@ -34,12 +34,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      # Qt 的无头运行需要这些系统库：缺 libEGL/libGL 时 QApplication 直接
+      # 报 "could not load the Qt platform plugin xcb"。
+      - name: 安装 Qt 运行库
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
       - name: lint + test
         working-directory: admin
         # uv 会按 pyproject.toml 的 requires-python 自动挑选解释器，
         # 不需要额外的 setup-python。
+        #
+        # 装 --extra gui 并设 QT_QPA_PLATFORM=offscreen：UI 测试**真的跑**，
+        # 不再 importorskip 跳过。本项目最严重的几个 bug（勾选丢失、
+        # 保存后科目清空）都只在界面层暴露，跳过等于没测。
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
-          uv sync --locked
+          uv sync --locked --extra gui
           uv run ruff check .
           uv run pytest -q
 
