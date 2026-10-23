@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateTimeEdit,
-    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -117,6 +116,16 @@ class TimelineWidget(QWidget):
             p.drawText(rect.adjusted(4, 0, -2, 0), Qt.AlignmentFlag.AlignVCenter, label)
 
 
+def pick_width(max_value: int) -> int:
+    """抽题数输入框的最小宽度（按最大值的位数算）。
+
+    实测教训：固定 70px + QDoubleSpinBox 时，"500" 会显示成 "50"——
+    教师以为抽 50 题，模型里其实是 500 题，考场上无法挽回。
+    """
+    digits = max(len(str(max(max_value, 1))), 2)
+    return 50 + digits * 14
+
+
 class SessionsTab(QWidget):
     changed = Signal()
 
@@ -194,7 +203,7 @@ class SessionsTab(QWidget):
         # 科目
         subj_box = QGroupBox("考试科目")
         sl = QVBoxLayout(subj_box)
-        self.checks: list[tuple[QCheckBox, QDoubleSpinBox, str]] = []
+        self.checks: list[tuple[QCheckBox, QSpinBox, str]] = []
         self.combo_holder = QVBoxLayout()
         sl.addLayout(self.combo_holder)
         rl.addWidget(subj_box)
@@ -253,12 +262,20 @@ class SessionsTab(QWidget):
             row = QWidget()
             hl = QHBoxLayout(row)
             hl.setContentsMargins(0, 0, 0, 0)
-            cb = QCheckBox(f"{bank.title}（{exam_id}，题量 {len(bank.questions)}）")
-            pick = QDoubleSpinBox()
-            pick.setDecimals(0)
+            # 外部题库导入时 title 默认等于 exam_id，此时括号里再写一遍就是重复
+            label = (
+                f"{bank.title}（题量 {len(bank.questions)}）"
+                if bank.title == exam_id
+                else f"{bank.title}（{exam_id}，题量 {len(bank.questions)}）"
+            )
+            cb = QCheckBox(label)
+            # 整数用 QSpinBox：QDoubleSpinBox 即便 decimals=0 也会为
+            # 小数点预留编辑区，把 "500" 截成 "50"。
+            pick = QSpinBox()
             pick.setRange(1, max(len(bank.questions), 1))
             pick.setValue(min(bank.pick, len(bank.questions)))
-            pick.setFixedWidth(70)
+            pick.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            pick.setMinimumWidth(pick_width(int(pick.maximum())))
             hl.addWidget(cb)
             hl.addWidget(QLabel("抽题数"))
             hl.addWidget(pick)

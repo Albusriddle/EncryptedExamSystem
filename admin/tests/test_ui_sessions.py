@@ -359,3 +359,72 @@ def test_manual_clear_button(qapp, state_with_banks) -> None:
     tab.clear_master()
     assert tab.edit_master.text() == ""
     assert "已清空" in tab.copy_hint.text()
+
+
+# ---------------------------------------------------------------- 抽题数输入框
+
+
+def test_pick_width_scales_with_digits() -> None:
+    """宽度必须随位数增长，否则 500 会被画成 50。"""
+    from app.ui.tab_sessions import pick_width
+
+    assert pick_width(5) >= 75  # 至少两位数宽度
+    assert pick_width(50) >= 75
+    assert pick_width(500) >= 90  # 三位数不能比两位数还窄
+    assert pick_width(5000) >= 100
+    # 单调不减：位数越多越宽
+    assert pick_width(5000) > pick_width(500) > pick_width(50)
+
+
+def test_pick_spinbox_is_wide_enough(qapp, state_with_banks) -> None:
+    """500 题的题库：控件必须是 QSpinBox，且宽度装得下 3 位数。"""
+    from PySide6.QtWidgets import QSpinBox
+
+    from app.core.models import ExamBank, Question
+    from app.ui.tab_sessions import SessionsTab
+
+    bank = ExamBank(
+        exam_id="big",
+        title="big",
+        pick=500,
+        questions=[
+            Question(id=f"q{i}", type="single", stem="s", options=["a"]) for i in range(500)
+        ],
+    )
+    state_with_banks.banks["big"] = bank
+    editor = SessionsTab(state_with_banks)
+    try:
+        editor.refresh_choices()
+        cbs = [c for c, _p, eid in editor.checks if eid == "big"]
+        picks = [p for _c, p, eid in editor.checks if eid == "big"]
+        assert cbs and picks
+        pick = picks[0]
+        assert isinstance(pick, QSpinBox)
+        assert pick.value() == 500, "值本身不能被截断"
+        assert pick.minimumWidth() >= 90
+    finally:
+        editor.deleteLater()
+
+
+def test_bank_label_avoids_duplicate_name(qapp, state_with_banks) -> None:
+    """title == exam_id 时不要在括号里重复显示同一个名字。"""
+    from PySide6.QtWidgets import QCheckBox
+
+    from app.core.models import ExamBank, Question
+    from app.ui.tab_sessions import SessionsTab
+
+    # 外部题库导入时 title 默认等于文件名，这里复刻那种情况
+    state_with_banks.banks["same"] = ExamBank(
+        exam_id="same",
+        title="same",
+        pick=1,
+        questions=[Question(id="q", type="single", stem="s", options=["a"])],
+    )
+    editor = SessionsTab(state_with_banks)
+    try:
+        editor.refresh_choices()
+        labels = [cb.text() for cb in editor.findChildren(QCheckBox)]
+        assert "same（题量 1）" in labels, labels
+        assert not [x for x in labels if x.count("same") > 1], f"名称重复显示：{labels}"
+    finally:
+        editor.deleteLater()
