@@ -177,10 +177,20 @@ fn run_time_gate(
     let _ = opts.skip_time_gate; // release 下没有这个开关
 
     let sources = build_time_sources();
-    let net = timegate::fetch_network_time(&sources, 2, 300).map_err(|e| {
+    // 最多两轮：第二轮只重查失败的源，网络抖一下不至于让学生考不了。
+    let net = timegate::fetch_network_time_with_policy(
+        &sources,
+        timegate::FetchPolicy {
+            min_sources: 2,
+            max_spread: 60,
+            rounds: 2,
+        },
+    )
+    .map_err(|e| {
         anyhow::anyhow!(
             "无法获取可信的网络时间：{e}\n\
-             请检查网络连接。为避免误判，本系统在取时失败时**拒绝解锁**。"
+             已自动重试一次仍失败。请再点一次【开始考试】，或改用手机热点。\n\
+             为避免误判，本系统在取时失败时**拒绝解锁**。"
         )
     })?;
 

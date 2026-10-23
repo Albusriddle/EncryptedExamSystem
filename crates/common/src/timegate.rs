@@ -321,29 +321,113 @@ pub fn fetch_network_time(
     min_sources: usize,
     max_spread: u64,
 ) -> Result<NetworkTime, TimeError> {
-    let mut ok: Vec<u64> = Vec::new();
-    let mut errs: Vec<String> = Vec::new();
-    for src in sources {
-        match src.now_unix() {
-            Ok(t) => ok.push(t),
-            Err(e) => errs.push(e),
+    fetch_network_time_with_policy(
+        sources,
+        FetchPolicy {
+            min_sources,
+            max_spread,
+            rounds: 1,
+        },
+    )
+}
+
+/// 取时策略。
+#[derive(Debug, Clone, Copy)]
+pub struct FetchPolicy {
+    pub min_sources: usize,
+    pub max_spread: u64,
+    /// 最多采几轮（1 = 不重试）。
+    ///
+    /// 只有"可用源不足"时才继续下一轮，且**只重查失败的那些源**——
+    /// 已经成功的源不再查询，重试成本因此只有一次超时（约 3 秒）。
+    /// 考场 Wi-Fi 抖一下就整场考不了，代价远高于这 3 秒。
+    pub rounds: u32,
+}
+
+impl Default for FetchPolicy {
+    fn default() -> Self {
+        Self {
+            min_sources: 2,
+            max_spread: 60,
+            rounds: 2,
         }
     }
+}
 
-    if ok.len() < min_sources {
-        if errs.len() == sources.len() && !sources.is_empty() {
-            return Err(TimeError::AllFailed(errs.join("; ")));
+/// 并发取一次时（每个源一个线程）。
+///
+/// 串行取 3 个源时，最坏要等 3×3 秒才失败；并发之后单轮最坏 3 秒。
+/// 线程崩溃（源内部 panic）按该源失败处理，不影响其它源。
+fn sample_parallel(
+    sources: &[Box<dyn TimeSource>],
+    pending: &[usize],
+) -> Vec<(usize, Result<u64, String>)> {
+    std::thread::scope(|scope| {
+        let handles: Vec<(usize, _)> = pending
+            .iter()
+            .map(|&i| (i, scope.spawn(move || sources[i].now_unix())))
+            .collect();
+        handles
+            .into_iter()
+            .map(|(i, h)| (i, h.join().unwrap_or_else(|_| Err("取时线程崩溃".into()))))
+            .collect()
+    })
+}
+
+/// 带重试的取时。
+pub fn fetch_network_time_with_policy(
+    sources: &[Box<dyn TimeSource>],
+    policy: FetchPolicy,
+) -> Result<NetworkTime, TimeError> {
+    let n = sources.len();
+    let mut values: Vec<Option<u64>> = vec![None; n];
+    let mut errors: Vec<Option<String>> = vec![None; n];
+    let mut pending: Vec<usize> = (0..n).collect();
+
+    for _ in 0..policy.rounds.max(1) {
+        if pending.is_empty() {
+            break;
+        }
+        for (idx, res) in sample_parallel(sources, &pending) {
+            match res {
+                Ok(t) => {
+                    values[idx] = Some(t);
+                    errors[idx] = None;
+                }
+                Err(e) => errors[idx] = Some(e),
+            }
+        }
+        if values.iter().filter(|v| v.is_some()).count() >= policy.min_sources {
+            break; // 够用了，不再等失败源
+        }
+        pending = values
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.is_none())
+            .map(|(i, _)| i)
+            .collect();
+    }
+
+    let mut ok: Vec<u64> = values.iter().flatten().copied().collect();
+    if ok.len() < policy.min_sources {
+        let details: Vec<String> = errors
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| e.as_ref().map(|e| format!("{}: {e}", sources[i].name())))
+            .collect();
+        if ok.is_empty() && !sources.is_empty() {
+            return Err(TimeError::AllFailed(details.join("; ")));
         }
         return Err(TimeError::NotEnoughSources {
             ok: ok.len(),
-            need: min_sources,
+            need: policy.min_sources,
         });
     }
 
     ok.sort_unstable();
     let median = ok[ok.len() / 2];
     let spread = ok[ok.len() - 1] - ok[0];
-    let limit = spread_limit(ok.len(), max_spread);
+    let limit = spread_limit(ok.len(), policy.max_spread);
     if spread > limit {
         return Err(TimeError::SourcesDisagree { spread, limit });
     }
@@ -536,6 +620,116 @@ mod tests {
         let t = fetch_network_time(&sources, 2, 60).unwrap();
         assert_eq!(t.unix, 1001, "中位数应取 1001，而不是被 1020 拉动");
         assert_eq!(t.spread, 20);
+    }
+
+    /// 会失败的源：前 `fail_times` 次报错，之后返回 `value`。
+    /// 返回 (可装箱的源, 调用计数器) —— 计数器用来断言"重试了几次"。
+    struct FlakySource {
+        name: String,
+        value: u64,
+        fail_times: std::sync::atomic::AtomicUsize,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl FlakySource {
+        /// 返回 (可装箱的源, 调用计数器)——不叫 new，因为它返回的不是 Self。
+        fn make(
+            name: &str,
+            value: u64,
+            fail_times: usize,
+        ) -> (
+            Box<dyn TimeSource>,
+            std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        ) {
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let src = Box::new(Self {
+                name: name.into(),
+                value,
+                fail_times: std::sync::atomic::AtomicUsize::new(fail_times),
+                calls: std::sync::Arc::clone(&calls),
+            });
+            (src, calls)
+        }
+    }
+
+    impl TimeSource for FlakySource {
+        fn now_unix(&self) -> Result<u64, String> {
+            use std::sync::atomic::Ordering;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            // 手写"取一次并减一"：原子 API 在不同版本间改过名，
+            // 用 compare_exchange 循环最稳，也不引入版本差异。
+            let mut remaining = self.fail_times.load(Ordering::SeqCst);
+            while remaining > 0 {
+                match self.fail_times.compare_exchange(
+                    remaining,
+                    remaining - 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => return Err("暂时不可用".into()),
+                    Err(actual) => remaining = actual,
+                }
+            }
+            Ok(self.value)
+        }
+        fn name(&self) -> &str {
+            &self.name
+        }
+    }
+
+    /// 一次网络抖动不应让学生考不了：失败的源会被重试。
+    #[test]
+    fn retry_recovers_transient_failure() {
+        let (flaky, calls) = FlakySource::make("flaky", 1000, 1);
+        let sources = vec![src("a", Ok(1000)), flaky];
+        let policy = FetchPolicy {
+            min_sources: 2,
+            max_spread: 60,
+            rounds: 2,
+        };
+        let t = fetch_network_time_with_policy(&sources, policy).unwrap();
+        assert_eq!(t.unix, 1000);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "失败源应被重试一次"
+        );
+    }
+
+    /// 彻底失败时仍然 fail-closed，并且只重试有限轮。
+    #[test]
+    fn retry_exhausted_still_fails_closed() {
+        let (dead, calls) = FlakySource::make("dead", 1000, 99);
+        let sources = vec![src("a", Ok(1000)), dead];
+        let policy = FetchPolicy {
+            min_sources: 2,
+            max_spread: 60,
+            rounds: 2,
+        };
+        let err = fetch_network_time_with_policy(&sources, policy).unwrap_err();
+        assert!(matches!(
+            err,
+            TimeError::NotEnoughSources { ok: 1, need: 2 }
+        ));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "最多重试到 rounds 次"
+        );
+    }
+
+    /// 源够用时不该有任何重试（不增加正常路径的延迟）。
+    #[test]
+    fn no_retry_when_enough_sources() {
+        let sources = vec![src("a", Ok(1000)), src("b", Ok(1001)), src("c", Ok(1002))];
+        let policy = FetchPolicy {
+            min_sources: 2,
+            max_spread: 60,
+            rounds: 3,
+        };
+        let t = fetch_network_time_with_policy(&sources, policy).unwrap();
+        assert_eq!(t.unix, 1001);
+        assert_eq!(t.sources, 3);
     }
 
     #[test]

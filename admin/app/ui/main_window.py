@@ -45,8 +45,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.state = ProjectState()
         self.project_path: Path | None = None
+        #: 是否有未保存的改动。没有它的话，只要导入过题库/建过场次，
+        #: 每次新建或打开工程都会问"未保存的修改会丢失"——哪怕刚保存过。
+        #: 教师被问烦了就会无脑点"是"，真正该拦的时候反而拦不住。
+        self._dirty = False
 
-        self.setWindowTitle("保密考试系统 · 管理端")
+        self.setWindowTitle(self._window_title())
         self.resize(1080, 760)
 
         self._build_toolbar()
@@ -137,6 +141,7 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- 刷新
 
     def _on_changed(self) -> None:
+        self._dirty = True
         self._refresh_status()
         # 题库/学生变了，场次 Tab 里的可选项也要跟着变
         self.sessions_tab.refresh_choices()
@@ -144,7 +149,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_status(self) -> None:
         self.status_label.setText(self.state.summary())
-        title = "保密考试系统 · 管理端"
+        title = self._window_title()
         if self.project_path:
             title += f" — {self.project_path.name}"
         if self.state.validate():
@@ -158,6 +163,7 @@ class MainWindow(QMainWindow):
             return
         self.state = ProjectState()
         self.project_path = None
+        self._dirty = False
         self._reload_tabs()
         self.statusBar().showMessage("已新建工程", 4000)
 
@@ -173,6 +179,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "打开失败", f"{path}\n\n{e}")
             return
         self.project_path = Path(path)
+        self._dirty = False
         self._reload_tabs()
         missing = set(self.state.bank_paths) - set(self.state.banks)
         if missing:
@@ -198,6 +205,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "保存失败", str(e))
             return
         self.project_path = Path(path)
+        self._dirty = False
         self._refresh_status()
         self.statusBar().showMessage(f"已保存 {path}", 5000)
 
@@ -212,8 +220,12 @@ class MainWindow(QMainWindow):
             "以下问题会阻止打包：\n\n" + "\n".join(f"· {p}" for p in problems),
         )
 
+    def _window_title(self) -> str:
+        """窗口标题统一由 branding 生成——改名时不需要满仓库找字符串。"""
+        return f"{branding().product} · 管理端"
+
     def _confirm_discard(self) -> bool:
-        if not (self.state.banks or self.state.sessions):
+        if not self._dirty:
             return True
         ret = QMessageBox.question(
             self,

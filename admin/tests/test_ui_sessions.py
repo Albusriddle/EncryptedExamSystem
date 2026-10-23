@@ -332,3 +332,30 @@ def test_auto_clear_keeps_user_edited_value(qapp, state_with_banks) -> None:
     tab.edit_master.setText("11" * 32)
     tab._clear_master_if_unchanged("22" * 32)
     assert tab.edit_master.text() == "11" * 32
+
+
+def test_auto_clear_keeps_key_when_clipboard_changed(qapp, state_with_banks) -> None:
+    """剪贴板被别的内容覆盖时，输入框是唯一副本——绝不能自动清空。"""
+    from PySide6.QtGui import QGuiApplication
+
+    from app.ui import tab_build
+
+    tab = tab_build.BuildTab(state_with_banks)
+    key = "cd" * 32
+    tab.edit_master.setText(key)
+    QGuiApplication.clipboard().setText("别的内容")  # 模拟被覆盖
+
+    tab._clear_master_if_unchanged(key)
+
+    assert tab.edit_master.text() == key, "剪贴板已变化时不应清空唯一副本"
+    assert "保留" in tab.copy_hint.text()
+
+
+def test_manual_clear_button(qapp, state_with_banks) -> None:
+    from app.ui import tab_build
+
+    tab = tab_build.BuildTab(state_with_banks)
+    tab.edit_master.setText("12" * 32)
+    tab.clear_master()
+    assert tab.edit_master.text() == ""
+    assert "已清空" in tab.copy_hint.text()

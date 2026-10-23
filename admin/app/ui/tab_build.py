@@ -279,6 +279,11 @@ class BuildTab(QWidget):
         btn_copy.setToolTip("把主密钥复制到剪贴板，粘贴到密码管理器里保存")
         btn_copy.clicked.connect(self.copy_master)
         row.addWidget(btn_copy)
+        # 显式的"清空"：教师自己决定何时抹掉，比定时器更可控。
+        btn_clear = QPushButton("清空")
+        btn_clear.setToolTip("立即清空输入框里的主密钥（请确认已保存到密码管理器）")
+        btn_clear.clicked.connect(self.clear_master)
+        row.addWidget(btn_clear)
         form.addRow("主密钥", row)
 
         self.copy_hint = QLabel("")
@@ -415,12 +420,36 @@ class BuildTab(QWidget):
         QTimer.singleShot(self.MASTER_AUTO_CLEAR_MS, lambda: self._clear_master_if_unchanged(key))
 
     def _clear_master_if_unchanged(self, key: str) -> None:
-        """到点自动清空主密钥输入框（内容被教师改过就不动）。"""
+        """到点自动清空主密钥输入框。
+
+        两道保险：
+        1. 内容被教师改过 → 不动；
+        2. **剪贴板里已经不是这把密钥了** → 也不动。
+
+        第 2 条是关键：主密钥通常只有"输入框 + 剪贴板"两份。若剪贴板已被
+        别的东西覆盖，输入框就是唯一副本——清掉等于这个场次再也打不出包。
+        """
         if self.edit_master.text().strip() != key:
+            return
+        if QGuiApplication.clipboard().text() != key:
+            self.copy_hint.setStyleSheet("color:#9a6a00")
+            self.copy_hint.setText(
+                "ℹ 剪贴板内容已变化，主密钥保留在输入框中（未自动清空）。请尽快保存。"
+            )
             return
         self.edit_master.clear()
         self.copy_hint.setStyleSheet("color:#2e7d32")
         self.copy_hint.setText("✔ 主密钥已从输入框自动清空（复制早已完成，请从剪贴板粘贴保存）。")
+
+    def clear_master(self) -> None:
+        """教师主动清空输入框（不碰剪贴板）。"""
+        if not self.edit_master.text().strip():
+            self.copy_hint.setStyleSheet("color:#c04040")
+            self.copy_hint.setText("输入框里没有主密钥。")
+            return
+        self.edit_master.clear()
+        self.copy_hint.setStyleSheet("color:#2e7d32")
+        self.copy_hint.setText("✔ 已清空输入框中的主密钥。若剪贴板里还有，请尽快保存到密码管理器。")
 
     def gen_master(self) -> None:
         exe = builder_exe()

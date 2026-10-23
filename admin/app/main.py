@@ -14,6 +14,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from app.branding import branding
 from app.ui.main_window import MainWindow
 
 
@@ -142,7 +143,7 @@ def main() -> int:
         return 0
     app = QApplication(sys.argv)
     install_excepthook()
-    app.setApplicationName("保密考试系统 · 管理端")
+    app.setApplicationName(f"{branding().product} · 管理端")
     # 中文字体：Windows 下默认字体即可；Linux 若缺失由系统配置决定
     win = MainWindow()
     win.show()

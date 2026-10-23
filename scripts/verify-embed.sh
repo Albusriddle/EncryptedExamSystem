@@ -55,18 +55,18 @@ echo "== 路径 0：默认打包（包内嵌密钥，学生零配置）=="
 # 前提下产出学生双击可用的包。若这条失败，整个产品交付不出去。
 "$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
   --stub "$CLIENT" --out "$TMP/zero_conf.exe" --master "$MASTER" 2>&1 \
-  | grep -q "已内嵌密钥" || fail "默认打包未内嵌密钥"
+  | grep -c "已内嵌密钥" >/dev/null || fail "默认打包未内嵌密钥"
 ok "默认打包已内嵌密钥"
 
 if "$TMP/zero_conf.exe" --student 2021001 --package "$TMP/zero_conf.exe" \
-    | grep -q "解锁成功"; then
+    | grep -c "解锁成功" >/dev/null; then
   ok "学生不带任何密钥即可解锁"
 else
   fail "默认包无法零配置解锁（教师将无法交付）"
 fi
 
 "$TMP/zero_conf.exe" --student 2021001 --package "$TMP/zero_conf.exe" \
-  | grep -q "正式（密钥随包分发）" || fail "模式显示不正确"
+  | grep -c "正式（密钥随包分发）" >/dev/null || fail "模式显示不正确"
 ok "模式显示为正式分发"
 
 if "$TMP/zero_conf.exe" --student 9999999 --package "$TMP/zero_conf.exe" >/dev/null 2>&1; then
@@ -85,7 +85,7 @@ fi
 ok "不带 master 时正确报错"
 
 "$TMP/dev.exe" --student 2021001 --master "$MASTER" --package "$TMP/dev.exe" \
-  | grep -q "解锁成功" || fail "带 master 时未能解锁"
+  | grep -c "解锁成功" >/dev/null || fail "带 master 时未能解锁"
 ok "带 master 可解锁"
 
 echo
@@ -100,8 +100,12 @@ echo "== 路径 2：已嵌入（发布模式）=="
 # 于是 build.rs 不跑、警告也不打印，这里的 grep 就会误报失败。
 # 显式 touch build.rs，保证它一定重跑。
 touch crates/client/build.rs
-EXAM_KEYFILE="$TMP/kf.txt" cargo build --release -p client 2>&1 \
-  | grep -q "已嵌入 K_manifest" || fail "build.rs 未识别 EXAM_KEYFILE"
+# 输出先落文件再 grep：`cargo ... | grep -q` 在 pipefail 下会误报——
+# grep 一匹配就退出，cargo 后续输出触发 EPIPE 被杀，管道返回非 0。
+EXAM_KEYFILE="$TMP/kf.txt" cargo build --release -p client > "$TMP/build.log" 2>&1 \
+  || fail "带 EXAM_KEYFILE 的构建失败（见 $TMP/build.log）"
+grep -q "已嵌入 K_manifest" "$TMP/build.log" \
+  || fail "build.rs 未识别 EXAM_KEYFILE（见 $TMP/build.log）"
 ok "build.rs 已嵌入密钥"
 
 cp "$CLIENT" "$TMP/stub_emb.exe"
@@ -109,7 +113,7 @@ cp "$CLIENT" "$TMP/stub_emb.exe"
   --stub "$TMP/stub_emb.exe" --out "$TMP/student.exe" --master "$MASTER" >/dev/null 2>&1
 
 "$TMP/student.exe" --student 2021001 --package "$TMP/student.exe" \
-  | grep -q "解锁成功" || fail "嵌入后仍无法免密解锁"
+  | grep -c "解锁成功" >/dev/null || fail "嵌入后仍无法免密解锁"
 ok "学生无需任何密钥即可解锁"
 
 if "$TMP/student.exe" --student 9999999 --package "$TMP/student.exe" >/dev/null 2>&1; then
@@ -134,7 +138,7 @@ echo
 echo "== 一致性校验 =="
 # 嵌入版 + 显式 master（不一致时应报错，一致时应通过）
 "$TMP/student.exe" --student 2021001 --master "$MASTER" --package "$TMP/student.exe" \
-  | grep -q "解锁成功" || fail "嵌入版传入一致的 master 时应当通过"
+  | grep -c "解锁成功" >/dev/null || fail "嵌入版传入一致的 master 时应当通过"
 ok "显式 master 与嵌入值一致时通过"
 
 WRONG="$(printf 'ab%.0s' $(seq 1 32))"
@@ -154,14 +158,14 @@ echo "== stub 身份检测（防止拿错二进制当学生端）=="
 cargo build --release -p client >/dev/null 2>&1
 OUT=$("$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
       --stub "$CLIENT" --out "$TMP/plain.exe" --master "$MASTER" 2>&1)
-echo "$OUT" | grep -q "没有密钥状态标记" && fail "本项目的 client 被误判为陌生 stub"
+echo "$OUT" | grep -c "没有密钥状态标记" >/dev/null && fail "本项目的 client 被误判为陌生 stub"
 ok "本项目 client 被正确识别"
 
 # 非本项目的 exe 必须提示无标记
 printf 'NOT_A_CLIENT' > "$TMP/fake.exe"
 OUT=$("$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
       --stub "$TMP/fake.exe" --out "$TMP/fake_out.exe" --master "$MASTER" 2>&1)
-echo "$OUT" | grep -q "没有密钥状态标记" || fail "非本项目 exe 未被识别"
+echo "$OUT" | grep -c "没有密钥状态标记" >/dev/null || fail "非本项目 exe 未被识别"
 ok "非本项目 exe 被正确识别"
 
 # 二进制里两个标记不能同时存在

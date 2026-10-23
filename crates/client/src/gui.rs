@@ -124,6 +124,12 @@ pub struct ExamApp {
     cjk_ok: bool,
     /// 上一次写诊断文件的 (时间, 是否收卷)，用于避免每帧写盘
     last_state_dump: Option<(Option<u64>, bool)>,
+    /// 上一次写"收卷页布局"诊断的 (窗口矩形, 卡片矩形)。
+    ///
+    /// 只有 debug 构建才读它（release 下整段诊断代码不编译），
+    /// 所以字段本身也要跟着 cfg——否则 release 里"赋值后从未读取"会告警。
+    #[cfg(debug_assertions)]
+    last_locked_dump: Option<(egui::Rect, egui::Rect)>,
     /// 网络时间时钟（解锁成功后才有；debug 跳过门禁时为 None）
     clock: Option<SyncedClock>,
     /// 是否已到结束时刻（到点后锁定试卷）
@@ -156,6 +162,8 @@ impl ExamApp {
             autologin: diag_env::<u64>("EES_AUTOLOGIN").filter(|v| *v > 0),
             cjk_ok,
             last_state_dump: None,
+            #[cfg(debug_assertions)]
+            last_locked_dump: None,
             clock: None,
             expired: false,
             focus_pending: true,
@@ -251,7 +259,7 @@ impl eframe::App for ExamApp {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.heading("保密考试系统");
+                ui.heading(common::branding().display_name());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // 只有在"需要学生自己出密钥"时才提示开发模式；
                     // 包内嵌/编译期内嵌都是正式分发形态，不该吓学生。
@@ -369,9 +377,10 @@ impl eframe::App for ExamApp {
                 self.expired = true;
                 // 标题栏也换成"已结束"：学生切到别的窗口后，一眼能看出状态；
                 // 同时让 release 包的行为可以被外部自动化验证（读窗口标题）。
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-                    "保密考试系统 · 考试已结束".to_string(),
-                ));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                    "{} · 考试已结束",
+                    common::branding().product
+                )));
             }
 
             // 诊断放在收卷判断**之前**：这样收卷后 dump 仍在更新，
@@ -399,7 +408,10 @@ impl eframe::App for ExamApp {
                 });
                 // 布局自检：卡片必须水平居中、且落在下半屏、且不被裁掉。
                 #[cfg(debug_assertions)]
-                if let Some(path) = diag_path("EES_DEBUG_NAV") {
+                if self.last_locked_dump != Some((panel_rect, card_rect))
+                    && let Some(path) = diag_path("EES_DEBUG_NAV")
+                {
+                    self.last_locked_dump = Some((panel_rect, card_rect));
                     let out = path.with_extension("locked");
                     let _ = std::fs::write(
                         &out,
@@ -714,11 +726,11 @@ pub fn run(opts: UnlockOpts) -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([760.0, 720.0])
             .with_min_inner_size([600.0, 480.0])
-            .with_title("保密考试系统"),
+            .with_title(common::branding().product.clone()),
         ..Default::default()
     };
     eframe::run_native(
-        "保密考试系统",
+        &common::branding().product,
         native_options,
         Box::new(move |cc| Ok(Box::new(ExamApp::new(cc, opts)))),
     )
@@ -792,6 +804,29 @@ mod brand_wiring {
         assert!(
             welcome_src.contains("pub fn brand_body"),
             "brand_body 应定义在 welcome.rs"
+        );
+    }
+
+    /// 产品名必须来自 branding.json：改名时窗口标题要跟着变。
+    #[test]
+    fn product_name_comes_from_branding() {
+        let gui_src = include_str!("gui.rs");
+        assert!(
+            gui_src.contains("common::branding().display_name()"),
+            "主标题应使用 branding().display_name()"
+        );
+        assert!(
+            gui_src.contains("with_title(common::branding().product"),
+            "窗口标题应使用 branding().product"
+        );
+        // rustfmt 会把 format! 拆成多行，所以分两段断言
+        assert!(
+            gui_src.contains("\"{} · 考试已结束\""),
+            "收卷标题的模板应保留"
+        );
+        assert!(
+            gui_src.matches("common::branding().product").count() >= 2,
+            "窗口标题与收卷标题都应使用 branding().product"
         );
     }
 }
