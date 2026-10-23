@@ -44,6 +44,12 @@ bash scripts/preflight-release.sh          # 全过
 
 提交信息里 MUST 写明实际跑过的验证与结果。**MUST NOT** 声称"应该没问题"。
 
+**提交前 MUST 用 `git show --stat HEAD` 核对"声称改过的文件"是否真的在提交里**。
+> 真实教训：v0.1.18 的提交信息写着"调用处 300→60"，但那次替换其实改在了
+> `timegate.rs` 的测试里，真正的调用方 `workflow.rs` 一处没动——直到两轮后
+> 才被发现。凡在回复或提交信息里提到"改了某个文件/某一行"，提交后 MUST
+> 跑一次 `git show --stat HEAD` 并核对文件名清单。
+
 ---
 
 ## 3. 测试规则（MUST）
