@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.models import Session, SessionExam
-from app.core.state import ProjectState
+from app.core.state import ProjectState, match_bank_exam_id
 from app.core.timeparse import local_to_rfc3339, parse_rfc3339
 
 # 重叠场次的配色
@@ -84,11 +84,15 @@ class TimelineWidget(QWidget):
                 end = parse_rfc3339(s.end)
             except ValueError:
                 continue
-            # 只画"当天"的部分：跨天场次截断到本图
+            # 只画"当天"的部分：跨天场次必须**真的截断到本图**。
+            # 旧实现注释写了"截断"却没做：22:00→次日 02:00 的场次
+            # 会算出 26:00 的坐标，矩形直接画到控件外面。
             day_start = start - (start % 86400)
+            right = margin_left + w
             x0 = margin_left + w * ((start - day_start) / 86400.0)
             x1 = margin_left + w * ((end - day_start) / 86400.0)
-            x1 = max(x1, x0 + 3)
+            x0 = min(max(x0, margin_left), right)
+            x1 = min(max(x1, x0 + 3), right)
 
             y = margin_top + 2 + i * (row_h + 3)
             rect = QRectF(x0, y, x1 - x0, row_h)
@@ -340,15 +344,22 @@ class SessionsTab(QWidget):
             self.combo_roster.setCurrentIndex(1)
             self.edit_roster.setText(" ".join(str(x) for x in s.students))
 
-        # 勾选本场次的科目
-        used = {e.file for e in s.exams}
+        # 勾选本场次的科目。
+        #
+        # 必须用 match_bank_exam_id 归一，不能只比 "exam_id" 与 "exam_id.json"：
+        # 清单里的 file 允许写成 "demo/math.json"（Rust 端三层回退明确支持），
+        # 旧写法遇到这种引用会一个都匹配不上 —— 界面显示"没选科目"，
+        # 教师一保存就把 exams 清空，科目被静默丢掉。
+        resolved: dict[str, SessionExam] = {}
+        for e in s.exams:
+            key = match_bank_exam_id(e.file, self.state.banks)
+            if key is not None:
+                resolved[key] = e
         for cb, pick, exam_id in self.checks:
-            selected = any(u == exam_id or u == f"{exam_id}.json" for u in used)
-            cb.setChecked(selected)
-            if selected:
-                e = next((x for x in s.exams if x.file in (exam_id, f"{exam_id}.json")), None)
-                if e and e.pick:
-                    pick.setValue(e.pick)
+            e = resolved.get(exam_id)
+            cb.setChecked(e is not None)
+            if e is not None and e.pick:
+                pick.setValue(e.pick)
 
     def _on_roster_mode(self) -> None:
         self.edit_roster.setEnabled(self.combo_roster.currentData() == "custom")

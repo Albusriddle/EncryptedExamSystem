@@ -1,0 +1,1 @@
+{"version":2,"salt":"00112233445566778899aabbccddeeff","kdf":{"m_cost":65536,"t_cost":3,"p_cost":1},"sessions":[{"session_id":1,"start":"2026-10-23T10:13:26Z","end":"2026-10-23T12:13:26Z","students":[1],"exams":[{"file":"m.json","pick":1}]}]}

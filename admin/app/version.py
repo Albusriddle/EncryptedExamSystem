@@ -46,5 +46,13 @@ def app_version() -> str:
 
 
 def watermark() -> str:
-    """产品水印：`EES vX.Y.Z Powered by AlbusRiddle`。"""
-    return f"EES v{app_version()} Powered by AlbusRiddle"
+    """产品水印：`EES vX.Y.Z Powered by AlbusRiddle`。
+
+    品牌缩写与作者取自 `branding.json`（与欢迎弹窗同一来源），
+    避免两处各写一份、改了一处忘另一处。
+    """
+    from app.branding import branding
+
+    b = branding()
+    author = b.credits[0].name if b.credits else "AlbusRiddle"
+    return f"{b.abbr} v{app_version()} Powered by {author}"

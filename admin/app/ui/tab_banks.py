@@ -57,7 +57,8 @@ class BanksTab(QWidget):
         paths, _ = QFileDialog.getOpenFileNames(self, "选择题库文件（可多选）", "", "JSON (*.json)")
         if not paths:
             return
-        ok, errors = 0, []
+        parsed: list[tuple[str, object]] = []
+        errors: list[str] = []
         for p in paths:
             try:
                 # 显式 UTF-8：中文题库最常见的坑就是被存成 GBK
@@ -73,11 +74,32 @@ class BanksTab(QWidget):
             except Exception as e:  # noqa: BLE001 - pydantic 的 ValidationError
                 errors.append(f"{Path(p).name}：\n{e}")
                 continue
-            self.state.add_bank(bank, str(Path(p).resolve()))
-            ok += 1
+            parsed.append((str(Path(p).resolve()), bank))
+
+        # 冲突确认：同一 exam_id 已存在时**不能静默覆盖**。
+        incoming = [b for _, b in parsed]
+        conflicts = self.state.conflicting_bank_ids(incoming)
+        overwrite = False
+        if conflicts:
+            shown = "\n".join(f"· {c}" for c in conflicts[:10])
+            more = f"\n… 共 {len(conflicts)} 个" if len(conflicts) > 10 else ""
+            ret = QMessageBox.question(
+                self,
+                "题库已存在",
+                f"以下 exam_id 已存在（或本批内重复）：\n\n{shown}{more}\n\n"
+                "选择「是」覆盖已有题库，选择「否」跳过这些题库。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            overwrite = ret == QMessageBox.StandardButton.Yes
+
+        added, replaced, skipped = self.state.merge_banks(incoming, overwrite=overwrite)
+        for path_str, bank in parsed:
+            if bank.exam_id in self.state.banks and path_str:
+                self.state.bank_paths[bank.exam_id] = path_str
+        ok = added + replaced
 
         self.refresh()
-        if ok:
+        if ok or skipped:
             self.changed.emit()
 
         if errors:
@@ -86,8 +108,13 @@ class BanksTab(QWidget):
                 f"导入完成：成功 {ok} 个，失败 {len(errors)} 个",
                 "\n\n".join(errors),
             )
-        elif ok:
-            QMessageBox.information(self, "导入成功", f"成功导入 {ok} 个题库。")
+        else:
+            detail = f"新增 {added} 个"
+            if replaced:
+                detail += f"，覆盖 {replaced} 个"
+            if skipped:
+                detail += f"，跳过 {skipped} 个（已存在）"
+            QMessageBox.information(self, "导入完成", detail + "。")
 
     def remove_selected(self) -> None:
         rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)

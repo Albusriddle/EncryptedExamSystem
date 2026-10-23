@@ -269,8 +269,10 @@ pub fn build_payload(
         let data_plain = serde_json::to_vec(&data)?;
         let data_ct = crypto::encrypt(&bank_key, &data_plain, b"session-data")?;
 
-        let data_off = blob_area.len() as u32;
-        let data_len = data_ct.len() as u32;
+        let data_off = u32::try_from(blob_area.len())
+            .map_err(|_| ContainerError::Format("题库数据区超过 4 GiB，超出容器格式上限".into()))?;
+        let data_len = u32::try_from(data_ct.len())
+            .map_err(|_| ContainerError::Format(format!("场次 {} 的题库密文过大", s.session_id)))?;
         blob_area.extend_from_slice(&data_ct);
 
         // 每生一个信封。
@@ -329,11 +331,21 @@ pub fn build_payload(
         Vec::new()
     };
     let mut out = Vec::with_capacity(20 + header_ct.len() + key_area.len() + blob_area.len());
+    // 长度字段是 u32：显式检查而不是 `as u32` 静默截断。
+    // 截断会让偏移/长度错位，产出一个"能造出来但解不开"的包。
+    let header_len = u32::try_from(header_ct.len()).map_err(|_| {
+        ContainerError::Format(format!(
+            "header 过大（{} 字节），超出格式上限",
+            header_ct.len()
+        ))
+    })?;
+    let key_len = u32::try_from(key_area.len())
+        .map_err(|_| ContainerError::Format(format!("密钥区过大（{} 字节）", key_area.len())))?;
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
-    out.extend_from_slice(&(header_ct.len() as u32).to_le_bytes());
+    out.extend_from_slice(&header_len.to_le_bytes());
     out.extend_from_slice(&header_ct);
-    out.extend_from_slice(&(key_area.len() as u32).to_le_bytes());
+    out.extend_from_slice(&key_len.to_le_bytes());
     out.extend_from_slice(&key_area);
     out.extend_from_slice(&blob_area);
     Ok(out)
@@ -615,6 +627,22 @@ pub fn manifest_key(master: &[u8; 32]) -> [u8; 32] {
 
 /// 给 exe 追加 payload，生成自解压学生端。
 pub fn append_payload_to_exe(stub_bytes: &[u8], payload: &[u8]) -> Result<Vec<u8>, ContainerError> {
+    // stub 本身已经是打包过的学生端时，直接拒绝。
+    //
+    // 实测过的事故：把上一场生成的学生端 exe 当 --stub 再用一次，builder 不报错，
+    // 新 payload 直接追加在后面 —— 旧 payload（含它自己的 K_manifest 密钥区、
+    // 全部信封、题目密文）完整留在文件里。教师把成品当模板重打包，
+    // 就会把上一场一起发出去，而界面上看不出任何异常。
+    if stub_bytes.len() >= MAGIC_TAIL.len()
+        && &stub_bytes[stub_bytes.len() - MAGIC_TAIL.len()..] == MAGIC_TAIL
+    {
+        return Err(ContainerError::Format(
+            "stub 本身已经是打包好的学生端（文件尾部有 EXAMTAIL）。\n\
+             请用未打包的 stub-template.exe 作为模板；\
+             把已打包的 exe 当模板会把上一场的数据一起打进新包。"
+                .into(),
+        ));
+    }
     let mut out = stub_bytes.to_vec();
     out.extend_from_slice(payload);
     out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
@@ -856,6 +884,29 @@ mod tag_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 把已打包的 exe 当 stub 再打包必须报错。
+    ///
+    /// 否则旧 payload 会完整留在新文件里（含旧 K_manifest 与全部信封），
+    /// 教师误用成品当模板就会把上一场一起发出去。
+    #[test]
+    fn refuses_to_pack_an_already_packed_stub() {
+        let mut stub = vec![0u8; 64];
+        stub.extend_from_slice(MAGIC_TAIL);
+        let err = append_payload_to_exe(&stub, b"payload").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("EXAMTAIL"), "错误信息应说明原因: {msg}");
+        assert!(msg.contains("stub-template"), "应给出可操作的建议: {msg}");
+    }
+
+    /// 正常 stub 仍然可以打包。
+    #[test]
+    fn packs_a_plain_stub() {
+        let stub = b"MZ fake exe".to_vec();
+        let out = append_payload_to_exe(&stub, b"payload").unwrap();
+        assert_eq!(&out[..stub.len()], &stub[..]);
+        assert!(out.ends_with(MAGIC_TAIL));
+    }
 
     /// 不带时区偏移的时间必须拒绝（否则被当成 UTC，静默偏移 8 小时）。
     #[test]

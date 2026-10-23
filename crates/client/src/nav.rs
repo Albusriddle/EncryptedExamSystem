@@ -75,6 +75,17 @@ impl NavState {
         self.collapsed = !self.collapsed;
     }
 
+    /// 换卷时重置：清掉上一份试卷的矩形与待跳转请求。
+    ///
+    /// 折叠状态要保留（那是用户偏好，不是试卷状态）。
+    /// 不重置的话，上一份试卷的 rects 会残留：若恰有一个未消费的
+    /// pending，新试卷会按旧坐标滚动，甚至滚到错误位置。
+    pub fn reset_for_new_paper(&mut self) {
+        self.pending = None;
+        self.pending_retries = 0;
+        self.rects.clear();
+    }
+
     /// 记录某题的矩形（试卷渲染时调用）。
     pub fn record(&mut self, idx: usize, rect: egui::Rect) {
         self.rects.insert(idx, rect);
@@ -417,6 +428,25 @@ mod tests {
         }
         assert_eq!(repaints, MAX_PENDING_RETRIES as i32, "重绘次数必须封顶");
         assert!(retries <= MAX_PENDING_RETRIES);
+    }
+
+    /// 换卷重置：清矩形与待跳转，但保留折叠偏好。
+    #[test]
+    fn reset_for_new_paper_keeps_collapsed() {
+        let mut s = NavState::default();
+        s.record(
+            1,
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(10.0, 10.0)),
+        );
+        s.debug_jump(5);
+        s.collapsed = true;
+
+        s.reset_for_new_paper();
+
+        assert!(s.rects.is_empty(), "矩形必须清空");
+        assert!(s.pending.is_none(), "待跳转必须清空");
+        assert_eq!(s.pending_retries, 0);
+        assert!(s.is_collapsed(), "折叠偏好应保留");
     }
 
     /// 圆形按钮的边长必须等于直径，否则会画成椭圆。

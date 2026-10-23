@@ -27,13 +27,31 @@ pub fn version() -> &'static str {
 ///
 /// 管理端工具栏与学生端顶部都显示同一串，便于用户确认版本、
 /// 也方便排障时让用户直接报版本号。
+///
+/// 品牌名与作者取自 `branding.json`（与弹窗同一来源），
+/// 不再硬编码——改了 branding 水印会跟着变。
 pub fn watermark() -> String {
-    format!("EES v{} Powered by AlbusRiddle", version())
+    let b = branding::branding();
+    let author = b
+        .credits
+        .first()
+        .map(|c| c.name.as_str())
+        .unwrap_or("AlbusRiddle");
+    format!("{} v{} Powered by {}", b.abbr, version(), author)
 }
 
 #[cfg(test)]
 mod version_tests {
     use super::*;
+
+    /// 水印必须由 branding.json 驱动，不能硬编码。
+    #[test]
+    fn watermark_uses_branding() {
+        let b = branding::branding();
+        let author = &b.credits[0].name;
+        let expected = format!("{} v{} Powered by {}", b.abbr, version(), author);
+        assert_eq!(watermark(), expected);
+    }
 
     #[test]
     fn version_is_non_empty_and_clean() {

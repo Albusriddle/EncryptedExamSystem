@@ -63,7 +63,7 @@ admin/
   app/core/       # 纯逻辑：模型、状态、时间解析、题库 IO（**不依赖 Qt**）
   app/ui/         # PySide6 界面
   buildtools/     # PyInstaller 打包脚本
-  tests/          # 101 个 Python 测试
+  tests/          # Python 测试
 banks/demo/       # 演示题库（真题库不入库）
 docs/             # 教师手册、架构方案、发布说明
 scripts/          # verify-embed.sh / preflight-release.sh / make-release-zip.sh
@@ -81,18 +81,18 @@ scripts/          # verify-embed.sh / preflight-release.sh / make-release-zip.sh
 
 ```bash
 # Rust
-cargo test --workspace                 # 110 个测试
+cargo test --workspace                 # 加密 / 抽题 / 容器 / 门禁
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 
 # 管理端（首次执行会建好 .venv 并装齐 GUI/打包依赖）
 cd admin
 uv sync --extra gui --extra build
-uv run pytest -q                       # 101 个测试
+uv run pytest -q                       # 模型 / 状态 / UI 联动
 uv run ruff check . && uv run ruff format --check .
 
 # 端到端（打包 → 嵌入密钥 → 解锁）
-bash scripts/verify-embed.sh           # 18 项断言
+bash scripts/verify-embed.sh           # 端到端断言
 
 # 发布前自检
 bash scripts/preflight-release.sh      # 加 --full 连管理端打包一起查
@@ -105,7 +105,7 @@ cargo build --release -p client -p builder
 MASTER=$(./target/release/exam-builder.exe keygen)
 ./target/release/exam-builder.exe build \
   --manifest banks/demo/manifest.example.json --banks banks/ \
-  --stub ./target/release/exam-client.exe --out StudentClient.exe --master "$MASTER"
+  --stub ./target/release/exam-client.exe --out StudentClient.exe --master "$MASTER" --force
 ./StudentClient.exe --student 2021001 --package StudentClient.exe --master "$MASTER"
 ```
 

@@ -152,10 +152,24 @@ class StudentsTab(QWidget):
         if not good:
             QMessageBox.information(self, "提示", "学号列表为空。")
             return
+        # 同步到所有"使用全部学生"的场次。
+        #
+        # 场次里的 students 是**创建时的快照**，不随全局名单变化。
+        # 旧实现只改 self.state.students（注释却写着"同步"），
+        # 教师中途补学生后，这些学生进不了考场，而且没有任何提示。
+        # 这里按"原名单 == 旧全局名单"判定它当初用的是全部学生。
+        old = set(self.state.students)
+        synced = 0
+        if old:
+            for s in self.state.sessions:
+                if set(s.students) == old:
+                    s.students = list(good)
+                    synced += 1
         self.state.students = good
-        # 同步到所有"使用全部学生"的场次
         self.changed.emit()
-        QMessageBox.information(self, "已应用", f"学号名单已更新为 {len(good)} 人。")
+
+        tail = f"\n已同步 {synced} 个使用「全部学生」的场次。" if synced else ""
+        QMessageBox.information(self, "已应用", f"学号名单已更新为 {len(good)} 人。{tail}")
 
     def _load_from_state(self) -> None:
         self.edit.setPlainText("\n".join(str(s) for s in self.state.students))

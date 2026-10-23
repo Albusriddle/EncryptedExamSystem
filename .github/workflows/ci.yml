@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
 
-# PR/push 检查全部在 Linux 上跑：私有仓库 Windows 分钟按 2 倍计费，能省则省。
+# PR/push 检查全部在 Linux 上跑：Windows runner 计费更高，能省则省。
 jobs:
   rust:
     runs-on: ubuntu-latest

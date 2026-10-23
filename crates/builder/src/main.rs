@@ -39,6 +39,12 @@ enum Cmd {
         /// 输出文件
         #[arg(long)]
         out: PathBuf,
+        /// 允许覆盖已存在的输出文件。
+        ///
+        /// 默认拒绝：旧实现直接覆盖，教师可能把上一次的包（连同上一场数据）
+        /// 静默换掉却不知道。GUI 会在用户确认后自动带上本开关。
+        #[arg(long)]
+        force: bool,
         /// 64-hex 主密钥。**优先用 --master-file 或环境变量 EXAM_MASTER**，
         /// 因为命令行参数会出现在进程列表里，任何本机用户都能看到。
         #[arg(long, conflicts_with = "master_file")]
@@ -128,21 +134,23 @@ fn main() -> Result<()> {
             banks,
             stub,
             out,
+            force,
             master,
             master_file,
             emit_keyfile,
             no_embed_key,
         } => {
             let key = resolve_master(master, master_file)?;
-            build(
-                manifest,
-                banks,
-                stub,
-                out,
-                &key,
+            build(BuildRequest {
+                manifest_path: manifest,
+                banks_dir: banks,
+                stub_path: stub,
+                out_path: out,
+                force,
+                master_hex: key,
                 emit_keyfile,
-                !no_embed_key,
-            )?;
+                embed_key: !no_embed_key,
+            })?;
         }
         Cmd::Verify {
             package,
@@ -186,22 +194,36 @@ fn load_banks(dir: &std::path::Path, files: &[String]) -> Result<Vec<ExamBank>> 
     Ok(out)
 }
 
-fn build(
+/// `build()` 的输入。参数超过 7 个时打包成结构体，避免一长串位置参数。
+struct BuildRequest {
     manifest_path: PathBuf,
     banks_dir: PathBuf,
     stub_path: PathBuf,
     out_path: PathBuf,
-    master_hex: &str,
+    force: bool,
+    master_hex: String,
     emit_keyfile: Option<PathBuf>,
     embed_key: bool,
-) -> Result<()> {
+}
+
+fn build(req: BuildRequest) -> Result<()> {
+    let BuildRequest {
+        manifest_path,
+        banks_dir,
+        stub_path,
+        out_path,
+        force,
+        master_hex,
+        emit_keyfile,
+        embed_key,
+    } = req;
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("读取清单 {}", manifest_path.display()))?;
     let manifest: Manifest = serde_json::from_str(&manifest_text).context("解析 manifest")?;
 
     // 构建期校验：场次引用的题库文件必须存在，且抽题数不能超过题量。
     // 这类错误必须在打包时就炸，绝不能留到考场上。
-    let master = crypto::master_from_hex(master_hex).context("解析主密钥")?;
+    let master = crypto::master_from_hex(&master_hex).context("解析主密钥")?;
     let salt = hex::decode(&manifest.salt).context("manifest.salt 必须是 hex")?;
     // 清单自身校验（时间窗倒挂、重复学号、场次编号重复）。
     // build_payload 内部也会做，这里提前给出带上下文的报错。
@@ -295,21 +317,54 @@ fn build(
     }
 
     let sfx = container::append_payload_to_exe(&stub, &payload)?;
-    std::fs::write(&out_path, &sfx).with_context(|| format!("写出 {}", out_path.display()))?;
 
-    // Unix 上必须补执行位：`fs::write` 新建的文件是 0644，
-    // 学生端包直接运行会得到 "Permission denied"（CI 实测退出码 126）。
-    // Windows 没有执行位概念，但也没坏处。
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&out_path)
-            .with_context(|| format!("读取权限 {}", out_path.display()))?
-            .permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&out_path, perm)
-            .with_context(|| format!("设置执行位 {}", out_path.display()))?;
+    // 覆盖保护：默认不覆盖，避免"上一次的包被静默换掉"。
+    if out_path.exists() && !force {
+        anyhow::bail!(
+            "输出文件已存在：{}\n\
+             加 --force 覆盖，或换一个文件名。\n\
+             （直接覆盖会让人分不清手里的是哪一次打包的产物。）",
+            out_path.display()
+        );
     }
+
+    // 原子写：先写同目录的 .tmp，再 rename 覆盖目标。
+    // 旧实现直接 fs::write，中途被打断（Ctrl-C / 磁盘满）会留下一个
+    // 看起来正常、其实是截断的 exe —— 教师很可能直接发给学生。
+    let tmp_path = out_path.with_file_name(format!(
+        "{}.tmp",
+        out_path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "out.exe".into())
+    ));
+    let write_result = (|| -> Result<()> {
+        std::fs::write(&tmp_path, &sfx)
+            .with_context(|| format!("写出临时文件 {}", tmp_path.display()))?;
+
+        // Unix 上必须补执行位：新建文件是 0644，学生端直接运行会
+        // "Permission denied"（CI 实测退出码 126）。Windows 无此概念。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&tmp_path)?.permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&tmp_path, perm)?;
+        }
+
+        // Windows 上 rename 到已存在的文件会失败，先删掉目标。
+        if out_path.exists() {
+            std::fs::remove_file(&out_path)
+                .with_context(|| format!("删除旧的 {}", out_path.display()))?;
+        }
+        std::fs::rename(&tmp_path, &out_path)
+            .with_context(|| format!("移动到 {}", out_path.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    write_result?;
 
     let total_students: usize = manifest.sessions.iter().map(|s| s.students.len()).sum();
     println!("✔ 已生成 {}", out_path.display());
@@ -340,6 +395,16 @@ fn build(
         let k_manifest = container::manifest_key(&master);
         std::fs::write(&path, hex::encode(k_manifest))
             .with_context(|| format!("写出 keyfile {}", path.display()))?;
+        // Unix 上收窄权限：默认 0644 会让同机其他用户读到 K_manifest。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let mut perm = meta.permissions();
+                perm.set_mode(0o600);
+                let _ = std::fs::set_permissions(&path, perm);
+            }
+        }
         println!("\n✔ 已输出 K_manifest 到 {}", path.display());
         println!("  （可选）用它重新编译学生端，可让密钥编译进 binary 而非包内：");
         println!("    $env:EXAM_KEYFILE = \"{}\"", path.display());

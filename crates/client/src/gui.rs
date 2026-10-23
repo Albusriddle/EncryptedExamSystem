@@ -134,6 +134,8 @@ impl ExamApp {
         };
         match rx.try_recv() {
             Ok(Ok(unlocked)) => {
+                // 换卷：清掉上一份试卷残留的矩形与跳转请求
+                self.nav.reset_for_new_paper();
                 self.stage = Stage::Paper(Box::new(unlocked));
                 true
             }

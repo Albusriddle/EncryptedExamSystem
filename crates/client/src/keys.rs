@@ -45,9 +45,6 @@ pub fn is_embedded() -> bool {
 /// 早期实现把两个常量都定义成 `static`，结果两个字符串都进了二进制，
 /// 导致未嵌入的 stub 也被误判为"已嵌入"。现在用 `cfg` 条件编译，
 /// 保证只有一个标记存在。
-#[cfg(any())]
-const _UNREACHABLE: () = ();
-
 /// 嵌入状态标记（只会在其中一种构建里存在）。
 #[used]
 pub static KEY_STATE_MARKER: &str = if EMBEDDED {

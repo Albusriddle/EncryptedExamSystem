@@ -55,6 +55,38 @@ class ProjectState:
         if path:
             self.bank_paths[bank.exam_id] = path
 
+    def merge_banks(self, incoming: list[ExamBank], *, overwrite: bool) -> tuple[int, int, int]:
+        """批量导入题库，返回 `(新增, 覆盖, 跳过)`。
+
+        冲突 = exam_id 已存在（或同一批里出现两次）。
+        旧实现直接 `banks[exam_id] = bank`，**静默替换**已有题库：
+        场次还在引用同一个 exam_id，教师以为"加了一份"，
+        实际把正在用的那门考试内容换掉了。
+        """
+        added = replaced = skipped = 0
+        for bank in incoming:
+            exists = bank.exam_id in self.banks
+            if exists and not overwrite:
+                skipped += 1
+                continue
+            if exists:
+                replaced += 1
+            else:
+                added += 1
+            self.banks[bank.exam_id] = bank
+        return added, replaced, skipped
+
+    def conflicting_bank_ids(self, incoming: list[ExamBank]) -> list[str]:
+        """本批导入会与现有题库（或批内自身）冲突的 exam_id。"""
+        seen: set[str] = set()
+        conflicts: list[str] = []
+        for bank in incoming:
+            if bank.exam_id in self.banks or bank.exam_id in seen:
+                if bank.exam_id not in conflicts:
+                    conflicts.append(bank.exam_id)
+            seen.add(bank.exam_id)
+        return conflicts
+
     def remove_bank(self, exam_id: str) -> None:
         # 必须**先**摘场次引用，再删题库：
         # match_bank_exam_id 是拿 banks 做查找的，删掉之后所有引用都会

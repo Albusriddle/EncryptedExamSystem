@@ -201,6 +201,9 @@ class BuildWorker(QThread):
             str(self.stub),
             "--out",
             str(self.out),
+            # 输出路径由教师选定；覆盖确认在 start_build 里做过一次，
+            # 这里显式放行，否则 builder 会以"文件已存在"拒绝。
+            "--force",
         ]
 
         env = dict(os.environ)
@@ -453,6 +456,17 @@ class BuildTab(QWidget):
             return
 
         out = Path(self.edit_out.text())
+        # 覆盖确认：builder 默认拒绝覆盖，这里先问清楚再放行。
+        if out.exists():
+            ret = QMessageBox.question(
+                self,
+                "覆盖已有文件",
+                f"{out}\n\n这个文件已存在，继续会覆盖它。要继续吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return
+
         try:
             out.parent.mkdir(parents=True, exist_ok=True)
             probe = out.parent / ".exam_write_probe"

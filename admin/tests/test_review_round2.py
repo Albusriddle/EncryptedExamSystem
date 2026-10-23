@@ -1,0 +1,187 @@
+"""第二轮全仓审阅发现问题的回归测试。
+
+每条都对应一个**实测可触发**的缺陷：
+1. 路径形式的题库引用导致勾选丢失（保存后科目被静默清空）；
+2. 全局名单变更不同步到已有场次；
+3. 同 exam_id 导入静默替换题库；
+4. 水印硬编码，与 branding.json 脱节。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("PySide6")
+
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+
+from app.branding import branding  # noqa: E402
+from app.core.models import ExamBank, Question, Session, SessionExam  # noqa: E402
+from app.core.state import ProjectState  # noqa: E402
+from app.ui.tab_sessions import SessionsTab  # noqa: E402
+from app.ui.tab_students import StudentsTab  # noqa: E402
+from app.version import app_version, watermark  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(autouse=True)
+def mute_dialogs(monkeypatch: pytest.MonkeyPatch):
+    """弹窗会阻塞测试（实测 8 个用例跑了 129 秒），全部静音。"""
+    for name in ("information", "warning", "critical", "question"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: None))
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    app = QApplication.instance() or QApplication(sys.argv)
+    yield app
+
+
+def _bank(exam_id: str, title: str = "t", nq: int = 3) -> ExamBank:
+    return ExamBank(
+        exam_id=exam_id,
+        title=title,
+        pick=2,
+        questions=[
+            Question(id=f"q{i}", type="single", stem=f"题 {i}", options=["a", "b"])
+            for i in range(nq)
+        ],
+    )
+
+
+@pytest.fixture
+def state_with_banks() -> ProjectState:
+    st = ProjectState()
+    for n in ("math", "english"):
+        p = ROOT / "banks" / "demo" / f"{n}.json"
+        st.add_bank(ExamBank.model_validate_json(p.read_text(encoding="utf-8")), str(p))
+    st.students = [202108010217]
+    return st
+
+
+# ---------------------------------------------------------------- 1. 勾选匹配
+
+
+def test_path_style_file_reference_checks_the_box(qapp, state_with_banks) -> None:
+    """`file="demo/math.json"`（Rust 明确支持的形式）必须能勾上。
+
+    旧实现只比 `exam_id` 与 `exam_id.json`，这种引用一个都匹配不上，
+    界面显示"没选科目"，教师一保存就把科目清空了。
+    """
+    exam_id = "demo-math"
+    state_with_banks.sessions = [
+        Session(
+            session_id=1,
+            start="2026-10-23T11:00:00+08:00",
+            end="2026-10-23T16:00:00+08:00",
+            students=[202108010217],
+            exams=[SessionExam(file="demo/math.json", pick=2)],
+        )
+    ]
+    tab = SessionsTab(state_with_banks)
+    tab._load_into_form(state_with_banks.sessions[0])
+
+    checked = [eid for cb, _, eid in tab.checks if cb.isChecked()]
+    assert checked == [exam_id], f"应只勾上 {exam_id}，实际 {checked}"
+
+
+def test_path_style_reference_survives_save(qapp, state_with_banks) -> None:
+    """勾选正确后保存，科目不能丢。"""
+    state_with_banks.sessions = [
+        Session(
+            session_id=1,
+            start="2026-10-23T11:00:00+08:00",
+            end="2026-10-23T16:00:00+08:00",
+            students=[202108010217],
+            exams=[SessionExam(file="demo/math.json", pick=2)],
+        )
+    ]
+    tab = SessionsTab(state_with_banks)
+    tab._load_into_form(state_with_banks.sessions[0])
+    tab.save_session()
+
+    assert len(state_with_banks.sessions[0].exams) == 1, "保存后科目被清空了"
+
+
+# ---------------------------------------------------------------- 2. 名单同步
+
+
+def test_roster_change_syncs_all_students_sessions(qapp, monkeypatch) -> None:
+    """全局名单增加学生后，使用「全部学生」的场次必须同步。"""
+    st = ProjectState()
+    st.students = [111, 222]
+    st.sessions = [
+        Session(
+            session_id=1,
+            start="2026-10-23T11:00:00+08:00",
+            end="2026-10-23T16:00:00+08:00",
+            students=[111, 222],
+            exams=[SessionExam(file="demo-math.json", pick=1)],
+        )
+    ]
+    tab = StudentsTab(st)
+    tab.edit.setPlainText("111\n222\n333")
+    tab.apply_to_state()
+
+    assert st.students == [111, 222, 333]
+    assert st.sessions[0].students == [111, 222, 333], "场次名单未同步"
+
+
+def test_roster_change_keeps_custom_sessions(qapp) -> None:
+    """自定义名单（不等于全局名单）的场次不能被覆盖。"""
+    st = ProjectState()
+    st.students = [111, 222]
+    st.sessions = [
+        Session(
+            session_id=1,
+            start="2026-10-23T11:00:00+08:00",
+            end="2026-10-23T16:00:00+08:00",
+            students=[111],
+            exams=[SessionExam(file="demo-math.json", pick=1)],
+        )
+    ]
+    tab = StudentsTab(st)
+    tab.edit.setPlainText("111\n222\n333")
+    tab.apply_to_state()
+
+    assert st.sessions[0].students == [111], "自定义名单不应被改动"
+
+
+# ---------------------------------------------------------------- 3. 题库冲突
+
+
+def test_merge_banks_skips_by_default() -> None:
+    st = ProjectState()
+    st.add_bank(_bank("m", "旧"))
+    added, replaced, skipped = st.merge_banks([_bank("m", "新")], overwrite=False)
+    assert (added, replaced, skipped) == (0, 0, 1)
+    assert st.banks["m"].title == "旧", "不覆盖时不应改变已有题库"
+
+
+def test_merge_banks_overwrites_when_asked() -> None:
+    st = ProjectState()
+    st.add_bank(_bank("m", "旧"))
+    added, replaced, skipped = st.merge_banks([_bank("m", "新")], overwrite=True)
+    assert (added, replaced, skipped) == (0, 1, 0)
+    assert st.banks["m"].title == "新"
+
+
+def test_conflicting_bank_ids_detects_batch_duplicates() -> None:
+    st = ProjectState()
+    st.add_bank(_bank("existing"))
+    conflicts = st.conflicting_bank_ids([_bank("existing"), _bank("new"), _bank("new")])
+    assert "existing" in conflicts
+    assert "new" in conflicts, "同一批内重复也要报"
+
+
+# ---------------------------------------------------------------- 4. 水印
+
+
+def test_watermark_comes_from_branding() -> None:
+    b = branding()
+    expected = f"{b.abbr} v{app_version()} Powered by {b.credits[0].name}"
+    assert watermark() == expected

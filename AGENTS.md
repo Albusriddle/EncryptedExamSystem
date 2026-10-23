@@ -35,11 +35,11 @@
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # 期望 110 passed
-cd admin && uv run pytest -q               # 期望 101 passed
+cargo test --workspace                     # 必须全部通过
+cd admin && uv run pytest -q               # 必须全部通过
 uv run ruff check . && uv run ruff format --check .
-bash scripts/verify-embed.sh               # 期望 18 项全过
-bash scripts/preflight-release.sh          # 期望 7 项全过
+bash scripts/verify-embed.sh               # 全过
+bash scripts/preflight-release.sh          # 全过
 ```
 
 提交信息里 MUST 写明实际跑过的验证与结果。**MUST NOT** 声称"应该没问题"。

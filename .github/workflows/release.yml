@@ -10,7 +10,7 @@ on:
 permissions:
   contents: write
 
-# 打 tag 才出 Windows 包，节省私有仓库的 Actions 分钟。
+# 打 tag 才出 Windows 包，节省 Actions 分钟。
 #
 # 发布三种东西：
 #   1. ExamAdmin（管理端图形程序，文件夹形式）—— 教师直接用这个
@@ -42,6 +42,12 @@ jobs:
             exit 1
           fi
           echo "✓ 版本号 $FILE_V 与 tag 一致"
+
+      - name: 全量测试（发布前必须全绿）
+        shell: bash
+        # ci.yml 只监听 push(main) 与 PR，**不监听 tag**；
+        # 没有这一步的话，一个没过 CI 的提交打个 tag 就能直接发版。
+        run: cargo test --workspace --target x86_64-pc-windows-msvc
 
       - name: 冒烟测试（发布前必须通过）
         shell: bash
