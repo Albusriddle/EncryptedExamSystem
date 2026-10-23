@@ -16,6 +16,19 @@ from pathlib import Path
 import pytest
 
 from app.core import builder as bmod
+
+
+def _tab_build():
+    """按需导入界面模块。
+
+    这些用例测的是 `tab_build` 里的路径推断，必须有 PySide6；
+    而 CI 的 python job 不装 GUI 依赖——旧写法在 CI 里直接
+    ModuleNotFoundError，导致 python job 连续多次失败。
+    """
+    pytest.importorskip("PySide6")
+    from app.ui import tab_build  # noqa: PLC0415 - 延迟导入，避免 CI 无 PySide6 时整文件失败
+
+    return tab_build
 from app.core.builder import BuilderError, build_package
 
 MASTER = "ab" * 32  # 64 hex
@@ -245,7 +258,7 @@ def test_default_stub_uses_program_dir_when_frozen(
     """
     import sys
 
-    from app.ui import tab_build
+    tab_build = _tab_build()
 
     exe_dir = tmp_path / "ExamAdmin"
     exe_dir.mkdir()
@@ -264,7 +277,7 @@ def test_default_stub_frozen_missing_returns_expected_location(
     """stub 不存在时，返回"应该放的位置"，便于报错里给出指引。"""
     import sys
 
-    from app.ui import tab_build
+    tab_build = _tab_build()
 
     exe_dir = tmp_path / "ExamAdmin"
     exe_dir.mkdir()
@@ -282,7 +295,7 @@ def test_default_out_when_frozen_is_writable_user_dir(
     """输出不能落在程序目录（可能在 Program Files）。"""
     import sys
 
-    from app.ui import tab_build
+    tab_build = _tab_build()
 
     home = tmp_path / "home"
     desktop = home / "Desktop"
@@ -302,7 +315,7 @@ def test_default_paths_not_frozen_use_repo_layout(
     """源码运行时仍指向仓库的 target/release 与 dist。"""
     import sys
 
-    from app.ui import tab_build
+    tab_build = _tab_build()
 
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     assert "target" in str(tab_build.default_stub())
@@ -317,7 +330,7 @@ def test_default_out_skips_unwritable_dirs(tmp_path: Path, monkeypatch: pytest.M
     """
     import sys
 
-    from app.ui import tab_build
+    tab_build = _tab_build()
 
     home = tmp_path / "home"
     docs = home / "Documents"
