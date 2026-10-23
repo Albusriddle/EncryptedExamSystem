@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.timeparse import parse_rfc3339
+
 # u64 上限。不限制 INT_MAX：真实学号常为 12 位，早已超出 i32。
 U64_MAX = 2**64 - 1
 
@@ -23,11 +25,56 @@ class Question(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+#: Windows 保留设备名：即使带了扩展名也不能用作文件名。
+_WIN_RESERVED = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+
+#: 文件名里绝对不能出现的字符（路径分隔符 / Windows 禁用字符 / 流分隔符）。
+_FORBIDDEN_CHARS = set('/\\:*?"<>|')
+
+
+def validate_exam_id(v: str) -> str:
+    """校验 exam_id 可以安全地当作文件名主干。
+
+    `exam_id` 会参与 `tmpdir / f"{exam_id}.json"`，所以必须挡住路径成分。
+    旧实现只校验"非空"，实测 `exam_id="../../escaped"` 可以把 JSON
+    写到临时目录之外（导入一个恶意题库就能覆盖任意可写目录下的 .json）。
+
+    **按危险特征拒绝**而不是限定 ASCII 白名单：中文 exam_id（如「数学-2」）
+    是合理用法，不该被误伤；真正危险的是分隔符、控制字符、保留设备名
+    以及 Windows 会自动修剪的首尾点/空格。
+    """
+    if not v:
+        raise ValueError("exam_id 不能为空")
+    if len(v) > 64:
+        raise ValueError(f"exam_id 过长（{len(v)} 字符，最多 64）")
+    if any(c in _FORBIDDEN_CHARS for c in v):
+        raise ValueError(f"exam_id 不能包含路径分隔符或 Windows 禁用字符（当前 {v!r}）")
+    if any(ord(c) < 0x20 or c.isspace() for c in v):
+        raise ValueError(f"exam_id 不能包含空白或控制字符（当前 {v!r}）")
+    if v.startswith(".") or v.endswith("."):
+        raise ValueError(f"exam_id 不能以 . 开头或结尾（当前 {v!r}）")
+    if v.lower() in _WIN_RESERVED:
+        raise ValueError(f"exam_id 不能使用 Windows 保留名（当前 {v!r}）")
+    return v
+
+
 class ExamBank(BaseModel):
     exam_id: str
     title: str
     pick: int
     questions: list[Question]
+
+    @field_validator("exam_id")
+    @classmethod
+    def _check_exam_id(cls, v: str) -> str:
+        return validate_exam_id(v)
 
     @model_validator(mode="after")
     def _check(self) -> ExamBank:
@@ -75,7 +122,40 @@ class Session(BaseModel):
 
     @model_validator(mode="after")
     def _check_time(self) -> Session:
-        if self.start >= self.end:
+        """校验时间窗合法。
+
+        **必须解析成时间戳再比较**，不能直接比字符串：
+        字符串比较只在"同一时区偏移、同一格式"时才等价于时间比较。
+        实测 `2026-10-23T03:00:00Z` 与 `2026-10-23T10:00:00+08:00`
+        （实际是 02:00Z，即倒挂）按字符串会被判为合法，
+        直到打包时 Rust 端才发现，教师白填一遍表单。
+        """
+        try:
+            start_ts = parse_rfc3339(self.start)
+        except ValueError as exc:
+            raise ValueError(
+                f"场次 {self.session_id} 的开始时间不是 RFC3339: {self.start!r}"
+            ) from exc
+        try:
+            end_ts = parse_rfc3339(self.end)
+        except ValueError as exc:
+            raise ValueError(
+                f"场次 {self.session_id} 的结束时间不是 RFC3339: {self.end!r}"
+            ) from exc
+        import re
+
+        # 必须显式带时区。不带偏移的 "2026-10-23 11:00" 会被当成 **UTC**，
+        # 教师若按北京时间手写就会整体错 8 小时，而且两端解析结果一致、
+        # 不报任何错——属于"静默偏移"，比报错更难查。
+        tz = re.compile(r"(Z|[+-]\d{2}:?\d{2})$")
+        for label, val in (("开始", self.start), ("结束", self.end)):
+            if not tz.search(val.strip()):
+                raise ValueError(
+                    f"场次 {self.session_id} 的{label}时间必须带时区偏移"
+                    f"（如 2026-10-23T11:00:00+08:00），当前 {val!r}。"
+                    "不带偏移会被当作 UTC，导致时间整体偏移。"
+                )
+        if start_ts >= end_ts:
             raise ValueError(
                 f"场次 {self.session_id} 的开始时间必须早于结束时间"
                 f"（当前 {self.start} >= {self.end}）"
@@ -109,6 +189,14 @@ class KdfParams(BaseModel):
             raise ValueError(f"t_cost 过低（{self.t_cost}）")
         if self.p_cost < 1:
             raise ValueError("p_cost 必须 ≥ 1")
+        # 上限：与 Rust 侧 KdfParams::validate 保持一致。
+        # 没有上限时，一个手改的 project.json 能让打包进程直接吃光内存。
+        if self.m_cost > 1_048_576:
+            raise ValueError(f"m_cost 过高（{self.m_cost}），最多 1048576（1 GiB）")
+        if self.t_cost > 16:
+            raise ValueError(f"t_cost 过高（{self.t_cost}），最多 16")
+        if self.p_cost > 8:
+            raise ValueError(f"p_cost 过高（{self.p_cost}），最多 8")
         return self
 
 
@@ -116,8 +204,8 @@ class Manifest(BaseModel):
     version: int = 2
     salt: str
     sessions: list[Session]
-    time_sources: list[str] = Field(default_factory=list)
-    time_pubkey: str = ""
+    # 注：曾有 time_sources / time_pubkey 两字段，但无任何代码使用，
+    # 属于"配置了不生效"的死配置，已删除（详见 model.rs 同处注释）。
     kdf: KdfParams = Field(default_factory=KdfParams)
 
     @field_validator("salt")

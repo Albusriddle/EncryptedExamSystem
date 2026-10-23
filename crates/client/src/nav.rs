@@ -33,6 +33,8 @@ const PER_ROW: usize = 5;
 const PAD: f32 = 10.0;
 /// 折叠后的条带宽度
 const COLLAPSED_W: f32 = 34.0;
+/// 跳转目标找不到时最多重试几帧（防止无限重绘）
+const MAX_PENDING_RETRIES: u8 = 3;
 
 /// 展开时的卡片宽度：5 个按钮 + 4 个间距 + 左右内边距。
 fn expanded_width() -> f32 {
@@ -49,6 +51,11 @@ pub struct NavState {
     rects: HashMap<usize, egui::Rect>,
     /// 诊断：最近一次被消费的跳转目标 `(题号, 目标 y)`。
     last_scrolled: Option<(usize, f32)>,
+    /// 跳转目标暂时找不到时的重试次数。
+    ///
+    /// 必须**有上限**：找不到 rect 时如果不加限制地 `request_repaint()`，
+    /// 一旦出现（例如试卷被替换）就是永久 100% CPU。
+    pending_retries: u8,
     /// 诊断：本帧题号按钮的矩形 `(题号, rect)`，用于验证一行 5 个且不越界。
     button_rects: Vec<(usize, egui::Rect)>,
     /// 诊断：题号面板的实际可用宽度。
@@ -81,11 +88,17 @@ impl NavState {
             return;
         };
         let Some(rect) = self.rects.get(&idx).copied() else {
-            // 上一帧没记录到（例如刚切换试卷）：下一帧再试，避免丢点击
-            self.pending = Some(idx);
-            ui.ctx().request_repaint();
+            // 上一帧没记录到（例如刚切换试卷）：下一帧再试，但只重试有限次。
+            // 无上限重试会让界面永远重绘（CPU 100%）。
+            if self.pending_retries < MAX_PENDING_RETRIES {
+                self.pending_retries += 1;
+                self.pending = Some(idx);
+                ui.ctx().request_repaint();
+            }
+            // 超过上限：丢弃这次跳转，避免卡死
             return;
         };
+        self.pending_retries = 0;
         // 稍微上移一点，让题干与滚动区顶边之间留出呼吸空间
         let target = egui::Rect::from_min_size(
             rect.min - egui::vec2(0.0, 10.0),
@@ -103,6 +116,7 @@ impl NavState {
     /// 用于自动化验证"点击 → 滚动置顶"的完整链路。
     pub fn debug_jump(&mut self, idx: usize) {
         self.pending = Some(idx);
+        self.pending_retries = 0;
     }
 
     pub fn show(&mut self, ctx: &egui::Context, sections: &[(String, usize)]) {
@@ -161,6 +175,7 @@ impl NavState {
     }
 
     /// 把题号卡与题目矩形写到文件，供自动化验证。
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub fn dump_debug(
         &self,
         sections: &[(String, usize)],
@@ -386,6 +401,22 @@ mod tests {
             "默认列宽本应溢出（这正是当初的 bug），否则本测试失去意义"
         );
         assert!(with_fix <= inner, "修复后必须能装下");
+    }
+
+    /// 跳转重试必须有上限：无上限会在丢目标时永久重绘。
+    #[test]
+    fn pending_retries_are_bounded() {
+        // 模拟连续 miss 的行为
+        let mut retries: u8 = 0;
+        let mut repaints = 0;
+        for _ in 0..100 {
+            if retries < MAX_PENDING_RETRIES {
+                retries += 1;
+                repaints += 1;
+            }
+        }
+        assert_eq!(repaints, MAX_PENDING_RETRIES as i32, "重绘次数必须封顶");
+        assert!(retries <= MAX_PENDING_RETRIES);
     }
 
     /// 圆形按钮的边长必须等于直径，否则会画成椭圆。

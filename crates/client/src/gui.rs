@@ -18,6 +18,33 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+/// 诊断开关只存在于 debug 构建。
+///
+/// 这些开关曾长期在发布版里生效：`EES_AUTOLOGIN` 可免输学号、
+/// `EES_DEBUG_*` 可把内部状态写到任意路径。它们不构成越权
+/// （时间门禁照常执行），但把测试钩子留在发给学生的二进制里不合适。
+#[cfg(debug_assertions)]
+fn diag_env<T: std::str::FromStr>(key: &str) -> Option<T> {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<T>().ok())
+}
+
+#[cfg(not(debug_assertions))]
+fn diag_env<T: std::str::FromStr>(_key: &str) -> Option<T> {
+    None
+}
+
+#[cfg(debug_assertions)]
+fn diag_path(key: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os(key).map(std::path::PathBuf::from)
+}
+
+#[cfg(not(debug_assertions))]
+fn diag_path(_key: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 use crate::nav::NavState;
 use crate::welcome::Welcome;
 use crate::workflow::{self, KeySource, UnlockOpts, Unlocked};
@@ -78,14 +105,8 @@ impl ExamApp {
             watermark: common::watermark(),
             welcome: Welcome::new(),
             nav: NavState::default(),
-            jump_once: std::env::var("EES_NAV_JUMP")
-                .ok()
-                .and_then(|v| v.trim().parse::<usize>().ok())
-                .filter(|v| *v > 0),
-            autologin: std::env::var("EES_AUTOLOGIN")
-                .ok()
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .filter(|v| *v > 0),
+            jump_once: diag_env::<usize>("EES_NAV_JUMP").filter(|v| *v > 0),
+            autologin: diag_env::<u64>("EES_AUTOLOGIN").filter(|v| *v > 0),
             focus_pending: true,
         }
     }
@@ -298,9 +319,8 @@ impl eframe::App for ExamApp {
 
             // 诊断：EES_DEBUG_NAV=<文件> 时输出题号卡与题目矩形，
             // 便于验证"跳转目标是否被正确记录"（截屏在 DPI 下不可靠）。
-            if let Some(path) = std::env::var_os("EES_DEBUG_NAV") {
-                self.nav
-                    .dump_debug(&sections, scroll_offset, std::path::Path::new(&path));
+            if let Some(path) = diag_path("EES_DEBUG_NAV") {
+                self.nav.dump_debug(&sections, scroll_offset, &path);
             }
         }
 

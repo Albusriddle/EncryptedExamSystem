@@ -69,6 +69,48 @@ impl Default for KdfParams {
 }
 
 impl KdfParams {
+    /// `m_cost` 下限（KiB）。低于此值枚举成本过低。
+    pub const MIN_M_COST: u32 = 8;
+    /// `m_cost` 上限（KiB）。1 GiB。
+    ///
+    /// 必须有上限：参数来自**包内的 header**，而 argon2 crate 的
+    /// `MAX_M_COST` 就是 `u32::MAX`（等于不设防）。一个 m_cost=4e9 的包
+    /// 会让客户端尝试分配约 4 TB，直接 abort，且没有任何可读错误。
+    pub const MAX_M_COST: u32 = 1_048_576;
+    pub const MIN_T_COST: u32 = 1;
+    pub const MAX_T_COST: u32 = 16;
+    pub const MIN_P_COST: u32 = 1;
+    pub const MAX_P_COST: u32 = 8;
+
+    /// 校验参数范围。用于解析不可信输入（包内 header）。
+    pub fn validate(&self) -> Result<(), CryptoError> {
+        if self.m_cost < Self::MIN_M_COST || self.m_cost > Self::MAX_M_COST {
+            return Err(CryptoError::Kdf(format!(
+                "m_cost={} 超出允许范围 [{}, {}]",
+                self.m_cost,
+                Self::MIN_M_COST,
+                Self::MAX_M_COST
+            )));
+        }
+        if self.t_cost < Self::MIN_T_COST || self.t_cost > Self::MAX_T_COST {
+            return Err(CryptoError::Kdf(format!(
+                "t_cost={} 超出允许范围 [{}, {}]",
+                self.t_cost,
+                Self::MIN_T_COST,
+                Self::MAX_T_COST
+            )));
+        }
+        if self.p_cost < Self::MIN_P_COST || self.p_cost > Self::MAX_P_COST {
+            return Err(CryptoError::Kdf(format!(
+                "p_cost={} 超出允许范围 [{}, {}]",
+                self.p_cost,
+                Self::MIN_P_COST,
+                Self::MAX_P_COST
+            )));
+        }
+        Ok(())
+    }
+
     /// 仅供测试使用的最低成本参数。
     pub fn cheap_for_tests() -> Self {
         Self {
@@ -79,6 +121,9 @@ impl KdfParams {
     }
 
     fn to_argon2(self) -> Result<argon2::Params, CryptoError> {
+        // 每次派生都先校验：无论参数来自 manifest 还是包内 header，
+        // 都不可能绕开上限去申请巨量内存。
+        self.validate()?;
         argon2::Params::new(self.m_cost, self.t_cost, self.p_cost, Some(32))
             .map_err(|e| CryptoError::Kdf(e.to_string()))
     }
@@ -273,6 +318,50 @@ mod tests {
         let p = KdfParams::default();
         assert!(p.m_cost >= 65536, "内存成本过低，枚举会变得廉价");
         assert!(p.t_cost >= 3, "迭代次数过低");
+    }
+
+    /// 参数范围必须拦住极端值。
+    ///
+    /// 真实风险：header 里的 kdf 参数完全由包决定，而 argon2 crate
+    /// 的 MAX_M_COST 就是 u32::MAX。没有上限时，一个手改的包能让
+    /// 客户端尝试分配数 TB 内存并 abort。
+    #[test]
+    fn kdf_params_bounds_are_enforced() {
+        let ok = KdfParams::default();
+        assert!(ok.validate().is_ok(), "生产默认值必须通过");
+
+        for bad in [
+            KdfParams { m_cost: 0, ..ok },
+            KdfParams {
+                m_cost: 4_000_000_000,
+                ..ok
+            },
+            KdfParams {
+                m_cost: KdfParams::MAX_M_COST + 1,
+                ..ok
+            },
+            KdfParams { t_cost: 0, ..ok },
+            KdfParams { t_cost: 999, ..ok },
+            KdfParams { p_cost: 0, ..ok },
+            KdfParams { p_cost: 99, ..ok },
+        ] {
+            assert!(bad.validate().is_err(), "应当拒绝越界参数: {bad:?}");
+        }
+        assert!(KdfParams::cheap_for_tests().validate().is_ok());
+    }
+
+    /// 越界参数在派生阶段就被挡住，不会真的去分配内存。
+    #[test]
+    fn oversized_m_cost_fails_before_allocating() {
+        let bad = KdfParams {
+            m_cost: u32::MAX,
+            ..KdfParams::default()
+        };
+        let err = session_entry_key(1, 1, b"0123456789abcdef", bad).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::Kdf(_)),
+            "应返回 KDF 参数错误: {err}"
+        );
     }
 
     #[test]

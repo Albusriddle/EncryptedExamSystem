@@ -393,6 +393,41 @@ pub fn validate_sessions_silent(sessions: &[Session]) -> Result<(), ContainerErr
     validate_sessions_impl(sessions, false)
 }
 
+/// 时间字符串是否带显式时区（`Z` 或 `±HH:MM` / `±HHMM`）。
+///
+/// 不带偏移的时间两端都会当成 **UTC**：教师按北京时间手写就会静默偏移 8 小时，
+/// 而且解析不报错——比直接报错更难查，所以在校验阶段就拦掉。
+fn has_explicit_offset(s: &str) -> bool {
+    let t = s.trim();
+    if t.ends_with('Z') || t.ends_with('z') {
+        return true;
+    }
+    let b = t.as_bytes();
+    // ±HH:MM（末尾 6 字节）
+    if b.len() >= 6 {
+        let at = b.len() - 6;
+        if (b[at] == b'+' || b[at] == b'-')
+            && b[at + 1].is_ascii_digit()
+            && b[at + 2].is_ascii_digit()
+            && b[at + 3] == b':'
+            && b[at + 4].is_ascii_digit()
+            && b[at + 5].is_ascii_digit()
+        {
+            return true;
+        }
+    }
+    // ±HHMM（末尾 5 字节，无冒号）
+    if b.len() >= 5 {
+        let at = b.len() - 5;
+        return (b[at] == b'+' || b[at] == b'-')
+            && b[at + 1].is_ascii_digit()
+            && b[at + 2].is_ascii_digit()
+            && b[at + 3].is_ascii_digit()
+            && b[at + 4].is_ascii_digit();
+    }
+    false
+}
+
 fn validate_sessions_impl(sessions: &[Session], emit_warnings: bool) -> Result<(), ContainerError> {
     if sessions.is_empty() {
         return Err(ContainerError::Format("清单里没有任何场次".into()));
@@ -411,6 +446,15 @@ fn validate_sessions_impl(sessions: &[Session], emit_warnings: bool) -> Result<(
             crate::timegate::parse_rfc3339(&s.end),
         ) {
             (Some(a), Some(b)) => {
+                for v in [&s.start, &s.end] {
+                    if !has_explicit_offset(v) {
+                        return Err(ContainerError::Format(format!(
+                            "场次 {} 的时间必须带时区偏移（如 2026-10-23T11:00:00+08:00），\
+                             当前 {v:?}；不带偏移会被当作 UTC，导致时间整体偏移",
+                            s.session_id
+                        )));
+                    }
+                }
                 if a >= b {
                     return Err(ContainerError::Format(format!(
                         "场次 {} 的开始时间必须早于结束时间（{} >= {}）",
@@ -700,6 +744,11 @@ pub fn parse_header<'a>(
 
     let header_plain = crypto::decrypt(k_manifest, header_ct, b"header-v3")?;
     let header: Header = serde_json::from_slice(&header_plain)?;
+    // KDF 参数来自不可信的包内容，必须在用之前校验范围。
+    // 否则 m_cost 极大的包会让客户端申请巨量内存并直接 abort。
+    header.kdf.validate().map_err(|e| {
+        ContainerError::Format(format!("包内 KDF 参数异常（{e}），可能不是本系统生成的包"))
+    })?;
     Ok((header, blob_area))
 }
 
@@ -807,6 +856,43 @@ mod tag_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 不带时区偏移的时间必须拒绝（否则被当成 UTC，静默偏移 8 小时）。
+    #[test]
+    fn validate_sessions_requires_explicit_offset() {
+        let mut sess = Session {
+            session_id: 1,
+            start: "2026-10-23 11:00".into(),
+            end: "2026-10-23 16:00".into(),
+            students: vec![202108010217],
+            exams: vec![SessionExam {
+                file: "math.json".into(),
+                pick: Some(2),
+            }],
+        };
+        let err = validate_sessions_silent(&[sess.clone()]).unwrap_err();
+        assert!(
+            err.to_string().contains("时区偏移"),
+            "应提示必须带时区: {err}"
+        );
+
+        sess.start = "2026-10-23T11:00:00+08:00".into();
+        sess.end = "2026-10-23T16:00:00+08:00".into();
+        assert!(validate_sessions_silent(&[sess]).is_ok());
+    }
+
+    #[test]
+    fn has_explicit_offset_recognizes_forms() {
+        assert!(has_explicit_offset("2026-10-23T11:00:00+08:00"));
+        assert!(has_explicit_offset("2026-10-23T03:00:00Z"));
+        assert!(has_explicit_offset("2026-10-23T03:00:00z"));
+        assert!(has_explicit_offset("2026-10-23T03:00:00+0800"));
+        assert!(!has_explicit_offset("2026-10-23 11:00"));
+        assert!(!has_explicit_offset("2026-10-23T11:00:00"));
+        assert!(!has_explicit_offset("2026-10-23"));
+        assert!(!has_explicit_offset("2026-10-23T11:00:00+8"));
+    }
+
     use crate::model::{ExamBank, Question, SessionExam};
 
     fn bank(id: &str, n: usize) -> ExamBank {

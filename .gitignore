@@ -58,3 +58,9 @@ examadm-*/
 # 发布包验收用的临时下载/解压目录
 .accept/
 .dl/
+
+# 本地测试残留（禁止入库）
+kf.txt
+m[0-9].json
+*.key
+examadm-*/

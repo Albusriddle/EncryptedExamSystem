@@ -95,6 +95,11 @@ echo "== 路径 2：已嵌入（发布模式）=="
   --emit-keyfile "$TMP/kf.txt" >/dev/null 2>&1
 [ "$(wc -c < "$TMP/kf.txt")" -eq 64 ] || fail "keyfile 长度不是 64"
 
+# cargo 的已知限制：`rerun-if-env-changed` 只在值**变化**时触发，
+# 若上次构建没有设置该变量，这次设置后 cargo 仍可能判定"无需重编"，
+# 于是 build.rs 不跑、警告也不打印，这里的 grep 就会误报失败。
+# 显式 touch build.rs，保证它一定重跑。
+touch crates/client/build.rs
 EXAM_KEYFILE="$TMP/kf.txt" cargo build --release -p client 2>&1 \
   | grep -q "已嵌入 K_manifest" || fail "build.rs 未识别 EXAM_KEYFILE"
 ok "build.rs 已嵌入密钥"

@@ -96,12 +96,10 @@ pub struct Manifest {
     /// 全局 salt（hex），参与密钥派生与抽题种子。
     pub salt: String,
     pub sessions: Vec<Session>,
-    /// 签名时间服务的 URL 列表（客户端逐个尝试）。
-    #[serde(default)]
-    pub time_sources: Vec<String>,
-    /// 服务端时间令牌的验签公钥（P-256 / Ed25519，hex）。
-    #[serde(default)]
-    pub time_pubkey: String,
+    // 说明：这里曾有 `time_sources` / `time_pubkey` 两个字段，
+    // 但**从未有任何代码读取它们**——时间源在客户端是硬编码的三个
+    // 公共站点。留着会让人以为"可以自定义时间源"或"时间有签名校验"，
+    // 实际上都没有。已删除，避免配置了却不生效的误导。
     /// Argon2id 参数（随包存储，便于将来调参而不作废旧包）。
     #[serde(default)]
     pub kdf: crate::crypto::KdfParams,

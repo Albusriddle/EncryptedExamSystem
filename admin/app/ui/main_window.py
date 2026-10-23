@@ -222,22 +222,13 @@ class MainWindow(QMainWindow):
         return ret == QMessageBox.StandardButton.Yes
 
     def _reload_tabs(self) -> None:
-        """工程切换后重建各 Tab 的视图。"""
-        self.tabs.removeTab(0)
-        self.tabs.removeTab(0)
-        self.tabs.removeTab(0)
-        self.tabs.removeTab(0)
-        self.banks_tab = BanksTab(self.state)
-        self.students_tab = StudentsTab(self.state)
-        self.sessions_tab = SessionsTab(self.state)
-        self.build_tab = BuildTab(self.state)
-        for tab in (self.banks_tab, self.students_tab, self.sessions_tab):
-            tab.changed.connect(self._on_changed)
-        self.tabs.insertTab(0, self.banks_tab, "题库")
-        self.tabs.insertTab(1, self.students_tab, "学生")
-        self.tabs.insertTab(2, self.sessions_tab, "场次")
-        self.tabs.insertTab(3, self.build_tab, "打包")
-        self.tabs.setCurrentIndex(0)
+        """工程切换后重建全部 Tab。
+
+        直接复用 `_build_tabs()`，而不是手写"删掉前 N 个再插入"——
+        旧实现连写四次 `removeTab(0)`，隐含依赖"当前共 5 个 Tab"，
+        以后加一个 Tab 就会错位，而且占位页会被漏掉。
+        """
+        self._build_tabs()
         self._refresh_status()
 
 

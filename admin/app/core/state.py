@@ -169,6 +169,19 @@ class ProjectState:
                 if match_bank_exam_id(e.file, self.banks) is None:
                     problems.append(f"场次 {s.session_id} 引用了不存在的题库 {e.file}")
 
+        # 同一场次不得重复引用同一题库（与 Rust 的 seen_exams 一致）。
+        # 否则试卷里会出现两个同名科目，抽题数按 max 取值，学生拿到重复的卷子。
+        for s in self.sessions:
+            seen: dict[str, str] = {}
+            for e in s.exams:
+                key = match_bank_exam_id(e.file, self.banks) or e.file
+                if key in seen:
+                    problems.append(
+                        f"场次 {s.session_id} 重复引用了题库 {e.file}（同一场次只能考一次）"
+                    )
+                else:
+                    seen[key] = e.file
+
         # 同一学生跨重叠场次（与 Rust 端 check_student_overlap 对齐）
         problems.extend(self._check_student_overlap())
 

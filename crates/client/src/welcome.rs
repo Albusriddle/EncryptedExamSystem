@@ -77,6 +77,9 @@ impl Welcome {
         // 宽度用 set_width 固定，长文本才会按宽度换行、不会把窗口撑出视口。
         const W: f32 = 470.0;
         let screen = ctx.screen_rect();
+        // 仅 debug 构建需要（用于布局自检），release 下整段不编译，
+        // 否则会留下"赋值后从未读取"的告警。
+        #[cfg(debug_assertions)]
         let mut popup_rect = egui::Rect::NOTHING;
 
         // 半透明遮罩：突出弹窗，并挡住背后的误点
@@ -88,6 +91,7 @@ impl Welcome {
                     .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(150));
             });
 
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
         let win_resp = egui::Window::new("欢迎使用")
             .collapsible(false)
             .resizable(false)
@@ -148,12 +152,14 @@ impl Welcome {
             });
 
         // Window::show 返回的就是窗口自身矩形（含标题栏），用它判断居中才准。
+        #[cfg(debug_assertions)]
         if let Some(r) = win_resp {
             popup_rect = r.response.rect;
         }
 
         // 诊断：设置 EES_DEBUG_LAYOUT=<文件> 可把弹窗与视口的实际矩形写出来。
         // 截图在 DPI/多显示器下不可靠，让程序自己报告才可信。
+        #[cfg(debug_assertions)]
         if let Some(path) = std::env::var_os("EES_DEBUG_LAYOUT") {
             let dx = popup_rect.center().x - screen.center().x;
             let dy = popup_rect.center().y - screen.center().y;

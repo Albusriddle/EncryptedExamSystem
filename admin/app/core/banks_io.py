@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.core.models import ExamBank
+from app.core.models import ExamBank, validate_exam_id
 
 
 def write_temp_banks(banks: dict[str, ExamBank], tmpdir: Path) -> None:
@@ -23,9 +23,13 @@ def write_temp_banks(banks: dict[str, ExamBank], tmpdir: Path) -> None:
     永久留在教师机器上。
     """
     for exam_id, bank in banks.items():
+        # 纵深防御：模型层已经用白名单限制过 exam_id，这里再挡一次。
+        # 只要最终文件名不等于 `exam_id.json`，就说明存在路径成分。
+        name = f"{validate_exam_id(exam_id)}.json"
+        # 双保险：最终文件名必须等于"裸文件名"，否则说明仍含路径成分
+        if Path(name).name != name:
+            raise ValueError(f"题库 exam_id 含非法路径成分，拒绝写入: {exam_id!r}")
         stripped = bank.model_copy(deep=True)
         for q in stripped.questions:
             q.answer = None
-        (tmpdir / f"{exam_id}.json").write_text(
-            stripped.model_dump_json(by_alias=True), encoding="utf-8"
-        )
+        (tmpdir / name).write_text(stripped.model_dump_json(by_alias=True), encoding="utf-8")

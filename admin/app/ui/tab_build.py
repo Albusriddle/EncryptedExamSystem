@@ -225,11 +225,15 @@ class BuildWorker(QThread):
             return
 
         assert self._proc.stdout is not None
-        for line in self._proc.stdout:
-            # 安全兜底：万一某行带了 master（不应发生），打码后再显示
-            self.log.emit(_redact(line.rstrip(), self.master_hex))
-
-        code = self._proc.wait()
+        try:
+            for line in self._proc.stdout:
+                # 安全兜底：万一某行带了 master（不应发生），打码后再显示
+                self.log.emit(_redact(line.rstrip(), self.master_hex))
+            code = self._proc.wait()
+        finally:
+            # master 用完立即丢弃：worker 对象会被 self.worker 一直持有，
+            # 不清空就等于把主密钥留在内存里直到下次打包。
+            self.master_hex = ""
         if code == 0:
             self.done.emit(True, str(self.out))
         else:
@@ -449,7 +453,18 @@ class BuildTab(QWidget):
             return
 
         out = Path(self.edit_out.text())
-        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            probe = out.parent / ".exam_write_probe"
+            probe.write_bytes(b"")
+            probe.unlink()
+        except OSError as e:
+            QMessageBox.critical(
+                self,
+                "输出目录不可写",
+                f"{out.parent}\n\n{e}\n\n请换一个保存位置（例如桌面或文档目录）。",
+            )
+            return
 
         # 题库目录：各题库路径的公共父目录太多变，改用临时目录扁平复制。
         #
