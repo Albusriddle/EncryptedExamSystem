@@ -1,0 +1,236 @@
+# 题库 JSON 规范
+
+本文是**题库文件的唯一格式说明**。教师手写题库、或让其它系统导出题库时，照这份文档抄即可。
+
+> 配套的可运行样例：`banks/demo/demo-showcase.json`（四种题型各一道，可直接导入）。
+
+---
+
+## 0. 两种格式，选一种
+
+| 格式 | 长什么样 | 什么时候用 |
+|---|---|---|
+| **原生格式** | 一个 `.json` 里同时含题目与答案 | 自己手写、其它系统方便一次导出 |
+| **题目/答案分离**（`format_version: 2`） | `X.questions.json` + `X.answers.json` 两个文件 | 已有题库、或想按"出题人 / 审题人"分工 |
+
+两种都能直接导入，导入后行为完全一致。**同一门课不要两种格式混用**（会出现两个题库）。
+
+---
+
+## 1. 原生格式
+
+```json
+{
+  "exam_id": "demo-showcase",
+  "title": "演示题库 · 四种题型",
+  "pick": 4,
+  "questions": [ ... ]
+}
+```
+
+### 1.1 顶层字段
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `exam_id` | 字符串 | 是 | 题库标识，**会用作文件名**：不能含 `/ \ : * ? " < > \|`、不能是 `CON`/`NUL` 等保留名、不能以 `.` 或空格开头结尾，最长 64 字符。允许中文。 |
+| `title` | 字符串 | 是 | 界面上显示的名字，可任意中文 |
+| `pick` | 整数 | 是 | 从本题库抽多少题，必须 `1 ≤ pick ≤ 题目数` |
+| `questions` | 数组 | 是 | 题目列表，**id 在题库内必须唯一** |
+
+### 1.2 题目字段
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | 字符串 | 是 | 题库内唯一。**试卷指纹只哈希 id**，改 id 等于换了一份卷子 |
+| `type` | 字符串 | 是 | `single` 单选 / `multiple` 多选 / `judge` 判断 / `fill` 补全 / `fix` 改错 / `essay` 问答 |
+| `stem` | 字符串 | 是 | 题干，支持换行 |
+| `body` | 对象 | 否 | 正文形态，见 1.3；**省略时按旧格式用 `options` 渲染** |
+| `options` | 字符串数组 | 否 | 旧格式选项（只有文本）。新写题库请用 `body` |
+| `kp` | 字符串 | 否 | 知识点编号，如 `"1.1"` |
+| `difficulty` | 整数 | 否 | 难度；按外部约定 `0` 表示多选题 |
+| `answer` | 任意 | 否 | 标准答案。**打包时会被剥离**，永远不会到学生端 |
+| `judge` | 对象 | 否 | 判分材料 `{entry, harness, tests}`。**打包时会被剥离** |
+| `score` | 整数 | 否 | 分值，默认 2 |
+
+### 1.3 `body` 的四种形态
+
+#### `text` —— 只有题干
+
+```json
+{ "kind": "text" }
+```
+
+#### `options` —— 选择题
+
+```json
+{
+  "kind": "options",
+  "options": [
+    { "key": "A", "text": "1" },
+    { "key": "B", "text": "2" }
+  ]
+}
+```
+
+- `key` 必须是 **A、B、C… 连续**，顺序即显示顺序；
+- 答案用字母表示，且必须落在这些 key 里。
+
+#### `template` —— 补全题（带占位符的代码模板）
+
+```json
+{
+  "kind": "template",
+  "template": "int add(int a, int b)\n{\n    return ____①____;\n}",
+  "blank_count": 1
+}
+```
+
+- 占位符写成 `____①____`、`____②____`…（①②③ 至 ⑩）；
+- **占位符个数必须等于 `blank_count`**，导入时会数一遍。
+
+#### `code` —— 改错题（逐行代码）
+
+```json
+{
+  "kind": "code",
+  "code": ["int sq(int x)", "{", "    return x * 2;", "}"],
+  "blank_count": 1
+}
+```
+
+- 行号从 **1** 开始，空行也要占一个元素；
+- 答案里的 `line` 指向这里第几行，`wrong` 必须与该行原文**逐字相同**。
+
+### 1.4 完整示例
+
+见 `banks/demo/demo-showcase.json`：四道题分别用了 `options`（单选）、`options`（多选）、
+`template`、`code`。导入它应当看到「演示题库 · 四种题型，4 题」。
+
+---
+
+## 2. 题目/答案分离格式（`format_version: 2`）
+
+### 2.1 文件配对
+
+```
+数学/choice.questions.json   ← 题目
+数学/choice.answers.json     ← 答案
+```
+
+- 同名、后缀不同即配对；下载重复带来的 `(1)` 后缀会被忽略；
+- 只选题目文件时，程序会在**同目录**找对应的答案文件；
+- 两个文件也可以一次全选。
+
+### 2.2 题目文件
+
+```json
+{
+  "format_version": 2,
+  "type": "choice",
+  "role": "questions",
+  "count": 2,
+  "questions": [
+    {
+      "id": "CH-001",
+      "kp": "1.1",
+      "difficulty": 1,
+      "stem": "在常见的 32 位平台上，int 类型占（ ）个字节。",
+      "content": { "kind": "options", "options": { "A": "4", "B": "2", "C": "8", "D": "1" } }
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `format_version` | 固定为 `2` |
+| `type` | `choice` / `fill_blank` / `fix_code` |
+| `role` | 固定 `questions` |
+| `count` | 必须等于 `questions` 的实际条数 |
+| `content.kind` | `options` / `template` / `code`，与 `type` 一一对应 |
+
+`content` 的三种形态同 1.3，只是 `options` 在外部格式里写成对象 `{"A": "4", …}`（导入时转成有序列表）。
+
+### 2.3 答案文件
+
+```json
+{
+  "format_version": 2,
+  "type": "choice",
+  "role": "answers",
+  "count": 1,
+  "answers": [
+    { "id": "CH-001", "verdict": { "kind": "single", "answer": "A" }, "judge": null }
+  ]
+}
+```
+
+| `verdict.kind` | 对应题型 | `answer` 的形状 |
+|---|---|---|
+| `single` | 单选 | `"A"` |
+| `multi` | 多选 | `["A", "C"]` |
+| `blanks` | 补全 | `[{"no": "①", "answer": "a + b"}, …]` |
+| `fixes` | 改错 | `[{"line": 3, "wrong": "原文", "answer": "改后"}, …]` |
+
+`judge`（可空）：判分材料。
+
+```json
+{ "entry": "add", "harness": "int main(void){ … }", "tests": [{ "input": "1 2", "output": "3" }] }
+```
+
+> `judge` 与 `answer` 一样**只在题库里存在**，打包时会被剥离；学生端拿不到。
+
+---
+
+## 3. 导入时强制执行的校验
+
+| 规则 | 不满足时的提示（示例） |
+|---|---|
+| `count` == 实际条数 | `choice.questions.json: count=500，实际 questions 有 499 条` |
+| 题目 id 唯一 | `题目 ID 重复：CH-042` |
+| 答案 id 唯一 | `答案 ID 重复：CH-042` |
+| 题目/答案 id 一一对应 | `缺少答案：CH-042` / `多出答案：CH-999` |
+| `verdict.kind` 与题型匹配 | `题型 choice 的答案 kind 应为 ['multi','single']，实际 'blanks'` |
+| 多选题 `difficulty == 0` | `difficulty=1（单选）与答案 kind='multi' 矛盾` |
+| 选项 key 必须是 A、B、C… 连续 | `选项键应为 ['A','B','C']，实际 ['A','C']` |
+| 答案字母必须在选项里 | `答案 ['E'] 不在选项 ['A','B'] 中——学生永远选不到正确项` |
+| 模板占位符数 == `blank_count` | `模板里有 2 个 ____①____ 占位符，但 blank_count=3` |
+| 改错条数 == `blank_count` | `有 1 条改正项，但 blank_count=2` |
+| 改错行号在范围内 | `第 1 条改正项的 line=99 超出 1..8` |
+| 改错 `wrong` 与原文一致 | `第 1 条改正项的 wrong 与第 3 行原文不一致` |
+| 题干非空 | `第 7 条（id=CH-007）: 题干为空` |
+
+---
+
+## 4. 常见错误
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `不是合法的 UTF-8 JSON` | 文件被存成 GBK/ANSI | 用记事本「另存为 → UTF-8」，或 VS Code 右下角编码 → Save with Encoding → UTF-8 |
+| `缺少对应的答案文件` | 只导入了 `.questions.json`，同目录没有 `.answers.json` | 把答案文件放到同一目录，或两个文件一起选 |
+| `题库名相同` | 两个不同目录下有同名文件 | 改名后再导入（或先在导入确认框里改题库 ID） |
+| `无法识别的格式` | 既不是本程序题库，也没有 `format_version: 2` | 检查是否少了 `role` / `format_version` |
+
+---
+
+## 5. 快速自检
+
+1. 管理端 **[题库]** → **[导入题库…]** → 选中文件；
+2. 弹出「确认导入」时改好题库 ID 与显示名称；
+3. 选中题库点 **[预览]**，确认题干与选项/代码都正常；
+4. 建场次、勾选该题库、设抽题数；
+5. 打包后可用命令行核对试卷内容：
+
+```bash
+ExamAdmin\stub-template.exe --package 学生端.exe --student 2021001
+```
+
+（不带 `--master` 时需要在包内已嵌入密钥，正常打包都是这样。）
+
+---
+
+## 6. 版本与兼容
+
+- 原生格式长期兼容：没有 `body` 的老题库继续按 `options` 渲染，**不需要改写**；
+- 外部格式目前支持 `format_version: 2`，其它版本会明确报错；
+- 题库格式变更会在 `docs/代码审阅报告.md` 与发布说明里注明。
