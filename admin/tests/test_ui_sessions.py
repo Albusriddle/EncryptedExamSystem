@@ -213,7 +213,14 @@ def test_build_log_shows_master_key(qapp, state_with_banks, tmp_path, monkeypatc
 
     tab.start_build()
 
-    log = tab.log_view.toPlainText()
-    assert master in log, "主密钥没有显示在打包日志里"
-    assert "请立即保存" in log
-    assert "不要发给学生" in log, "缺少安全警告"
+    try:
+        log = tab.log_view.toPlainText()
+        assert master in log, "主密钥没有显示在打包日志里"
+        assert "请立即保存" in log
+        assert "不要发给学生" in log, "缺少安全警告"
+    finally:
+        # 清理：BuildWorker 是未启动的 QThread，留到解释器退出时销毁
+        # 会让 PySide6 在 teardown 阶段 SIGSEGV（CI 上表现为 exit 139）。
+        tab.worker = None
+        tab._cleanup_tmp()
+        tab.deleteLater()
