@@ -63,4 +63,7 @@ examadm-*/
 kf.txt
 m[0-9].json
 *.key
+bank*.json
 examadm-*/
+# 仓库根目录不该出现独立 .rs（工作区代码都在 crates/ 下）
+/*.rs

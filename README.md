@@ -1,90 +1,154 @@
 # EncryptedExamSystem · 保密考试系统
 
-> 管理端编排多场考试 → 打包加密题库 → 生成"学生端"自解压 exe →
-> 学生凭**学号 + 网络时间门禁**解锁 → 离线确定性抽题生成个人试卷。
+[![CI](https://github.com/Albusriddle/EncryptedExamSystem/actions/workflows/ci.yml/badge.svg)](https://github.com/Albusriddle/EncryptedExamSystem/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Albusriddle/EncryptedExamSystem)](https://github.com/Albusriddle/EncryptedExamSystem/releases/latest)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**如果你是老师**：直接看 [docs/教师使用手册.md](docs/教师使用手册.md)，不需要懂编程。
+> 管理端编排考试 → 打包加密题库 → 生成**单个自解压 exe** →
+> 学生凭 **学号 + 网络时间门禁** 解锁 → 确定性抽题，生成个人试卷。
 
-**如果你要了解设计**：见 [docs/保密考试系统_架构与实施方案.md](docs/保密考试系统_架构与实施方案.md)。
+**无需服务器、无需部署数据库。** 一场考试就是一个 exe 文件。
 
-## 交付物
+| 你是 | 从这里开始 |
+|---|---|
+| 老师 | [教师使用手册](docs/教师使用手册.md)（不需要懂编程） |
+| 想了解设计 | [架构与实施方案](docs/保密考试系统_架构与实施方案.md) |
+| 想改代码 | [AGENTS.md](AGENTS.md)（**强制规则**，先读再动手） |
 
-| 产物 | 给谁 | 说明 |
+---
+
+## 下载
+
+最新版本见 [Releases](https://github.com/Albusriddle/EncryptedExamSystem/releases/latest)。
+
+| 资产 | 给谁 | 说明 |
 |---|---|---|
-| `ExamAdmin`（文件夹） | 教师 | 图形管理端，解压双击即用 |
-| 学生端 `.exe` | 学生 | 教师打包生成，双击输入学号即可 |
-| `exam-builder.exe` | 进阶用户 | 命令行打包工具 |
+| `ExamAdmin-<版本>-windows.zip` | 教师 | 解压后进 `ExamAdmin/` 双击 `ExamAdmin.exe` |
+| `exam-builder.exe` | 进阶用户 / 脚本 | 命令行打包器 |
+| `stub-template.exe` | 进阶用户 | 学生端模板，打包时被复制并追加加密数据 |
+
+发布包内已含示例题库，解压即可跑通全流程。
+
+---
+
+## 教师工作流
+
+1. **题库** —— 导入 JSON 题库（格式见手册），支持多题库、按题库设默认抽题数
+2. **学生** —— 粘贴或导入 CSV 学号名单
+3. **场次** —— 编排考试时间窗、勾选科目、设每场抽题数；时间轴可视化重叠场次
+4. **打包** —— 点「生成」得到学生端 exe，分发即可
+5. 学生双击 → 输学号 → 通过时间门禁 → 看到自己的试卷
+
+学生端**只需要联网校时**（三个公共时间源取中位数），不访问任何自建服务。
+
+---
+
+## 当前能力边界
+
+**已实现**：多场次 · 按场次选科与抽题 · 学号名单 · 网络时间门禁 · 确定性出卷 · 试卷指纹 ·
+学生端右侧题号导航卡（圆形按钮，点题号把该题滚到视窗顶部）
+
+**未实现**：学生作答、交卷、判分、成绩导出。学生端当前是**试卷展示器**。管理端的「收卷判分」页是占位。
+
+---
 
 ## 仓库结构
 
 ```
 crates/
-  common/    # 加密、密钥派生、确定性抽题、容器格式（两端共用，黄金测试在这）
-  builder/   # exam-builder CLI：题库+场次 → 自解压学生端
-  client/    # exam-client：学生端单 exe（GUI + CLI 双模式）
-admin/       # PySide6 管理端（四 Tab：题库/学生/场次/打包）
-  packaging/ # PyInstaller 打包脚本，产出 ExamAdmin 文件夹
-worker/      # Cloudflare Worker 签名时间服务（M4，未启用）
-banks/demo/  # 假题库，供 CI 与本地调试（真题库不入库，见 .gitignore）
+  common/         # 加密、密钥派生、容器格式、时间门禁、确定性抽题（两端共用）
+  builder/        # exam-builder：题库 + 场次 → 自解压学生端
+  client/         # exam-client：学生端单 exe（GUI + CLI 双模式）
+admin/
+  app/core/       # 纯逻辑：模型、状态、时间解析、题库 IO（**不依赖 Qt**）
+  app/ui/         # PySide6 界面
+  buildtools/     # PyInstaller 打包脚本
+  tests/          # 101 个 Python 测试
+banks/demo/       # 演示题库（真题库不入库）
+docs/             # 教师手册、架构方案、发布说明
+scripts/          # verify-embed.sh / preflight-release.sh / make-release-zip.sh
+.github/workflows # CI 与 Release
 ```
 
-## 本机快速开始（Windows）
+**单一真相**：版本号只在 `VERSION`；对外文案集中在 `branding.json`；加密参数随包存于 header。
 
-本机已装 VS Build Tools，直接用默认 MSVC target（兼容性最好）：
+---
 
-```powershell
-cargo test --workspace          # 79 个测试：加密/抽题/容器/门禁/GUI
+## 开发
+
+前置：Rust（见 `rust-toolchain.toml`）、Python 3.11+、[uv](https://github.com/astral-sh/uv)。
+下面的命令是 bash 语法（Windows 上用 Git Bash / MSYS2 执行）。
+
+```bash
+# Rust
+cargo test --workspace                 # 110 个测试
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+
+# 管理端（首次执行会建好 .venv 并装齐 GUI/打包依赖）
+cd admin
+uv sync --extra gui --extra build
+uv run pytest -q                       # 101 个测试
+uv run ruff check . && uv run ruff format --check .
+
+# 端到端（打包 → 嵌入密钥 → 解锁）
+bash scripts/verify-embed.sh           # 18 项断言
+
+# 发布前自检
+bash scripts/preflight-release.sh      # 加 --full 连管理端打包一起查
 ```
 
-若换一台 C 盘空间紧张的机器，可改走 GNU target + MinGW（装 D 盘），见 docs 方案 §6.1。
+本地跑通一次完整演示：
 
-## 端到端演示（M2 已验证通过）
-
-```powershell
+```bash
 cargo build --release -p client -p builder
-
-# 1. 生成主密钥（自行保管，勿提交）
-$master = .\target\release\exam-builder.exe keygen
-
-# 2. 打包：demo 题库 + 示例清单 → 自解压学生端
-.\target\release\exam-builder.exe build `
-  --manifest banks/demo/manifest.example.json --banks banks/ `
-  --stub target/release/exam-client.exe --out StudentClient.exe --master $master
-
-# 3. 学生端解锁 + 确定性抽题
-.\StudentClient.exe --student 2021001 --master $master --package StudentClient.exe
+MASTER=$(./target/release/exam-builder.exe keygen)
+./target/release/exam-builder.exe build \
+  --manifest banks/demo/manifest.example.json --banks banks/ \
+  --stub ./target/release/exam-client.exe --out StudentClient.exe --master "$MASTER"
+./StudentClient.exe --student 2021001 --package StudentClient.exe --master "$MASTER"
 ```
 
-## 密钥嵌入（学生免输密码）
+---
 
-发布给学生的包可以**不含任何密钥输入**：把 `K_manifest` 嵌入学生端即可。
+## 版本与发布
 
-```powershell
-# 1. 打包时额外导出 K_manifest
-.\target\release\exam-builder.exe build `
-  --manifest banks/demo/manifest.example.json --banks banks/ `
-  --stub target/release/exam-client.exe --out /tmp/x.exe --master $master `
-  --emit-keyfile kf.txt
+1. 改 `VERSION`，同步 `Cargo.toml` 与 `admin/pyproject.toml`（**三处必须一致**）
+2. 提交，打 tag `v<版本>`，推送 tag
+3. `release` 工作流校验版本与 tag 一致 → 构建 → 跑 e2e → 发布资产
 
-# 2. 用该 keyfile 重新编译学生端（密钥被分片混淆后嵌入）
-$env:EXAM_KEYFILE = "kf.txt"
-cargo build --release -p client
+本地已装 `gh`/令牌时，也可用 `bash scripts/make-release-zip.sh` 手动生成同构发布包。
 
-# 3. 用新的 stub 打包，学生端即可免输密钥
-.\target\release\exam-builder.exe build `
-  --manifest banks/demo/manifest.example.json --banks banks/ `
-  --stub target/release/exam-client.exe --out StudentClient.exe --master $master
-.\StudentClient.exe --student 2021001 --package StudentClient.exe
-```
+---
 
-**安全边界（必须理解）**：嵌入的是 `K_manifest` 而**不是 master**。
-泄漏后果是攻击者可读到场次时间与人数，但**拿不到任何题目**
-（题库用每场独立的 `session_secret` 加密，仍需猜中学号才能触发 Argon2id）。
+## 安全模型
 
-一键验收：`bash scripts/verify-embed.sh`（CI 已接入）
+**这是"防君子"的系统，不是密码学意义上的强防护。** 请在采用前理解以下边界。
 
-## 安全红线
+| 保护什么 | 手段 |
+|---|---|
+| 题库明文不外泄 | 每场独立 `session_secret`，AES-256-GCM |
+| 提前拿到卷子 | 包内没有明文题目，密钥靠学号派生 |
+| 提前/延后解锁 | 三个公共 HTTPS 时间源取中位数，失败即拒绝（fail-closed） |
+| 场次之间串卷 | 每场独立密钥与数据段，实测跨场解密失败 |
 
-- **真题库、密钥绝不入库**：`banks/`（除 demo）、`*.key`、`secrets/` 已在 .gitignore。
-- 主密钥用 `exam-builder keygen` 生成后立即存入密码管理器。
-- 仓库私有；CI 已配 gitleaks 扫密钥。
+**明确的限制**：
+
+- **学号是低熵数据**。拿到包的人可以离线枚举名单，Argon2id 参数（64 MiB / 3 轮）只是把成本抬到 10⁵ 个学号约 19 分钟量级，不是密码学保证。
+- **包内嵌入的是 `K_manifest`，不是 master**。泄漏后攻击者能读到场次时间与人数，**读不到题目**。
+- 有逆向能力且知道合法学号的人，可以在时间窗内解锁——这是设计使然，无法用纯客户端方案消除。
+- 学生端必须有网（校时）；完全断网时会拒绝解锁。
+
+---
+
+## 许可证
+
+[Apache License 2.0](LICENSE)。
+
+## 致谢
+
+- 创始人 / 仓库作者：[AlbusRiddle](https://github.com/Albusriddle)
+- 部分创意支持：[Stone](https://github.com/stone6060)
+- 精神支持：[湖南大学 Robot 工作坊](https://github.com/RobotWorkShop-BigHeroX)
+
+如果这个项目对你有帮助，欢迎点一个 ⭐ Star。
