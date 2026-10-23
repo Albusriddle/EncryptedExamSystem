@@ -65,6 +65,7 @@ admin/
   buildtools/     # PyInstaller 打包脚本
   tests/          # Python 测试
 banks/demo/       # 演示题库（真题库不入库）
+schemas/          # 题库/清单的 JSON Schema（编辑器补全用，由 pydantic 生成）
 docs/             # 教师手册、架构方案、发布说明
 scripts/          # verify-embed.sh / preflight-release.sh / make-release-zip.sh
 .github/workflows # CI 与 Release

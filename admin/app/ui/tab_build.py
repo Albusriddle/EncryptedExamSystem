@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.banks_io import write_temp_banks
+from app.core.buildcmd import build_command, build_env
 from app.core.state import ProjectState
 
 
@@ -188,29 +189,17 @@ class BuildWorker(QThread):
         self._proc: subprocess.Popen[str] | None = None
 
     def run(self) -> None:  # noqa: D401 - QThread 约定
-        # 主密钥**只走环境变量** EXAM_MASTER，绝不进命令行——
-        # 命令行参数会被同机其他用户从进程列表里看到。
-        cmd = [
-            str(builder_exe()),
-            "build",
-            "--manifest",
-            str(self.manifest_path),
-            "--banks",
-            str(self.banks_dir),
-            "--stub",
-            str(self.stub),
-            "--out",
-            str(self.out),
-            # 输出路径由教师选定；覆盖确认在 start_build 里做过一次，
-            # 这里显式放行，否则 builder 会以"文件已存在"拒绝。
-            "--force",
-        ]
-
-        env = dict(os.environ)
-        env["EXAM_MASTER"] = self.master_hex
-
-        if self.keyfile:
-            cmd += ["--emit-keyfile", str(self.keyfile)]
+        # 命令拼装与密钥传递在 app/core/buildcmd.py 里（Qt-free、有单测）：
+        # 主密钥**只走环境变量**，绝不进命令行。
+        cmd = build_command(
+            builder_exe=builder_exe(),
+            manifest=self.manifest_path,
+            banks_dir=self.banks_dir,
+            stub=self.stub,
+            out=self.out,
+            keyfile=self.keyfile,
+        )
+        env = build_env(self.master_hex)
 
         try:
             self._proc = subprocess.Popen(

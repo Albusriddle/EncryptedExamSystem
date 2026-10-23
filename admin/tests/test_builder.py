@@ -1,23 +1,20 @@
-"""builder.py 的参数拼装测试。
+"""管理端打包相关逻辑的测试。
 
-不调用真实 exam-builder（CI 上未必有 release 构建），
-而是拦截 subprocess.run 检查命令行与环境变量——
-这两点恰好是最容易出错、后果最严重的地方：
+覆盖三块（都刻意与 Qt 解耦，CI 无 GUI 依赖也能跑）：
 
-- master 一旦进了命令行，同机任何用户都能从进程列表读到；
-- `--emit-keyfile` / `--no-embed-key` 拼错，教师拿到的包就用不了。
+1. `app/core/buildcmd` —— 命令行拼装：master 必须在环境变量里、`--force` 必须显式；
+2. `app/core/banks_io` —— 临时题库必须剥掉标准答案；
+3. `app/ui/tab_build` —— 路径推断（需 PySide6，缺依赖时跳过本组）。
 """
 
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
 
-from app.core import builder as bmod
-from app.core.builder import BuilderError, build_package
+from app.core.buildcmd import MASTER_ENV, build_command, build_env
 
 MASTER = "ab" * 32  # 64 hex
 
@@ -26,128 +23,53 @@ MASTER = "ab" * 32  # 64 hex
 STUB_NAME = "stub-template.exe" if os.name == "nt" else "stub-template"
 
 
-class _FakeProc:
-    def __init__(self, code: int = 0, out: str = "") -> None:
-        self.returncode = code
-        self.stdout = out
-        self.stderr = ""
+def _paths(tmp_path: Path) -> dict[str, Path]:
+    return {
+        "builder_exe": tmp_path / "exam-builder.exe",
+        "manifest": tmp_path / "manifest.json",
+        "banks_dir": tmp_path / "banks",
+        "stub": tmp_path / "stub.exe",
+        "out": tmp_path / "out.exe",
+    }
 
 
-@pytest.fixture
-def paths(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
-    builder_exe = tmp_path / "exam-builder.exe"
-    builder_exe.write_bytes(b"fake")
-    stub = tmp_path / "stub.exe"
-    stub.write_bytes(b"fake")
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text("{}", encoding="utf-8")
-    banks = tmp_path / "banks"
-    banks.mkdir()
-    return builder_exe, manifest, banks, stub
+# ---------------------------------------------------------------- 命令行拼装
 
 
-@pytest.fixture
-def captured(monkeypatch: pytest.MonkeyPatch) -> dict:
-    box: dict = {}
-
-    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
-        box["cmd"] = cmd
-        box["kwargs"] = kwargs
-        # 输出要跟着参数走，否则测不出 --no-embed-key 的差异
-        if "--no-embed-key" in cmd:
-            return _FakeProc(0, "⚠ 未内嵌密钥（--no-embed-key）：学生必须自行提供 --master。")
-        return _FakeProc(0, "✔ 已内嵌密钥：学生双击 exe 输入学号即可")
-
-    monkeypatch.setattr(bmod.subprocess, "run", fake_run)
-    return box
+def test_master_never_on_command_line(tmp_path: Path) -> None:
+    """master 只能走环境变量，绝不能出现在 argv 里。"""
+    p = _paths(tmp_path)
+    cmd = build_command(**p)
+    assert MASTER not in " ".join(cmd), "主密钥泄漏到命令行"
+    env = build_env(MASTER, base={})
+    assert env[MASTER_ENV] == MASTER
 
 
-def test_master_never_on_command_line(paths, captured: dict) -> None:
-    """master 只能走环境变量，绝不能出现 argv 里。"""
-    builder_exe, manifest, banks, stub = paths
-    build_package(builder_exe, manifest, banks, stub, stub, MASTER)
-    cmd = captured["cmd"]
-    joined = " ".join(str(c) for c in cmd)
-    assert MASTER not in joined, "主密钥泄漏到命令行"
-    assert captured["kwargs"]["env"]["EXAM_MASTER"] == MASTER
+def test_force_is_always_passed_by_admin(tmp_path: Path) -> None:
+    """管理端必须显式 --force：builder 默认拒绝覆盖（覆盖确认在界面上做过）。"""
+    p = _paths(tmp_path)
+    assert "--force" in build_command(**p)
+    assert "--force" not in build_command(**p, force=False)
 
 
-def test_default_embeds_key(paths, captured: dict) -> None:
-    builder_exe, manifest, banks, stub = paths
-    r = build_package(builder_exe, manifest, banks, stub, stub, MASTER)
-    assert "--no-embed-key" not in captured["cmd"]
-    assert r.embedded is True
+def test_emit_keyfile_only_when_requested(tmp_path: Path) -> None:
+    p = _paths(tmp_path)
+    kf = tmp_path / "kf.txt"
+    with_kf = build_command(**p, keyfile=kf)
+    assert "--emit-keyfile" in with_kf and str(kf) in with_kf
+    assert "--emit-keyfile" not in build_command(**p)
 
 
-def test_no_embed_key_flag(paths, captured: dict) -> None:
-    builder_exe, manifest, banks, stub = paths
-    r = build_package(builder_exe, manifest, banks, stub, stub, MASTER, embed_key=False)
-    assert "--no-embed-key" in captured["cmd"]
-    # 输出里没有"已内嵌密钥"，结果对象应如实反映
-    assert r.embedded is False
+def test_paths_are_passed_through(tmp_path: Path) -> None:
+    p = _paths(tmp_path)
+    cmd = build_command(**p)
+    for key in ("manifest", "banks_dir", "stub", "out"):
+        assert str(p[key]) in cmd, f"{key} 未传给 builder"
 
 
-def test_emit_keyfile_flag(paths, captured: dict) -> None:
-    builder_exe, manifest, banks, stub = paths
-    kf = stub.parent / "kf.txt"
-    r = build_package(builder_exe, manifest, banks, stub, stub, MASTER, emit_keyfile=kf)
-    assert "--emit-keyfile" in captured["cmd"]
-    assert str(kf) in captured["cmd"]
-    assert r.keyfile == kf
-
-
-def test_no_keyfile_flag_when_not_requested(paths, captured: dict) -> None:
-    builder_exe, manifest, banks, stub = paths
-    r = build_package(builder_exe, manifest, banks, stub, stub, MASTER)
-    assert "--emit-keyfile" not in captured["cmd"]
-    assert r.keyfile is None
-
-
-def test_output_decoded_as_utf8(paths, captured: dict) -> None:
-    """Windows 上必须显式 UTF-8，否则解码 Rust 输出的中文会崩。"""
-    builder_exe, manifest, banks, stub = paths
-    build_package(builder_exe, manifest, banks, stub, stub, MASTER)
-    assert captured["kwargs"]["encoding"] == "utf-8"
-    assert captured["kwargs"]["errors"] == "replace"
-
-
-def test_missing_builder_raises(tmp_path: Path) -> None:
-    with pytest.raises(BuilderError, match="找不到 builder"):
-        build_package(
-            tmp_path / "nope.exe",
-            tmp_path / "m.json",
-            tmp_path,
-            tmp_path / "s.exe",
-            tmp_path / "o.exe",
-            MASTER,
-        )
-
-
-def test_bad_master_length_raises(paths) -> None:
-    builder_exe, manifest, banks, stub = paths
-    with pytest.raises(BuilderError, match="64 位十六进制"):
-        build_package(builder_exe, manifest, banks, stub, stub, "abc")
-
-
-def test_failure_reports_not_ok(paths, monkeypatch: pytest.MonkeyPatch) -> None:
-    builder_exe, manifest, banks, stub = paths
-    monkeypatch.setattr(bmod.subprocess, "run", lambda *a, **k: _FakeProc(2, ""))
-    r = build_package(builder_exe, manifest, banks, stub, stub, MASTER)
-    assert r.ok is False
-    assert r.package is None
-    assert r.embedded is False
-
-
-def test_timeout_propagates(paths, monkeypatch: pytest.MonkeyPatch) -> None:
-    """打包超时不应被静默吞掉。"""
-
-    def boom(*a, **k):  # noqa: ANN002, ANN003
-        raise subprocess.TimeoutExpired(cmd="exam-builder", timeout=1)
-
-    monkeypatch.setattr(bmod.subprocess, "run", boom)
-    builder_exe, manifest, banks, stub = paths
-    with pytest.raises(subprocess.TimeoutExpired):
-        build_package(builder_exe, manifest, banks, stub, stub, MASTER)
+def test_no_embed_key_not_used_by_admin(tmp_path: Path) -> None:
+    """管理端永远要内嵌密钥（学生零配置）。"""
+    assert "--no-embed-key" not in build_command(**_paths(tmp_path))
 
 
 # ---------------------------------------------------------------- 答案泄漏防线

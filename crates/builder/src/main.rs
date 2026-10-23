@@ -39,6 +39,12 @@ enum Cmd {
         /// 输出文件
         #[arg(long)]
         out: PathBuf,
+        /// 允许使用低于生产强度的 KDF/salt（仅用于演示与自动化测试）。
+        ///
+        /// 默认拒绝：m=8/t=1 的包能正常构建，但枚举 10^5 个学号只需几秒，
+        /// 名单保密形同虚设。这个开关存在的唯一目的是让测试不必等 91ms/人。
+        #[arg(long)]
+        allow_weak_kdf: bool,
         /// 允许覆盖已存在的输出文件。
         ///
         /// 默认拒绝：旧实现直接覆盖，教师可能把上一次的包（连同上一场数据）
@@ -134,6 +140,7 @@ fn main() -> Result<()> {
             banks,
             stub,
             out,
+            allow_weak_kdf,
             force,
             master,
             master_file,
@@ -146,6 +153,7 @@ fn main() -> Result<()> {
                 banks_dir: banks,
                 stub_path: stub,
                 out_path: out,
+                allow_weak_kdf,
                 force,
                 master_hex: key,
                 emit_keyfile,
@@ -200,6 +208,7 @@ struct BuildRequest {
     banks_dir: PathBuf,
     stub_path: PathBuf,
     out_path: PathBuf,
+    allow_weak_kdf: bool,
     force: bool,
     master_hex: String,
     emit_keyfile: Option<PathBuf>,
@@ -212,6 +221,7 @@ fn build(req: BuildRequest) -> Result<()> {
         banks_dir,
         stub_path,
         out_path,
+        allow_weak_kdf,
         force,
         master_hex,
         emit_keyfile,
@@ -225,6 +235,35 @@ fn build(req: BuildRequest) -> Result<()> {
     // 这类错误必须在打包时就炸，绝不能留到考场上。
     let master = crypto::master_from_hex(&master_hex).context("解析主密钥")?;
     let salt = hex::decode(&manifest.salt).context("manifest.salt 必须是 hex")?;
+
+    // 生产强度校验：管理端有同样的下限，但 `--manifest` 是文档化的官方
+    // 用法，手工写清单会完全绕过 Python 校验。弱参数的包能被正常构建，
+    // 但名单可在秒级被枚举完——必须在打包这一步拦住。
+    let kdf = manifest.kdf;
+    let weak =
+        !kdf.meets_production_strength() || salt.len() < crypto::KdfParams::PROD_MIN_SALT_LEN;
+    if weak {
+        let detail = format!(
+            "KDF: Argon2id(m={}, t={}, p={})，salt {} 字节",
+            kdf.m_cost,
+            kdf.t_cost,
+            kdf.p_cost,
+            salt.len()
+        );
+        if allow_weak_kdf {
+            println!("⚠ 警告：使用弱 KDF/salt 打包（{detail}）——仅限演示，切勿分发。");
+        } else {
+            anyhow::bail!(
+                "KDF/salt 低于生产强度，拒绝打包：{detail}\n\
+                 要求 m_cost ≥ {}、t_cost ≥ {}、salt ≥ {} 字节。\n\
+                 弱参数会让名单在几秒内被枚举完，等于放弃名单保密。\n\
+                 仅用于演示/测试时，加 --allow-weak-kdf 显式放行。",
+                crypto::KdfParams::PROD_MIN_M_COST,
+                crypto::KdfParams::PROD_MIN_T_COST,
+                crypto::KdfParams::PROD_MIN_SALT_LEN
+            );
+        }
+    }
     // 清单自身校验（时间窗倒挂、重复学号、场次编号重复）。
     // build_payload 内部也会做，这里提前给出带上下文的报错。
     container::validate_sessions(&manifest.sessions).context("清单校验失败")?;

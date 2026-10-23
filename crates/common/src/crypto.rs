@@ -111,6 +111,27 @@ impl KdfParams {
         Ok(())
     }
 
+    /// 生产强度下限：低于此值，名单可在秒级被枚举完。
+    ///
+    /// 与管理端 `models.py::KdfParams` 的下限保持一致。
+    pub const PROD_MIN_M_COST: u32 = 65_536;
+    pub const PROD_MIN_T_COST: u32 = 3;
+    /// 生产强度的 salt 最小字节数（管理端同值）。
+    pub const PROD_MIN_SALT_LEN: usize = 16;
+
+    /// 参数是否达到生产强度。
+    ///
+    /// 与 [`validate`](Self::validate) 的区别：
+    /// - `validate` 只管"能不能安全地算"（防止 TB 级内存分配）；
+    /// - 本函数管"够不够强"——m=8/t=1 能算，但枚举成本几乎为零。
+    ///
+    /// 为什么要单独有这一层：管理端有严格下限，但 `--manifest` 是文档化的
+    /// 官方用法，手工写清单会完全绕过 Python 校验。实测 m=8/t=1 可以直接
+    /// 打包成功，而这样的包枚举 10^5 个学号只需几秒。
+    pub fn meets_production_strength(&self) -> bool {
+        self.m_cost >= Self::PROD_MIN_M_COST && self.t_cost >= Self::PROD_MIN_T_COST
+    }
+
     /// 仅供测试使用的最低成本参数。
     pub fn cheap_for_tests() -> Self {
         Self {
@@ -348,6 +369,37 @@ mod tests {
             assert!(bad.validate().is_err(), "应当拒绝越界参数: {bad:?}");
         }
         assert!(KdfParams::cheap_for_tests().validate().is_ok());
+    }
+
+    /// 生产强度判定：默认参数通过，廉价参数不通过。
+    #[test]
+    fn production_strength_threshold() {
+        assert!(KdfParams::default().meets_production_strength());
+        assert!(!KdfParams::cheap_for_tests().meets_production_strength());
+        assert!(
+            !KdfParams {
+                m_cost: 8,
+                t_cost: 3,
+                p_cost: 1
+            }
+            .meets_production_strength()
+        );
+        assert!(
+            !KdfParams {
+                m_cost: 65536,
+                t_cost: 1,
+                p_cost: 1
+            }
+            .meets_production_strength()
+        );
+        assert!(
+            KdfParams {
+                m_cost: 65536,
+                t_cost: 3,
+                p_cost: 1
+            }
+            .meets_production_strength()
+        );
     }
 
     /// 越界参数在派生阶段就被挡住，不会真的去分配内存。

@@ -1,4 +1,8 @@
-//! 数据模型：题库、场次、清单（manifest）。与 schemas/ 下的 JSON Schema 保持一致。
+//! 数据模型：题库、场次、清单（manifest）。
+//!
+//! `schemas/*.schema.json` 由管理端的 pydantic 模型生成
+//! （`cd admin && uv run python buildtools/gen_schemas.py`），
+//! `admin/tests/test_schemas.py` 会在两者不一致时失败。
 
 use serde::{Deserialize, Serialize};
 

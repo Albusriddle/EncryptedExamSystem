@@ -1,0 +1,119 @@
+{
+  "$defs": {
+    "KdfParams": {
+      "description": "Argon2id 参数。与 Rust 端 crypto::KdfParams 对应。\n\n这些值同时决定\"打包耗时\"与\"攻击者枚举名单的成本\"：\n- 默认 m=65536(64MiB) / t=3 / p=1，单次约 92ms（本机实测）；\n- 1000 名学生的包约 12 秒（8 线程）；\n- 攻击者 8 线程枚举 10^5 个学号约 19 分钟。\n**不要为了\"打包快\"把这些值调低。** 旧默认 19MiB/t=2 实测只需 3.8 分钟即可枚举完。",
+      "properties": {
+        "m_cost": {
+          "default": 65536,
+          "title": "M Cost",
+          "type": "integer"
+        },
+        "t_cost": {
+          "default": 3,
+          "title": "T Cost",
+          "type": "integer"
+        },
+        "p_cost": {
+          "default": 1,
+          "title": "P Cost",
+          "type": "integer"
+        }
+      },
+      "title": "KdfParams",
+      "type": "object"
+    },
+    "Session": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "integer"
+        },
+        "start": {
+          "title": "Start",
+          "type": "string"
+        },
+        "end": {
+          "title": "End",
+          "type": "string"
+        },
+        "students": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Students",
+          "type": "array"
+        },
+        "exams": {
+          "items": {
+            "$ref": "#/$defs/SessionExam"
+          },
+          "title": "Exams",
+          "type": "array"
+        }
+      },
+      "required": [
+        "session_id",
+        "start",
+        "end",
+        "students",
+        "exams"
+      ],
+      "title": "Session",
+      "type": "object"
+    },
+    "SessionExam": {
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "pick": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pick"
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "title": "SessionExam",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "version": {
+      "default": 2,
+      "title": "Version",
+      "type": "integer"
+    },
+    "salt": {
+      "title": "Salt",
+      "type": "string"
+    },
+    "sessions": {
+      "items": {
+        "$ref": "#/$defs/Session"
+      },
+      "title": "Sessions",
+      "type": "array"
+    },
+    "kdf": {
+      "$ref": "#/$defs/KdfParams"
+    }
+  },
+  "required": [
+    "salt",
+    "sessions"
+  ],
+  "title": "保密考试系统 · 构建清单",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "由 admin/buildtools/gen_schemas.py 自动生成（v1），请勿手改。"
+}

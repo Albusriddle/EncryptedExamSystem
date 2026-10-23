@@ -1,0 +1,82 @@
+{
+  "$defs": {
+    "Question": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "stem": {
+          "title": "Stem",
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "answer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answer"
+        },
+        "score": {
+          "default": 2,
+          "title": "Score",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "stem"
+      ],
+      "title": "Question",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "exam_id": {
+      "title": "Exam Id",
+      "type": "string"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "pick": {
+      "title": "Pick",
+      "type": "integer"
+    },
+    "questions": {
+      "items": {
+        "$ref": "#/$defs/Question"
+      },
+      "title": "Questions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "exam_id",
+    "title",
+    "pick",
+    "questions"
+  ],
+  "title": "保密考试系统 · 题库文件",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "由 admin/buildtools/gen_schemas.py 自动生成（v1），请勿手改。"
+}
