@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from app.core.bank_import import load_paths
 from app.core.state import ProjectState
+from app.ui.import_dialog import ImportConfirmDialog
 
 
 class BanksTab(QWidget):
@@ -65,6 +66,13 @@ class BanksTab(QWidget):
             return
 
         loaded, errors, warns = load_paths([Path(p) for p in paths])
+
+        # 导入前确认：允许改题库 ID 与显示名称（文件名往往是 choice/fill 这种通用词）
+        if loaded:
+            dlg = ImportConfirmDialog(loaded, self)
+            if dlg.exec() != dlg.DialogCode.Accepted:
+                return
+
         incoming = [x.bank for x in loaded]
 
         # 冲突确认：同一 exam_id 已存在时**不能静默覆盖**。
@@ -143,8 +151,19 @@ class BanksTab(QWidget):
         lines = [f"{bank.title}（{exam_id}）共 {len(bank.questions)} 题", ""]
         for q in bank.questions[:10]:
             lines.append(f"[{q.qtype}] {q.stem}")
-            for i, opt in enumerate(q.options):
-                lines.append(f"    {chr(ord('A') + i)}. {opt}")
+            # 按正文形态展示：模板/代码题若只打 options，预览里看起来像空题
+            if q.body.kind == "options":
+                for opt in q.body.options:
+                    lines.append(f"    {opt.key}. {opt.text}")
+            elif q.body.kind == "template":
+                lines.append(f"    （{q.body.blank_count} 处空白）")
+                lines.extend(f"    | {ln}" for ln in (q.body.template or "").splitlines())
+            elif q.body.kind == "code":
+                lines.append(f"    （{q.body.blank_count} 处错误）")
+                lines.extend(f"    {i + 1:>3}| {ln}" for i, ln in enumerate(q.body.code))
+            else:
+                for i, opt in enumerate(q.options):
+                    lines.append(f"    {chr(ord('A') + i)}. {opt}")
             lines.append("")
         if len(bank.questions) > 10:
             lines.append(f"…还有 {len(bank.questions) - 10} 题")

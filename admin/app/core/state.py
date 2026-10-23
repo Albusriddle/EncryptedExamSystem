@@ -23,6 +23,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from app.core.bank_import import BankImportError, load_bank_from_path
 from app.core.models import ExamBank, KdfParams, Manifest, Session
 
 
@@ -289,14 +290,21 @@ class ProjectState:
         st.sessions = [Session.model_validate(s) for s in data.get("sessions", [])]
         st.bank_paths = dict(data.get("bank_paths", {}))
 
-        # 重新读取题库：源文件可能已被教师修改
+        # 重新读取题库：源文件可能已被教师修改。
+        #
+        # 必须走 `load_bank_from_path` 而不是直接 `ExamBank.model_validate_json`：
+        # 外部题库的源文件是 `X.questions.json`（题目/答案分离的格式），
+        # 按原生形状解析必然失败，题库会被静默丢弃——实测重开工程后
+        # "题库全没了"。这里由适配器负责识别格式并合并答案。
         for exam_id, p in st.bank_paths.items():
             try:
-                text = Path(p).read_text(encoding="utf-8")
-                st.banks[exam_id] = ExamBank.model_validate_json(text)
-            except (OSError, UnicodeDecodeError, ValidationError):
+                bank = load_bank_from_path(Path(p))
+            except (OSError, UnicodeDecodeError, ValidationError, BankImportError, ValueError):
                 # 读不到或已失效：保留路径记录，由 UI 提示教师重新导入
-                pass
+                continue
+            # 以工程里记录的 exam_id 为准（教师可能在导入后改过名）
+            bank.exam_id = exam_id
+            st.banks[exam_id] = bank
         return st
 
     # ---------------------------------------------------------------- 统计

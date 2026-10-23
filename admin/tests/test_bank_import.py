@@ -312,8 +312,77 @@ def test_temp_banks_strip_answer_and_judge(tmp_path: Path) -> None:
     text = (tmp_path / "fix.json").read_text(encoding="utf-8")
     assert "judge" not in text
     assert "harness" not in text
-    assert "answer" not in text.replace('"answer"', "", 0) or True  # 见下：逐字段断言
     data = json.loads(text)
     q0 = data["questions"][0]
     assert "judge" not in q0
     assert "answer" not in q0
+
+
+# ---------------------------------------------------------------- 第七轮补的校验
+
+
+def test_answer_letters_must_exist_in_options() -> None:
+    q, a = _q(), _a()
+    a["answers"][0]["verdict"] = {"kind": "single", "answer": "E"}
+    with pytest.raises(BankImportError, match="不在选项"):
+        convert_pair(q, a, exam_id="demo", title="演示")
+
+
+def test_multi_answer_letters_checked_and_unique() -> None:
+    q, a = _q(), _a()
+    a["answers"][1]["verdict"] = {"kind": "multi", "answer": ["A", "Z"]}
+    with pytest.raises(BankImportError, match="不在选项"):
+        convert_pair(q, a, exam_id="demo", title="演示")
+
+    a["answers"][1]["verdict"] = {"kind": "multi", "answer": ["A", "A"]}
+    with pytest.raises(BankImportError, match="重复字母"):
+        convert_pair(q, a, exam_id="demo", title="演示")
+
+
+def test_duplicate_answer_ids_rejected() -> None:
+    q, a = _q(), _a()
+    a["answers"][1]["id"] = "CH-001"
+    with pytest.raises(BankImportError, match="答案 ID 重复"):
+        convert_pair(q, a, exam_id="demo", title="演示")
+
+
+def test_same_base_name_in_two_dirs_is_reported(tmp_path: Path) -> None:
+    """两个目录下都叫 choice 的题库不能被静默合并成一个。"""
+    made = []
+    for d in ("a", "b"):
+        folder = tmp_path / d
+        folder.mkdir()
+        made.append(_write(folder / "choice.questions.json", _q()))
+        _write(folder / "choice.answers.json", _a())
+
+    loaded, errors, _ = load_paths(made)
+    # 第一个正常导入，第二个必须**明确报错**（而不是悄悄覆盖第一个）
+    assert len(loaded) == 1
+    assert errors and "题库名相同" in errors[0]
+
+
+def test_reopening_project_keeps_external_banks(tmp_path: Path) -> None:
+    """回归：导入外部题库 → 保存工程 → 重开，题库不能丢。
+
+    旧实现 `load` 只按原生 ExamBank 形状解析，外部 questions 文件必然失败，
+    题库被静默丢弃（界面上表现为"题库缺失，请重新导入"）。
+    """
+    from app.core.state import ProjectState
+
+    _write(tmp_path / "demo.questions.json", _q())
+    _write(tmp_path / "demo.answers.json", _a())
+
+    loaded, errors, _ = load_paths([tmp_path / "demo.questions.json"])
+    assert not errors, errors
+
+    st = ProjectState()
+    for item in loaded:
+        st.banks[item.bank.exam_id] = item.bank
+        st.bank_paths[item.bank.exam_id] = str(item.source.resolve())
+    st.students = [2021001]
+    st.save(tmp_path / "project.json")
+
+    st2 = ProjectState.load(tmp_path / "project.json")
+    assert list(st2.banks) == ["demo"], "重开工程后题库丢了"
+    assert len(st2.banks["demo"].questions) == 2
+    assert st2.banks["demo"].questions[0].body.kind == "options"

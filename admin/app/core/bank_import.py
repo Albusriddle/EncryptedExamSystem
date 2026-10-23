@@ -106,15 +106,19 @@ def base_name(path: Path) -> str:
 
 
 def _sibling_answers(path: Path) -> Path | None:
-    """给题目文件找同类名的答案文件（同目录）。"""
+    """给题目文件找同类名的答案文件（同目录）。
+
+    先按**文件名**找（`X.answers.json` / `X.answers(1).json`），命中后再校验
+    内容确实是答案文件；找不到才退化为扫描。
+
+    旧实现直接遍历同目录所有 `*.json` 并逐个 `json.loads`——一个目录里放几百个
+    题库时，导入一个文件会把整个目录解析一遍。
+    """
     stem = base_name(path)
-    for cand in path.parent.glob("*.json"):
-        if (
-            base_name(cand) == stem
-            and cand != path
-            and detect(_safe_load(cand)) == "exam_v2_answers"
-        ):
-            return cand
+    for pattern in (f"{stem}.answers.json", f"{stem}.answers*.json"):
+        for cand in sorted(path.parent.glob(pattern)):
+            if cand != path and detect(_safe_load(cand)) == "exam_v2_answers":
+                return cand
     return None
 
 
@@ -163,6 +167,10 @@ def convert_pair(
     dup = {i for i in q_ids if q_ids.count(i) > 1}
     if dup:
         raise BankImportError(f"{q_name}: 题目 ID 重复：{', '.join(sorted(dup)[:5])}")
+    dup_a = {i for i in a_ids if a_ids.count(i) > 1}
+    if dup_a:
+        # 重复的答案 id 会让 by_id 静默取最后一条，等于悄悄改答案
+        raise BankImportError(f"{a_name}: 答案 ID 重复：{', '.join(sorted(dup_a)[:5])}")
     missing = set(q_ids) - set(a_ids)
     orphan = set(a_ids) - set(q_ids)
     if missing or orphan:
@@ -241,6 +249,20 @@ def _convert_one(
             )
 
     body, internal_type = _build_body(qtype, kind, content, difficulty, verdict, where)
+
+    if qtype == "choice":
+        keys = {o.key for o in body.options}
+        raw_answer = verdict.get("answer")
+        letters = [raw_answer] if vkind == "single" else list(raw_answer or [])
+        if not letters:
+            raise BankImportError(f"{where}: 答案为空")
+        bad = [x for x in letters if x not in keys]
+        if bad:
+            raise BankImportError(
+                f"{where}: 答案 {bad} 不在选项 {sorted(keys)} 中——学生永远选不到正确项"
+            )
+        if len(set(letters)) != len(letters):
+            raise BankImportError(f"{where}: 多选答案里有重复字母：{letters}")
 
     return Question(
         id=qid,
@@ -371,7 +393,8 @@ def load_paths(paths: list[Path]) -> tuple[list[ImportedBank], list[str], list[s
         if fmt == "native":
             natives.append(p)
         elif fmt in ("exam_v2_questions", "exam_v2_answers"):
-            groups.setdefault(base_name(p), {})[fmt] = (p, payload)
+            # 键里带父目录：两个目录下都叫 choice 的题库不能被悄悄合并成一个
+            groups.setdefault((str(p.parent.resolve()), base_name(p)), {})[fmt] = (p, payload)
         else:
             errors.append(
                 f"{p.name}: 无法识别的格式。\n"
@@ -379,7 +402,8 @@ def load_paths(paths: list[Path]) -> tuple[list[ImportedBank], list[str], list[s
                 f"或 format_version={SUPPORTED_FORMAT_VERSION} 的题目/答案文件。"
             )
 
-    for key, pair in groups.items():
+    seen_exam_ids: dict[str, Path] = {}
+    for (parent, key), pair in groups.items():
         q_pair = pair.get("exam_v2_questions")
         a_pair = pair.get("exam_v2_answers")
         if q_pair is None:
@@ -387,6 +411,7 @@ def load_paths(paths: list[Path]) -> tuple[list[ImportedBank], list[str], list[s
             errors.append(f"{name}: 只有答案文件，缺少同名的 .questions.json")
             continue
         q_path, q_payload = q_pair
+        _ = parent  # 仅用于分组键唯一化
         if a_pair is None:
             sibling = _sibling_answers(q_path)
             if sibling is None:
@@ -401,6 +426,15 @@ def load_paths(paths: list[Path]) -> tuple[list[ImportedBank], list[str], list[s
         except ValueError as e:
             errors.append(f"{q_path.name}: 题库名 {key!r} 不能用作文件名——{e}")
             continue
+        if exam_id in seen_exam_ids:
+            other = seen_exam_ids[exam_id]
+            errors.append(
+                f"{q_path.name}: 与 {other.parent.name}/{other.name} 的题库名"
+                f"相同（{exam_id!r}）。\n"
+                "  请把其中一个文件改名后再导入，否则两个题库会互相覆盖。"
+            )
+            continue
+        seen_exam_ids[exam_id] = q_path
         try:
             item = convert_pair(
                 q_payload,
@@ -426,3 +460,42 @@ def load_paths(paths: list[Path]) -> tuple[list[ImportedBank], list[str], list[s
         loaded.append(ImportedBank(bank=bank, source=p))
 
     return loaded, errors, warnings
+
+
+def load_bank_from_path(path: Path) -> ExamBank:
+    """从**任意支持格式**的文件加载一个题库（供工程重开时使用）。
+
+    工程文件里只存 `bank_paths`，不存题库内容——教师会持续修改源文件。
+    但外部题库的源文件是 `X.questions.json`（不是本程序的 ExamBank 形状），
+    所以重开工程时必须走同一套转换逻辑，否则题库会被静默丢弃。
+
+    异常统一用 `BankImportError`，调用方负责展示。
+    """
+    payload = _safe_load(path)
+    if payload is None:
+        raise BankImportError(f"{path.name}: 不是合法的 UTF-8 JSON")
+
+    fmt = detect(payload)
+    if fmt == "native":
+        return ExamBank.model_validate(payload)
+
+    if fmt == "exam_v2_answers":
+        raise BankImportError(f"{path.name}: 这是答案文件，工程里应记录题目文件")
+
+    if fmt != "exam_v2_questions":
+        raise BankImportError(f"{path.name}: 无法识别的题库格式")
+
+    answers = _sibling_answers(path)
+    if answers is None:
+        raise BankImportError(f"{path.name}: 找不到同名答案文件（{base_name(path)}.answers.json）")
+
+    base = base_name(path)
+    item = convert_pair(
+        payload,
+        _safe_load(answers) or {},
+        exam_id=validate_exam_id(base),
+        title=base,
+        q_name=path.name,
+        a_name=answers.name,
+    )
+    return item.bank

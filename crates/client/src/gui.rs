@@ -590,7 +590,10 @@ fn render_body(ui: &mut egui::Ui, item: &common::picker::PaperItem) {
                 .fill(ui.visuals().extreme_bg_color)
                 .inner_margin(egui::Margin::same(8.0))
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new(template).monospace().size(13.0));
+                    // 横向滚动：代码行不能被裁掉，裁掉等于看不到后半句
+                    egui::ScrollArea::horizontal().show(ui, |ui| {
+                        ui.label(egui::RichText::new(template).monospace().size(13.0));
+                    });
                 });
         }
         QuestionBody::Code { code, blank_count } => {
@@ -603,14 +606,16 @@ fn render_body(ui: &mut egui::Ui, item: &common::picker::PaperItem) {
                 .fill(ui.visuals().extreme_bg_color)
                 .inner_margin(egui::Margin::same(8.0))
                 .show(ui, |ui| {
-                    for (i, line) in code.iter().enumerate() {
-                        // 行号右对齐到 3 位，代码才能对齐成块
-                        ui.label(
-                            egui::RichText::new(format!("{:>3}  {}", i + 1, line))
-                                .monospace()
-                                .size(13.0),
-                        );
-                    }
+                    egui::ScrollArea::horizontal().show(ui, |ui| {
+                        for (i, line) in code.iter().enumerate() {
+                            // 行号右对齐到 3 位，代码才能对齐成块
+                            ui.label(
+                                egui::RichText::new(format!("{:>3}  {}", i + 1, line))
+                                    .monospace()
+                                    .size(13.0),
+                            );
+                        }
+                    });
                 });
         }
         QuestionBody::Text => {
