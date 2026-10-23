@@ -53,6 +53,9 @@ class TimelineWidget(QWidget):
     def set_sessions(self, sessions: list[Session], overlap_ids: set[int]) -> None:
         self.sessions = sessions
         self.overlap_ids = overlap_ids
+        # 高度必须随场次数增长：每行约 17pt（row_h 最小 14 + 间距 3），
+        # 固定 110pt 时 10 个场次会被裁掉一半（考场编排正是 10 场量级）。
+        self.setMinimumHeight(max(110, 26 + len(sessions) * 17))
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名

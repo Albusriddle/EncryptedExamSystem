@@ -252,6 +252,19 @@ fn parse_http_date(s: &str) -> Option<u64> {
     Some(days_from_civil(year as i64, month as i64, day as i64) * 86400 + h * 3600 + m * 60 + sec)
 }
 
+/// 某年某月的天数（含闰年规则）。
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            if leap { 29 } else { 28 }
+        }
+        _ => 0,
+    }
+}
+
 /// 公历日期 → 距 1970-01-01 的天数（Howard Hinnant 算法）。
 fn days_from_civil(y: i64, m: i64, d: i64) -> u64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -478,6 +491,23 @@ mod tests {
         assert!(matches!(err, TimeError::AllFailed(_)));
     }
 
+    /// 日历合法性：2 月 31 日不能被静默算成 3 月 3 日。
+    #[test]
+    fn parse_rejects_nonexistent_calendar_dates() {
+        assert_eq!(parse_rfc3339("2026-02-31T10:00:00+08:00"), None);
+        assert_eq!(parse_rfc3339("2026-04-31T10:00:00+08:00"), None);
+        assert_eq!(
+            parse_rfc3339("2026-02-29T10:00:00+08:00"),
+            None,
+            "2026 不是闰年"
+        );
+        // 闰年 2 月 29 必须正常
+        assert!(parse_rfc3339("2024-02-29T10:00:00+08:00").is_some());
+        // 月末合法日期
+        assert!(parse_rfc3339("2026-01-31T10:00:00+08:00").is_some());
+        assert!(parse_rfc3339("2026-12-31T10:00:00+08:00").is_some());
+    }
+
     #[test]
     fn parse_standard_http_date() {
         assert_eq!(
@@ -668,6 +698,11 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
     }
     let (y, mo, da): (i64, i64, i64) = (d[0].parse().ok()?, d[1].parse().ok()?, d[2].parse().ok()?);
     if !(1..=12).contains(&mo) || !(1..=31).contains(&da) {
+        return None;
+    }
+    // 日历合法性：只查 1..=31 会把 2026-02-31 静默算成 3 月 3 日。
+    // 两端必须同时拦（Python 侧用 datetime.date 校验）。
+    if da > days_in_month(y, mo) {
         return None;
     }
 

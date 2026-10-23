@@ -278,9 +278,12 @@ class ProjectState:
     def load(cls, path: Path) -> ProjectState:
         """加载工程配置，并重新读取题库源文件（校验其仍然合法）。"""
         data = json.loads(path.read_text(encoding="utf-8"))
+        salt = data.get("salt")
+        if not salt:
+            raise ValueError(f"{path.name} 缺少 salt 字段，可能不是本程序保存的工程文件。")
         st = cls(
             kdf=KdfParams.model_validate(data.get("kdf", {})),
-            salt=data["salt"],
+            salt=salt,
             students=list(data.get("students", [])),
         )
         st.sessions = [Session.model_validate(s) for s in data.get("sessions", [])]

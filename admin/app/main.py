@@ -81,9 +81,18 @@ def selftest() -> int:
         import pydantic  # noqa: F401
         from PySide6.QtWidgets import QApplication  # noqa: F401
 
+        from app.branding import branding
         from app.core.models import Manifest  # noqa: F401
         from app.core.state import ProjectState  # noqa: F401
         from app.ui.main_window import MainWindow  # noqa: F401
+
+        # 品牌信息必须真的打进包：漏了 branding.json 时程序照常启动，
+        # 只是欢迎弹窗的"致谢"会空着——这种静默降级必须在这里拦下。
+        b = branding()
+        if not b.repo_url or len(b.credits) < 3:
+            raise RuntimeError(
+                f"branding.json 未正确打包（仓库={b.repo_url!r}, 致谢 {len(b.credits)} 项）"
+            )
     except Exception:  # noqa: BLE001 - 打印完整栈以便打包时定位
         import traceback
 
@@ -106,6 +115,7 @@ def main() -> int:
         for _ in range(10):
             app.processEvents()
         out = Path(sys.argv[sys.argv.index("--dump-ui") + 1])
+        out.mkdir(parents=True, exist_ok=True)  # 目录不存在时 write_text 会抛异常
         win.grab().save(str(out / "window.png"))
         bar = win.findChild(QToolBar)
         if bar is not None:

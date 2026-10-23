@@ -38,6 +38,14 @@ def parse_rfc3339(s: str) -> int:
         raise TimeParseError(f"日期含非数字: {date_part!r}") from exc
     if not (1 <= month <= 12) or not (1 <= day <= 31):
         raise TimeParseError(f"月/日超出范围: {date_part!r}")
+    # 日历合法性：只查 1..=31 会把 2026-02-31 静默算成 3 月 3 日。
+    # 与 Rust 的 days_in_month 校验保持一致。
+    import datetime as _dt
+
+    try:
+        _dt.date(year, month, day)
+    except ValueError as exc:
+        raise TimeParseError(f"日期不存在: {date_part!r}") from exc
 
     # 时区偏移
     offset = 0

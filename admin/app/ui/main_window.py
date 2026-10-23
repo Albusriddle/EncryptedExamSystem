@@ -30,13 +30,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.branding import branding
 from app.core.models import Manifest
 from app.core.state import ProjectState
 from app.ui.tab_banks import BanksTab
 from app.ui.tab_build import BuildTab
 from app.ui.tab_sessions import SessionsTab
 from app.ui.tab_students import StudentsTab
-from app.version import watermark
+from app.version import app_version, watermark
 
 
 class MainWindow(QMainWindow):
@@ -85,9 +86,10 @@ class MainWindow(QMainWindow):
         bar.addWidget(spacer)
         self.watermark_label = QLabel(watermark())
         self.watermark_label.setObjectName("watermark")
-        self.watermark_label.setToolTip(
-            "保密考试系统（EES）· 版本 " + watermark().split()[1].lstrip("v")
-        )
+        # 直接用版本号，不要从水印字符串里切：
+        # `watermark().split()[1]` 依赖 "ABBR vX.Y.Z Powered by N" 这个形状，
+        # 品牌缩写一旦带空格就会 IndexError。
+        self.watermark_label.setToolTip(f"{branding().display_name()} · 版本 {app_version()}")
         # 显式颜色：palette(mid) 在深色主题下几乎与背景同色，实测看不见。
         self.watermark_label.setStyleSheet("color: #9aa0a6; padding-right: 12px; font-size: 11px;")
         bar.addWidget(self.watermark_label)

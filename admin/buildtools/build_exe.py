@@ -49,10 +49,21 @@ def find_artifact(name: str, root: Path | None = None) -> Path | None:
     ]
     for d in sorted((base / "target").glob("*/release")):
         candidates.append(d / name)
-    for c in candidates:
-        if c.is_file():
-            return c
-    return None
+    # 多个位置都有产物时取**最新**的：本机常常同时留着 target/release 与
+    # target/<triple>/release，固定取前者可能拿到很久以前的旧 stub，
+    # 打出来的发布包里学生端就是旧版本。
+    #
+    # 但同一批构建产物的 mtime 只差几毫秒，这种情况下仍按"本地优先"，
+    # 只有别的布局明显更新（>1 秒）才改用后者——既避免拿到旧产物，
+    # 又不改变"本机默认构建优先"的既有语义。
+    found = [c for c in candidates if c.is_file()]
+    if not found:
+        return None
+    local = found[0]
+    newest = max(found, key=lambda p: p.stat().st_mtime)
+    if newest != local and newest.stat().st_mtime - local.stat().st_mtime <= 1.0:
+        return local
+    return newest
 
 
 BUILDER = find_artifact(f"exam-builder{EXE}")

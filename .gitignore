@@ -67,3 +67,5 @@ bank*.json
 examadm-*/
 # 仓库根目录不该出现独立 .rs（工作区代码都在 crates/ 下）
 /*.rs
+# 本地临时测试目录（advisor: 每次打包测试都会产生）
+.t/

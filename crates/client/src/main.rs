@@ -66,6 +66,14 @@ fn install_broken_pipe_guard() {
     }));
 }
 
+/// 是否进入命令行模式。
+///
+/// 只有出现 `--xxx` 形式的开关才算——拖拽文件、快捷方式带路径都会传
+/// 裸路径参数，那些一律当作"想开图形界面"。
+fn wants_cli(args: &[String]) -> bool {
+    args.iter().any(|a| a.starts_with('-'))
+}
+
 fn main() -> Result<()> {
     install_broken_pipe_guard();
     // 触碰标记常量，确保它被链接进二进制（builder 依赖它判断 stub 状态）。
@@ -73,8 +81,16 @@ fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.is_empty() {
+    if !wants_cli(&args) {
         // GUI 模式：学生双击启动。
+        //
+        // 判据不是"没有参数"，而是"没有 -- 开关"：
+        // 资源管理器里把文件拖到 exe 图标上会把文件路径塞进 argv，
+        // 旧判据会因此进 CLI → clap 报错 → release 是 windows 子系统、
+        // 没有控制台，学生看到的就是"双击没反应"。
+        if !args.is_empty() {
+            eprintln!("⚠ 忽略非选项参数：{args:?}（以图形界面启动）");
+        }
         let opts = UnlockOpts::default();
         return gui::run(opts).map_err(|e| anyhow::anyhow!("GUI 启动失败: {e}"));
     }
@@ -137,5 +153,34 @@ fn print_result(unlocked: &Unlocked) {
             }
         }
         println!();
+    }
+}
+
+#[cfg(test)]
+mod cli_mode_tests {
+    use super::wants_cli;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_args_means_gui() {
+        assert!(!wants_cli(&[]));
+    }
+
+    /// 拖拽文件/快捷方式带路径：必须当 GUI，否则学生会看到"没反应"。
+    #[test]
+    fn bare_path_means_gui() {
+        assert!(!wants_cli(&v(&["C:/exam/S.exe"])));
+        assert!(!wants_cli(&v(&["C:/a b/c.txt", "another"])));
+    }
+
+    #[test]
+    fn flags_mean_cli() {
+        assert!(wants_cli(&v(&["--student", "123"])));
+        assert!(wants_cli(&v(&["--help"])));
+        assert!(wants_cli(&v(&["--version"])));
+        assert!(wants_cli(&v(&["C:/x", "--student", "1"])));
     }
 }

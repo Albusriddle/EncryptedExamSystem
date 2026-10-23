@@ -24,6 +24,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 生成"本版变更"需要完整历史与 tag
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -122,6 +125,30 @@ jobs:
           name: exam-tools-windows
           path: release/
 
+      - name: 生成发布说明（附带本版变更）
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 上一个 tag（不含当前 tag），拿不到就当作首个版本
+          PREV=$(git describe --tags --abbrev=0 --match 'v*' "${GITHUB_REF}^" 2>/dev/null || true)
+          {
+            cat docs/release-notes.md
+            echo ""
+            echo "---"
+            echo ""
+            echo "## 本版变更（${GITHUB_REF_NAME}）"
+            echo ""
+            if [ -n "$PREV" ]; then
+              echo "自 $PREV 以来："
+              echo ""
+              git log --no-merges --pretty="- %s" "$PREV..$GITHUB_REF"
+            else
+              echo "- 首个发布版本"
+            fi
+          } > body.md
+          echo "----- 发布说明预览 -----"
+          head -40 body.md
+
       - name: 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -129,4 +156,4 @@ jobs:
             release/ExamAdmin-*-windows.zip
             release/exam-builder.exe
             release/stub-template.exe
-          body_path: docs/release-notes.md
+          body_path: body.md

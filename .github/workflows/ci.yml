@@ -64,6 +64,23 @@ jobs:
       - name: 发布预检
         run: bash scripts/preflight-release.sh
 
+  # 管理端打包：PyInstaller 的坑（漏 --add-data、漏依赖）只有真打一次才暴露，
+  # 而 release 只在打 tag 时才构建——历史上因此发生过"exe 一启动就崩"。
+  # 这里在每次 PR/push 就按发布的方式打一遍，并跑 --selftest / --version。
+  admin-package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - name: 构建 Rust 产物
+        run: cargo build --release --workspace
+      - name: 安装管理端依赖（GUI + 打包）
+        run: cd admin && uv sync --extra gui --extra build
+      - name: 打包并自检
+        run: cd admin && uv run python buildtools/build_exe.py
+
   # 端到端：真的打一个包再用学生端解开，防止"单元测试全绿但装不起来"。
   e2e:
     runs-on: ubuntu-latest
