@@ -175,3 +175,45 @@ def test_unchecked_subject_stays_unchecked_after_save(qapp, state_with_banks, mu
     for cb, _, eid in tab.checks:
         if eid != checked_id:
             assert not cb.isChecked(), f"{eid} 不应被勾上"
+
+
+def test_build_log_shows_master_key(qapp, state_with_banks, tmp_path, monkeypatch) -> None:
+    """打包页必须把主密钥显示在日志里，方便教师复制保存。
+
+    这是刻意违反"master 不写日志"惯例的例外——用户明确要求。
+    同时必须出现醒目警告，避免教师把日志截图发出去还不知道后果。
+    """
+    from app.ui import tab_build
+
+    # 不让真的去起子进程：只验证日志内容
+    monkeypatch.setattr(tab_build.BuildWorker, "start", lambda self: None)
+    monkeypatch.setattr(tab_build.BuildWorker, "isRunning", lambda self: False)
+
+    stub = tmp_path / "stub.exe"
+    stub.write_bytes(b"fake")
+
+    tab = tab_build.BuildTab(state_with_banks)
+    tab.edit_stub.setText(str(stub))
+    tab.edit_out.setText(str(tmp_path / "out.exe"))
+    master = "ab" * 32  # 64 hex
+    tab.edit_master.setText(master)
+
+    # 先造一个合法场次（否则 start_build 会因配置问题提前返回）
+    from app.core.models import Session, SessionExam
+
+    state_with_banks.sessions = [
+        Session(
+            session_id=1,
+            start="2026-10-23T11:00:00+08:00",
+            end="2026-10-23T23:00:00+08:00",
+            students=[202108010217],
+            exams=[SessionExam(file="demo-math.json", pick=1)],
+        )
+    ]
+
+    tab.start_build()
+
+    log = tab.log_view.toPlainText()
+    assert master in log, "主密钥没有显示在打包日志里"
+    assert "请立即保存" in log
+    assert "不要发给学生" in log, "缺少安全警告"

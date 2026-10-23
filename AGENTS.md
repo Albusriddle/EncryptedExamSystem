@@ -81,7 +81,10 @@ bash scripts/preflight-release.sh          # 全过
 
 - **MUST NOT** 把 master 密钥、`kf.txt`、真实题库、学生名册提交入库。
   `.gitignore` 已覆盖 `kf.txt` / `m[0-9].json` / `*.key` / `bank*.json` / `examadm-*/`。
-- master **MUST** 只通过环境变量 `EXAM_MASTER` 传给子进程；**MUST NOT** 出现在命令行参数（进程列表可见）或日志里。日志输出 MUST 经过打码。
+- master **MUST** 只通过环境变量 `EXAM_MASTER` 传给子进程；**MUST NOT** 出现在命令行参数（进程列表可见）或子进程输出里。日志输出 MUST 经过打码。
+  - **已批准的例外**：管理端「打包」页会把 master 显示在日志区，供教师复制保存
+    （经用户明确要求）。该显示只发生在 GUI 文本区（不落盘、不进子进程输出），
+    MUST 紧跟醒目警告说明泄漏后果。除此之外任何地方出现 master 都算违规。
 - **MUST NOT** 让标准答案进入 `Paper` / `PaperItem`。类型层面已保证（这两个结构没有 `answer` 字段），不要为了方便加回去。
 - 写临时题库文件时 **MUST** 剥掉 `answer`，并在打包结束（成功/失败/取消）后删除临时目录。
 - **MUST NOT** 引入"可由包内配置指定时间源"的能力（`time_sources` 曾因此被删除）：那等于给时间门禁开后门。

@@ -186,6 +186,20 @@ impl NavState {
     }
 
     /// 把题号卡与题目矩形写到文件，供自动化验证。
+    /// 写一份"时钟与收卷状态"快照，供自动化验证。
+    ///
+    /// 与 `dump_debug` 分开：后者需要题目矩形，收卷后不再渲染题目，
+    /// 但这一份必须持续更新，否则无法证明"时间在走、到点变 true"。
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    pub fn dump_state(&self, path: &std::path::Path, now: Option<u64>, expired: bool) {
+        let text = format!(
+            "now_unix={}\nexpired={}\n",
+            now.map(|n| n.to_string()).unwrap_or_else(|| "none".into()),
+            expired
+        );
+        let _ = std::fs::write(path, text);
+    }
+
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub fn dump_debug(
         &self,

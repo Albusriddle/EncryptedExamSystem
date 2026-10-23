@@ -498,6 +498,18 @@ class BuildTab(QWidget):
         keyfile = Path(self.edit_keyfile.text()) if self.edit_keyfile.text().strip() else None
 
         self.log_view.clear()
+        # 主密钥显示在日志里：教师需要它来"以后再打一次同样的包"。
+        #
+        # ⚠ 这是刻意的例外：AGENTS.md 原则上禁止把 master 写进日志。
+        # 折中做法是——只在界面上显示（不落盘、不进子进程输出），
+        # 并紧跟着给出醒目警告。日志可能被截图/留在共享电脑上，
+        # 这个风险必须让教师自己看见。
+        self._append("═" * 56)
+        self._append("主密钥（请立即保存到密码管理器）")
+        self._append(master)
+        self._append("⚠ 重新打包同一场考试的唯一凭据；不要发给学生，")
+        self._append("  不要留在机房/共享电脑上。丢了无法再为学生补发包。")
+        self._append("═" * 56)
         self._append(f"题库目录 {tmpdir}")
         self._append(f"清单 {manifest_path}")
         self.btn_build.setEnabled(False)
@@ -555,5 +567,7 @@ class BuildTab(QWidget):
             "打包成功",
             f"已生成：\n{out}\n\n"
             "✔ 密钥已内嵌在包内，学生双击即可使用（无需任何参数）。\n\n"
+            "⚠ 主密钥已显示在上方日志里，请立即保存到密码管理器——\n"
+            "  它是重新打包本场考试的唯一凭据。\n\n"
             "请核对日志里的 SHA-256。",
         )

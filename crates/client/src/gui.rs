@@ -65,6 +65,45 @@ enum Stage {
     Paper(Box<Unlocked>),
 }
 
+/// 用单调时钟推进的"网络时间"。
+///
+/// 门禁只在解锁那一刻取一次网络时间；之后如果一直显示那个值，学生看到的
+/// 时间就是**冻住的**——既看不出还剩多久，也会让人怀疑程序坏了。
+///
+/// 但**不能**直接用本机时钟（学生改系统时间就能骗过显示，甚至影响"到点收卷"）。
+/// 正确做法：记下"同步时刻的网络时间"与"当时的单调时钟"，之后
+/// `网络时间 = 基准 + 单调时钟已流逝的时长`。
+///
+/// `Instant` 是单调的，不受系统时间调整影响；机器休眠期间它照常计时
+/// （这正是我们要的：睡过去的时间也算进考试时长）。
+pub struct SyncedClock {
+    /// 同步那一刻的网络时间（Unix 秒）
+    base_unix: u64,
+    /// 同步那一刻的单调时钟
+    synced_at: std::time::Instant,
+}
+
+impl SyncedClock {
+    pub fn new(base_unix: u64) -> Self {
+        Self {
+            base_unix,
+            synced_at: std::time::Instant::now(),
+        }
+    }
+
+    /// 当前网络时间（Unix 秒）。
+    pub fn now_unix(&self) -> u64 {
+        self.now_unix_at(self.synced_at.elapsed())
+    }
+
+    /// 从"同步时刻"起经过 `elapsed` 后的网络时间。
+    ///
+    /// 单独抽出来是为了能脱离真实时间测试推进逻辑——否则只能 sleep。
+    pub fn now_unix_at(&self, elapsed: std::time::Duration) -> u64 {
+        self.base_unix + elapsed.as_secs()
+    }
+}
+
 pub struct ExamApp {
     stage: Stage,
     opts: UnlockOpts,
@@ -81,6 +120,10 @@ pub struct ExamApp {
     autologin: Option<u64>,
     /// 诊断用：首帧模拟点击题号 `EES_NAV_JUMP=<N>`
     jump_once: Option<usize>,
+    /// 网络时间时钟（解锁成功后才有；debug 跳过门禁时为 None）
+    clock: Option<SyncedClock>,
+    /// 是否已到结束时刻（到点后锁定试卷）
+    expired: bool,
     /// 是否需要在下一帧把焦点交给学号输入框。
     ///
     /// 只在**首次启动**与**从错误返回 Idle** 时置 `true`。
@@ -107,6 +150,8 @@ impl ExamApp {
             nav: NavState::default(),
             jump_once: diag_env::<usize>("EES_NAV_JUMP").filter(|v| *v > 0),
             autologin: diag_env::<u64>("EES_AUTOLOGIN").filter(|v| *v > 0),
+            clock: None,
+            expired: false,
             focus_pending: true,
         }
     }
@@ -136,6 +181,9 @@ impl ExamApp {
             Ok(Ok(unlocked)) => {
                 // 换卷：清掉上一份试卷残留的矩形与跳转请求
                 self.nav.reset_for_new_paper();
+                // 以解锁时取到的网络时间为基准建时钟；之后由单调时钟推进
+                self.clock = unlocked.net.as_ref().map(|n| SyncedClock::new(n.unix));
+                self.expired = false;
                 self.stage = Stage::Paper(Box::new(unlocked));
                 true
             }
@@ -297,6 +345,35 @@ impl eframe::App for ExamApp {
         // 试卷阶段：题号卡与试卷需要在同一个 pass 里按顺序渲染，
         // 因此不放进 CentralPanel 的闭包，而是单独处理。
         if let Stage::Paper(unlocked) = &self.stage {
+            // 每秒重绘：网络时间要"走"，到点要自动收卷。
+            // 没有这一行，界面只会在鼠标动的时候刷新，时间看起来是冻住的。
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+
+            let now = self.clock.as_ref().map(|c| c.now_unix());
+            if !self.expired && now.is_some_and(|n| workflow::is_expired(n, unlocked.end_unix)) {
+                self.expired = true;
+                // 标题栏也换成"已结束"：学生切到别的窗口后，一眼能看出状态；
+                // 同时让 release 包的行为可以被外部自动化验证（读窗口标题）。
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+                    "保密考试系统 · 考试已结束".to_string(),
+                ));
+            }
+
+            // 诊断放在收卷判断**之前**：这样收卷后 dump 仍在更新，
+            // 能验证"时间在走 + 到点变 expired=true"，不依赖截图。
+            if let Some(path) = diag_path("EES_DEBUG_NAV") {
+                // 单独一个 .state 文件：完整 dump 只在渲染试卷时写，
+                // 收卷后就不写了，无法用来观察"到点"这件事。
+                let state_path = path.with_extension("state");
+                self.nav.dump_state(&state_path, now, self.expired);
+            }
+
+            if self.expired {
+                // 到点收卷：直接关掉试卷与题号卡，避免"时间到了还能看题"。
+                egui::CentralPanel::default().show(ctx, |ui| render_locked(ui, unlocked, now));
+                return;
+            }
+
             let sections: Vec<(String, usize)> = unlocked
                 .paper
                 .sections
@@ -316,7 +393,7 @@ impl eframe::App for ExamApp {
             //    必须同一个 CentralPanel：一个 pass 只能有一个 CentralPanel。
             let mut scroll_offset = egui::Vec2::ZERO;
             egui::CentralPanel::default().show(ctx, |ui| {
-                scroll_offset = render_paper(ui, unlocked, &mut self.nav);
+                scroll_offset = render_paper(ui, unlocked, &mut self.nav, now);
             });
 
             // 诊断：EES_DEBUG_NAV=<文件> 时输出题号卡与题目矩形，
@@ -354,11 +431,48 @@ impl eframe::App for ExamApp {
 /// 试卷底部留白（pt）。约一屏高度，让最后一题也能贴顶。
 const BOTTOM_PAD: f32 = 900.0;
 
+/// 把秒数格式化成"X 小时 Y 分 Z 秒"。
+fn format_duration(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h} 小时 {m} 分 {s} 秒")
+    } else if m > 0 {
+        format!("{m} 分 {s} 秒")
+    } else {
+        format!("{s} 秒")
+    }
+}
+
+/// 到点后的锁定页：不再渲染任何题目。
+fn render_locked(ui: &mut egui::Ui, unlocked: &Unlocked, now: Option<u64>) {
+    ui.add_space(60.0);
+    ui.vertical_centered(|ui| {
+        ui.heading("本场考试已结束");
+        ui.add_space(14.0);
+        ui.label(format!("场次 #{}", unlocked.session_id));
+        ui.label(format!("结束时间：{}", unlocked.end));
+        if let Some(n) = now {
+            ui.label(format!(
+                "当前网络时间：{}",
+                common::timegate::format_unix_local_zoned(n)
+            ));
+        }
+        ui.add_space(16.0);
+        ui.label(
+            egui::RichText::new("试卷已关闭，无法继续查看。如需帮助请联系监考老师。")
+                .color(egui::Color32::GRAY),
+        );
+    });
+}
+
 /// 渲染试卷。返回滚动区域的当前偏移，便于诊断验证"跳转是否真的滚动了"。
 fn render_paper(
     ui: &mut egui::Ui,
     unlocked: &Unlocked,
     nav: &mut crate::nav::NavState,
+    now: Option<u64>,
 ) -> egui::Vec2 {
     let out = egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(8.0);
@@ -371,17 +485,31 @@ fn render_paper(
         });
 
         if let Some(net) = &unlocked.net {
+            // 显示的是 SyncedClock 推进后的"现在"，不是解锁那一刻的固定值。
+            let shown = now.unwrap_or(net.unix);
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(format!(
                     "网络时间 {}（{} 个源，分歧 {} 秒）",
-                    common::timegate::format_unix_local_zoned(net.unix),
+                    common::timegate::format_unix_local_zoned(shown),
                     net.sources,
                     net.spread
                 ))
                 .size(12.0)
                 .color(egui::Color32::GRAY),
             );
+
+            if now.is_some() {
+                let left = workflow::remaining_secs(shown, unlocked.end_unix);
+                let text = format!("距离结束还有 {}", format_duration(left));
+                // 最后 5 分钟标红，给学生明确的紧迫感
+                let color = if left <= 300 {
+                    egui::Color32::from_rgb(200, 60, 60)
+                } else {
+                    egui::Color32::GRAY
+                };
+                ui.label(egui::RichText::new(text).size(12.0).color(color));
+            }
         }
 
         ui.add_space(4.0);
@@ -508,4 +636,36 @@ pub fn run(opts: UnlockOpts) -> eframe::Result<()> {
         native_options,
         Box::new(move |cc| Ok(Box::new(ExamApp::new(cc, opts)))),
     )
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::SyncedClock;
+    use std::time::Duration;
+
+    /// 网络时间必须随时间推进，而**不是**固定在解锁那一刻。
+    #[test]
+    fn clock_advances_with_elapsed() {
+        let c = SyncedClock::new(1_000_000);
+        assert_eq!(c.now_unix_at(Duration::from_secs(0)), 1_000_000);
+        assert_eq!(c.now_unix_at(Duration::from_secs(1)), 1_000_001);
+        assert_eq!(c.now_unix_at(Duration::from_secs(3_600)), 1_003_600);
+        // 亚秒不进位（显示到秒即可）
+        assert_eq!(c.now_unix_at(Duration::from_millis(999)), 1_000_000);
+    }
+
+    /// 推进后的时间要能与结束时刻比较，触发收卷。
+    #[test]
+    fn clock_reaches_end() {
+        let c = SyncedClock::new(1_000_000);
+        let end = 1_000_010;
+        assert!(!crate::workflow::is_expired(
+            c.now_unix_at(Duration::from_secs(9)),
+            end
+        ));
+        assert!(crate::workflow::is_expired(
+            c.now_unix_at(Duration::from_secs(10)),
+            end
+        ));
+    }
 }

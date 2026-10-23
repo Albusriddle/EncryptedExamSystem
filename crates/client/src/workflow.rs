@@ -62,6 +62,8 @@ pub struct Unlocked {
     /// 场次起止（原始 RFC3339 字符串，便于原样展示）
     pub start: String,
     pub end: String,
+    /// 场次结束时刻（Unix 秒）。GUI 用它判断"到点收卷"。
+    pub end_unix: u64,
     /// 网络时间信息；跳过门禁时为 `None`
     pub net: Option<timegate::NetworkTime>,
     pub paper: Paper,
@@ -122,11 +124,17 @@ pub fn unlock(student_id: u64, opts: &UnlockOpts) -> Result<Unlocked> {
     )
     .context("抽题失败")?;
 
+    // 结束时刻必须能解析：validate_sessions 已经保证过，这里再兜一次，
+    // 因为"到点自动收卷"依赖它——解析不出来就永远不收盘了。
+    let end_unix = timegate::parse_rfc3339(&unlocked.end)
+        .with_context(|| format!("场次结束时间无法解析：{:?}", unlocked.end))?;
+
     Ok(Unlocked {
         student_id,
         session_id: unlocked.session_id,
         start: unlocked.start.clone(),
         end: unlocked.end.clone(),
+        end_unix,
         net,
         paper,
         key_source,
@@ -317,9 +325,33 @@ fn read_master_arg(master: Option<&str>, master_file: Option<&str>) -> Result<[u
     Ok(*m)
 }
 
+/// 离场次结束还剩多少秒（已结束返回 0）。
+///
+/// 单独抽出来是为了能脱离 GUI 测边界：`now == end` 必须算"已结束"。
+pub fn remaining_secs(now: u64, end: u64) -> u64 {
+    end.saturating_sub(now)
+}
+
+/// 是否已到/超过结束时刻。
+pub fn is_expired(now: u64, end: u64) -> bool {
+    now >= end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 收卷边界：now == end 必须算已结束（不能多给一秒）。
+    #[test]
+    fn expiry_boundary() {
+        assert!(!is_expired(100, 200));
+        assert!(!is_expired(199, 200));
+        assert!(is_expired(200, 200), "到点即结束");
+        assert!(is_expired(201, 200));
+        assert_eq!(remaining_secs(100, 200), 100);
+        assert_eq!(remaining_secs(200, 200), 0);
+        assert_eq!(remaining_secs(300, 200), 0, "过期后不应下溢");
+    }
 
     #[test]
     fn option_labels_are_unique_up_to_200() {
