@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
@@ -268,7 +269,17 @@ class BuildTab(QWidget):
         btn_gen.setToolTip("调用 exam-builder keygen 生成一个随机主密钥")
         btn_gen.clicked.connect(self.gen_master)
         row.addWidget(btn_gen)
+        # 复制按钮：主密钥的**唯一**导出方式。
+        # 不写进日志——日志会被截图、会留在共享电脑上，而剪贴板由教师自己控制。
+        btn_copy = QPushButton("复制主密钥")
+        btn_copy.setToolTip("把主密钥复制到剪贴板，粘贴到密码管理器里保存")
+        btn_copy.clicked.connect(self.copy_master)
+        row.addWidget(btn_copy)
         form.addRow("主密钥", row)
+
+        self.copy_hint = QLabel("")
+        self.copy_hint.setWordWrap(True)
+        form.addRow("", self.copy_hint)
 
         self.edit_stub = QLineEdit(self._default_stub())
         row2 = QHBoxLayout()
@@ -365,6 +376,23 @@ class BuildTab(QWidget):
         )
         if p:
             self.edit_out.setText(p)
+
+    def copy_master(self) -> None:
+        """把主密钥复制到剪贴板并给出确认提示。
+
+        这是 master 的**唯一**导出途径（日志里绝不显示它）：
+        剪贴板的内容由教师自己决定粘贴到哪，不会像日志那样被动留存。
+        """
+        key = self.edit_master.text().strip()
+        if not key:
+            self.copy_hint.setStyleSheet("color:#c04040")
+            self.copy_hint.setText("⚠ 还没有主密钥：请先点【生成】，或用已有的密钥填入。")
+            return
+        QGuiApplication.clipboard().setText(key)
+        self.copy_hint.setStyleSheet("color:#2e7d32")
+        self.copy_hint.setText(
+            "✔ 主密钥已复制到剪贴板，请妥善保管（不要发给学生、不要留在共享电脑上）。"
+        )
 
     def gen_master(self) -> None:
         exe = builder_exe()
@@ -498,18 +526,7 @@ class BuildTab(QWidget):
         keyfile = Path(self.edit_keyfile.text()) if self.edit_keyfile.text().strip() else None
 
         self.log_view.clear()
-        # 主密钥显示在日志里：教师需要它来"以后再打一次同样的包"。
-        #
-        # ⚠ 这是刻意的例外：AGENTS.md 原则上禁止把 master 写进日志。
-        # 折中做法是——只在界面上显示（不落盘、不进子进程输出），
-        # 并紧跟着给出醒目警告。日志可能被截图/留在共享电脑上，
-        # 这个风险必须让教师自己看见。
-        self._append("═" * 56)
-        self._append("主密钥（请立即保存到密码管理器）")
-        self._append(master)
-        self._append("⚠ 重新打包同一场考试的唯一凭据；不要发给学生，")
-        self._append("  不要留在机房/共享电脑上。丢了无法再为学生补发包。")
-        self._append("═" * 56)
+        self.copy_hint.setText("")
         self._append(f"题库目录 {tmpdir}")
         self._append(f"清单 {manifest_path}")
         self.btn_build.setEnabled(False)
@@ -519,8 +536,8 @@ class BuildTab(QWidget):
         self.worker = BuildWorker(manifest_path, tmpdir, stub, out, master, keyfile)
         self.worker.log.connect(self._append)
         self.worker.done.connect(self._on_done)
-        # 立刻清空界面上的 master：它已经进了 worker
-        self.edit_master.clear()
+        # 故意**不清空**主密钥输入框：教师打包完还要用它（复制保存）。
+        # 输入框是密码回显，且这是教师自己的电脑。
         self.worker.start()
 
     def _cleanup_tmp(self) -> None:
@@ -546,7 +563,6 @@ class BuildTab(QWidget):
         self.btn_build.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self.progress.setVisible(False)
-        self.edit_master.clear()  # 无论成败都清
 
         if not ok:
             self._append(f"✗ 失败：{info}")
@@ -567,7 +583,7 @@ class BuildTab(QWidget):
             "打包成功",
             f"已生成：\n{out}\n\n"
             "✔ 密钥已内嵌在包内，学生双击即可使用（无需任何参数）。\n\n"
-            "⚠ 主密钥已显示在上方日志里，请立即保存到密码管理器——\n"
+            "⚠ 请点上方【复制主密钥】保存到密码管理器——\n"
             "  它是重新打包本场考试的唯一凭据。\n\n"
             "请核对日志里的 SHA-256。",
         )

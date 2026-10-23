@@ -177,15 +177,37 @@ def test_unchecked_subject_stays_unchecked_after_save(qapp, state_with_banks, mu
             assert not cb.isChecked(), f"{eid} 不应被勾上"
 
 
-def test_build_log_shows_master_key(qapp, state_with_banks, tmp_path, monkeypatch) -> None:
-    """打包页必须把主密钥显示在日志里，方便教师复制保存。
+def test_copy_master_button_puts_key_on_clipboard(qapp, state_with_banks, tmp_path) -> None:
+    """主密钥只能靠「复制主密钥」按钮导出到剪贴板，并给出确认提示。"""
+    from PySide6.QtGui import QGuiApplication
 
-    这是刻意违反"master 不写日志"惯例的例外——用户明确要求。
-    同时必须出现醒目警告，避免教师把日志截图发出去还不知道后果。
-    """
     from app.ui import tab_build
 
-    # 不让真的去起子进程：只验证日志内容
+    tab = tab_build.BuildTab(state_with_banks)
+    master = "ab" * 32
+    tab.edit_master.setText(master)
+
+    tab.copy_master()
+
+    assert QGuiApplication.clipboard().text() == master
+    assert "已复制到剪贴板" in tab.copy_hint.text()
+    assert "妥善保管" in tab.copy_hint.text()
+
+
+def test_copy_master_without_key_warns(qapp, state_with_banks) -> None:
+    from app.ui import tab_build
+
+    tab = tab_build.BuildTab(state_with_banks)
+    tab.edit_master.setText("")
+    tab.copy_master()
+    assert "还没有主密钥" in tab.copy_hint.text()
+
+
+def test_master_never_written_to_build_log(qapp, state_with_banks, tmp_path, monkeypatch) -> None:
+    """安全红线：master 绝不能出现在日志区（日志会被截图/留在共享电脑上）。"""
+    from app.core.models import Session, SessionExam
+    from app.ui import tab_build
+
     monkeypatch.setattr(tab_build.BuildWorker, "start", lambda self: None)
     monkeypatch.setattr(tab_build.BuildWorker, "isRunning", lambda self: False)
 
@@ -195,12 +217,8 @@ def test_build_log_shows_master_key(qapp, state_with_banks, tmp_path, monkeypatc
     tab = tab_build.BuildTab(state_with_banks)
     tab.edit_stub.setText(str(stub))
     tab.edit_out.setText(str(tmp_path / "out.exe"))
-    master = "ab" * 32  # 64 hex
+    master = "cd" * 32
     tab.edit_master.setText(master)
-
-    # 先造一个合法场次（否则 start_build 会因配置问题提前返回）
-    from app.core.models import Session, SessionExam
-
     state_with_banks.sessions = [
         Session(
             session_id=1,
@@ -212,15 +230,11 @@ def test_build_log_shows_master_key(qapp, state_with_banks, tmp_path, monkeypatc
     ]
 
     tab.start_build()
-
     try:
-        log = tab.log_view.toPlainText()
-        assert master in log, "主密钥没有显示在打包日志里"
-        assert "请立即保存" in log
-        assert "不要发给学生" in log, "缺少安全警告"
+        assert master not in tab.log_view.toPlainText(), "主密钥泄漏到日志"
+        # 打包后输入框仍保留密钥，教师才能点「复制主密钥」
+        assert tab.edit_master.text() == master
     finally:
-        # 清理：BuildWorker 是未启动的 QThread，留到解释器退出时销毁
-        # 会让 PySide6 在 teardown 阶段 SIGSEGV（CI 上表现为 exit 139）。
         tab.worker = None
         tab._cleanup_tmp()
         tab.deleteLater()
