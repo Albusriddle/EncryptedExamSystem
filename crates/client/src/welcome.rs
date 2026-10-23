@@ -23,9 +23,21 @@ fn marker_path() -> Option<PathBuf> {
     Some(marker_path_in(&base))
 }
 
+/// 标记文件内容。写入一个可识别的签名，
+/// 避免"空文件/损坏文件"被误判成用户主动选择（实测踩过：
+/// 测试时手工 touch 的空文件让弹窗永久消失，且没有任何提示）。
+const MARKER_CONTENT: &[u8] = b"dismissed-v1";
+
 /// 用户是否选择了不再提示。
+///
+/// 只认**内容匹配**的标记文件：空文件、写入中断留下的残片都不算。
+/// 这样即使文件系统出问题，最坏情况是"再弹一次"，而不是永久静默。
 pub fn is_dismissed() -> bool {
-    marker_path().is_some_and(|p| p.is_file())
+    marker_path().is_some_and(|p| {
+        std::fs::read(p)
+            .map(|b| b == MARKER_CONTENT)
+            .unwrap_or(false)
+    })
 }
 
 /// 记住「不再提示」。写失败不影响使用，只是下次还会弹。
@@ -34,7 +46,7 @@ fn remember_dismissed() {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(p, b"1");
+        let _ = std::fs::write(p, MARKER_CONTENT);
     }
 }
 
@@ -200,8 +212,31 @@ mod tests {
         assert!(!mark.is_file(), "初始不应存在标记");
         // 模拟用户勾选「不再提示」
         std::fs::create_dir_all(mark.parent().unwrap()).unwrap();
+        std::fs::write(&mark, MARKER_CONTENT).unwrap();
+        assert_eq!(std::fs::read(&mark).unwrap(), MARKER_CONTENT);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 空文件或内容不符的标记文件**不能**算作"不再提示"。
+    /// 实测踩过：测试时 touch 的空文件让弹窗永久消失。
+    #[test]
+    fn empty_or_corrupt_marker_is_not_dismissed() {
+        let base = tmp("corrupt");
+        let mark = marker_path_in(&base);
+        std::fs::create_dir_all(mark.parent().unwrap()).unwrap();
+
+        std::fs::write(&mark, b"").unwrap();
+        let empty_ok = std::fs::read(&mark)
+            .map(|b| b == MARKER_CONTENT)
+            .unwrap_or(false);
+        assert!(!empty_ok, "空文件不应被视为已选择不再提示");
+
         std::fs::write(&mark, b"1").unwrap();
-        assert!(mark.is_file(), "写入后应存在标记");
+        let junk_ok = std::fs::read(&mark)
+            .map(|b| b == MARKER_CONTENT)
+            .unwrap_or(false);
+        assert!(!junk_ok, "内容不符不应被视为已选择不再提示");
+
         let _ = std::fs::remove_dir_all(&base);
     }
 

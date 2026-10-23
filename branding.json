@@ -5,7 +5,7 @@
   "repo_url": "https://github.com/Albusriddle/EncryptedExamSystem",
   "license": "Apache-2.0",
   "license_name": "Apache License 2.0",
-  "tagline": "加密题库随包分发，学生凭学号与网络时间门禁解锁个人试卷；完全离线，无需服务器。",
+  "tagline": "加密题库随包分发，学生凭学号与网络时间门禁解锁个人试卷；无需服务器，仅解锁时联网校验时间。",
   "credits_title": "致谢",
   "credits": [
     {
