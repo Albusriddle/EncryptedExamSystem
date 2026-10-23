@@ -109,3 +109,69 @@ def test_subject_checkboxes_exist_after_construction(qapp, state_with_banks) -> 
     """打开已有工程（题库已存在）时，科目勾选框必须已经建好。"""
     tab = SessionsTab(state_with_banks)
     assert len(tab.checks) == 2
+
+
+def _wire_like_main_window(tab: SessionsTab) -> None:
+    """复刻 MainWindow._on_changed 的接线。
+
+    关键：真实程序里 `changed` 连到 `refresh_choices()`，
+    而 refresh_choices 会**销毁重建**所有勾选框——这正是丢勾的触发条件。
+    不接这条线，单独构造的 Tab 永远复现不出用户看到的问题。
+    """
+    tab.changed.connect(tab.refresh_choices)
+
+
+def test_checks_survive_save(qapp, state_with_banks, mute_dialogs) -> None:
+    """点「保存此场次」后，科目勾选不能消失。
+
+    用户反馈：勾上课程保存后，勾全没了。根因是 save_session 末尾的
+    `changed.emit()` 触发 refresh_choices()，把所有勾选框**销毁重建**，
+    而 refresh() 里 blockSignals 不会重新加载表单，于是新控件全是未勾选。
+
+    已有的 test_new_session_then_save_produces_valid_session 只断言了
+    模型里的 s.exams ——数据是对的，所以它一直是绿的，界面却是错的。
+    """
+    tab = SessionsTab(state_with_banks)
+    _wire_like_main_window(tab)
+    tab.new_session()
+
+    cb, pick, exam_id = tab.checks[0]
+    cb.setChecked(True)
+    pick.setValue(2)
+    tab.save_session()
+
+    assert len(state_with_banks.sessions[0].exams) == 1, "模型应有科目"
+    same = next(c for c, _, eid in tab.checks if eid == exam_id)
+    assert same.isChecked(), "保存后科目勾选被清空（界面与数据不一致）"
+    same_pick = next(p for _, p, eid in tab.checks if eid == exam_id)
+    assert int(same_pick.value()) == 2, "保存后抽题数丢失"
+
+
+def test_checks_restored_when_reselecting_session(qapp, state_with_banks, mute_dialogs) -> None:
+    """在左侧重新选中该场次，勾选必须能恢复。"""
+    tab = SessionsTab(state_with_banks)
+    _wire_like_main_window(tab)
+    tab.new_session()
+    cb, pick, exam_id = tab.checks[0]
+    cb.setChecked(True)
+    tab.save_session()
+
+    # 模拟用户重新点列表里的该场次
+    tab._on_select(tab.list.item(0), None)
+
+    same = next(c for c, _, eid in tab.checks if eid == exam_id)
+    assert same.isChecked(), "重新选中场次后勾选未恢复"
+
+
+def test_unchecked_subject_stays_unchecked_after_save(qapp, state_with_banks, mute_dialogs) -> None:
+    """只勾一门时，另一门保存后仍必须是未勾选（不能全部变成勾上）。"""
+    tab = SessionsTab(state_with_banks)
+    _wire_like_main_window(tab)
+    tab.new_session()
+    checked_id = tab.checks[0][2]
+    tab.checks[0][0].setChecked(True)
+    tab.save_session()
+
+    for cb, _, eid in tab.checks:
+        if eid != checked_id:
+            assert not cb.isChecked(), f"{eid} 不应被勾上"

@@ -221,7 +221,19 @@ class SessionsTab(QWidget):
     # ---------------------------------------------------------------- 刷新
 
     def refresh_choices(self) -> None:
-        """题库/学生变化后重建科目勾选框。"""
+        """题库/学生变化后重建科目勾选框。
+
+        重建时必须**保留用户已有的勾选与抽题数**：
+        勾选框是重新 new 出来的控件，天然处于未勾选状态，而 `refresh()`
+        用的是 `blockSignals(True)`，不会触发 `_on_select` 去重新加载表单。
+        结果就是——保存一次（会 emit changed → 本函数）之后，
+        界面上的勾选全部消失，但数据其实还在模型里。
+        """
+        # 重建前快照：exam_id -> (是否勾选, 抽题数)
+        prev: dict[str, tuple[bool, int]] = {
+            exam_id: (cb.isChecked(), int(pick.value())) for cb, pick, exam_id in self.checks
+        }
+
         # 清空旧控件
         while self.combo_holder.count():
             item = self.combo_holder.takeAt(0)
@@ -246,6 +258,13 @@ class SessionsTab(QWidget):
             hl.addStretch(1)
             self.combo_holder.addWidget(row)
             self.checks.append((cb, pick, exam_id))
+
+        # 恢复快照；新增的题库没有快照，保持默认（未勾选）。
+        for cb, pick, exam_id in self.checks:
+            if exam_id in prev:
+                checked, n = prev[exam_id]
+                cb.setChecked(checked)
+                pick.setValue(min(n, int(pick.maximum())))
 
         self.refresh()
 
