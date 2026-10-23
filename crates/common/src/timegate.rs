@@ -293,7 +293,29 @@ pub struct NetworkTime {
 /// 聚合多个时间源。
 ///
 /// `min_sources` 是放行所需的最少成功源数（建议 2）。
-/// `max_spread` 是允许的最大分歧（建议 300 秒）。
+/// 可用源数量决定了分歧容差。
+///
+/// - **3 个及以上**：中位数能吃掉一个撒谎的源，容差放宽到调用方给的上限（正常是 60 秒）。
+/// - **2 个**：`ok[len/2]` 取的是较大的那个，等于直接采信"更晚"的时间，
+///   任何分歧都会全量进入结果——只允许 10 秒。实测正常网络下三源分歧为 0 秒，
+///   所以这个上限不会误伤。
+///
+/// 之所以不用"两个源取平均"：平均同样会被单个坏源拉动，而且方向不可控；
+/// 宁可让 2 源时更容易 fail-closed（学生重试一次通常就能凑齐 3 源）。
+pub fn spread_limit(ok_sources: usize, max_spread: u64) -> u64 {
+    const TWO_SOURCE_MAX_SPREAD: u64 = 10;
+    if ok_sources <= 2 {
+        max_spread.min(TWO_SOURCE_MAX_SPREAD)
+    } else {
+        max_spread
+    }
+}
+
+/// `max_spread` 是允许的最大分歧（建议 60 秒）。
+///
+/// 实际生效的上限还取决于**可用源数量**（见 [`spread_limit`]）：
+/// 2 个源时中位数退化成"较大的那个"，任何一个源的偏差都会原样进结果，
+/// 所以只能容忍极小分歧。
 pub fn fetch_network_time(
     sources: &[Box<dyn TimeSource>],
     min_sources: usize,
@@ -321,11 +343,9 @@ pub fn fetch_network_time(
     ok.sort_unstable();
     let median = ok[ok.len() / 2];
     let spread = ok[ok.len() - 1] - ok[0];
-    if spread > max_spread {
-        return Err(TimeError::SourcesDisagree {
-            spread,
-            limit: max_spread,
-        });
+    let limit = spread_limit(ok.len(), max_spread);
+    if spread > limit {
+        return Err(TimeError::SourcesDisagree { spread, limit });
     }
 
     let local = SystemTime::now()
@@ -461,7 +481,7 @@ mod tests {
     #[test]
     fn median_of_three() {
         let sources = vec![src("a", Ok(1000)), src("b", Ok(1002)), src("c", Ok(1001))];
-        let t = fetch_network_time(&sources, 2, 300).unwrap();
+        let t = fetch_network_time(&sources, 2, 60).unwrap();
         assert_eq!(t.unix, 1001);
         assert_eq!(t.sources, 3);
         assert_eq!(t.spread, 2);
@@ -470,7 +490,7 @@ mod tests {
     #[test]
     fn fails_closed_when_not_enough_sources() {
         let sources = vec![src("a", Ok(1000)), src("b", Err("down".into()))];
-        let err = fetch_network_time(&sources, 2, 300).unwrap_err();
+        let err = fetch_network_time(&sources, 2, 60).unwrap_err();
         assert!(matches!(
             err,
             TimeError::NotEnoughSources { ok: 1, need: 2 }
@@ -480,14 +500,57 @@ mod tests {
     #[test]
     fn fails_closed_on_large_spread() {
         let sources = vec![src("a", Ok(1000)), src("b", Ok(5000)), src("c", Ok(1001))];
-        let err = fetch_network_time(&sources, 2, 300).unwrap_err();
+        let err = fetch_network_time(&sources, 2, 60).unwrap_err();
         assert!(matches!(err, TimeError::SourcesDisagree { .. }));
+    }
+
+    /// 2 个源时只容忍 10 秒分歧：中位数退化为"较大的那个"，
+    /// 20 秒的偏差会原样进结果，必须拒绝。
+    #[test]
+    fn two_sources_require_tight_agreement() {
+        let sources = vec![src("a", Ok(1000)), src("b", Ok(1020))];
+        let err = fetch_network_time(&sources, 2, 60).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TimeError::SourcesDisagree {
+                    spread: 20,
+                    limit: 10
+                }
+            ),
+            "2 源 20 秒分歧应被拒绝，实际: {err:?}"
+        );
+
+        // 10 秒以内可以接受
+        let ok = vec![src("a", Ok(1000)), src("b", Ok(1010))];
+        let t = fetch_network_time(&ok, 2, 60).unwrap();
+        assert_eq!(t.spread, 10);
+        // 取上中位数：结果是有利于"更晚"的那个
+        assert_eq!(t.unix, 1010);
+    }
+
+    /// 3 个源时中位数能吃掉一个坏源：即便某个源偏 20 秒也不影响结果。
+    #[test]
+    fn three_sources_tolerate_one_outlier() {
+        let sources = vec![src("a", Ok(1000)), src("b", Ok(1020)), src("c", Ok(1001))];
+        let t = fetch_network_time(&sources, 2, 60).unwrap();
+        assert_eq!(t.unix, 1001, "中位数应取 1001，而不是被 1020 拉动");
+        assert_eq!(t.spread, 20);
+    }
+
+    #[test]
+    fn spread_limit_by_source_count() {
+        assert_eq!(spread_limit(2, 60), 10);
+        assert_eq!(spread_limit(3, 60), 60);
+        assert_eq!(spread_limit(4, 60), 60);
+        // 调用方给的上限比 10 秒还小时，取更严的那个
+        assert_eq!(spread_limit(2, 5), 5);
     }
 
     #[test]
     fn all_failed_reports_reason() {
         let sources = vec![src("a", Err("x".into())), src("b", Err("y".into()))];
-        let err = fetch_network_time(&sources, 2, 300).unwrap_err();
+        let err = fetch_network_time(&sources, 2, 60).unwrap_err();
         assert!(matches!(err, TimeError::AllFailed(_)));
     }
 

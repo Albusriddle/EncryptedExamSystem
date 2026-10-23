@@ -21,7 +21,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -250,6 +250,10 @@ class BuildTab(QWidget):
         self.worker: BuildWorker | None = None
         #: 本次打包用的临时目录，结束后必须删除（里面有题目原文）
         self._tmpdir: Path | None = None
+        #: 用户是否点了「取消」。用来把"主动取消"和"真的失败"分开——
+        #: 取消时进程退出码同样是 1，只看退出码会弹「打包失败」，
+        #: 教师会以为程序坏了。
+        self._cancelled = False
         self._build_ui()
         self.refresh_preview()
 
@@ -377,6 +381,12 @@ class BuildTab(QWidget):
         if p:
             self.edit_out.setText(p)
 
+    #: 复制成功后多久自动清空输入框（毫秒）。
+    #:
+    #: 留着密钥的好处是"打包完还能再复制一次"；坏处是窗口留在共享电脑上时
+    #: 任何人点一下按钮就能拿走。5 分钟够教师打开密码管理器粘贴，之后自动抹掉。
+    MASTER_AUTO_CLEAR_MS = 5 * 60 * 1000
+
     def copy_master(self) -> None:
         """把主密钥复制到剪贴板并给出确认提示。
 
@@ -388,11 +398,29 @@ class BuildTab(QWidget):
             self.copy_hint.setStyleSheet("color:#c04040")
             self.copy_hint.setText("⚠ 还没有主密钥：请先点【生成】，或用已有的密钥填入。")
             return
-        QGuiApplication.clipboard().setText(key)
+
+        clip = QGuiApplication.clipboard()
+        clip.setText(key)
+        # 回读校验：远程桌面、剪贴板被其他程序独占时 setText 会静默失败。
+        # 不校验就会骗教师"已复制"，等人走了才发现剪贴板是空的。
+        if clip.text() != key:
+            self.copy_hint.setStyleSheet("color:#c04040")
+            self.copy_hint.setText("✗ 复制失败：剪贴板被其他程序占用。请手动选中密钥后按 Ctrl+C。")
+            return
+
         self.copy_hint.setStyleSheet("color:#2e7d32")
         self.copy_hint.setText(
             "✔ 主密钥已复制到剪贴板，请妥善保管（不要发给学生、不要留在共享电脑上）。"
         )
+        QTimer.singleShot(self.MASTER_AUTO_CLEAR_MS, lambda: self._clear_master_if_unchanged(key))
+
+    def _clear_master_if_unchanged(self, key: str) -> None:
+        """到点自动清空主密钥输入框（内容被教师改过就不动）。"""
+        if self.edit_master.text().strip() != key:
+            return
+        self.edit_master.clear()
+        self.copy_hint.setStyleSheet("color:#2e7d32")
+        self.copy_hint.setText("✔ 主密钥已从输入框自动清空（复制早已完成，请从剪贴板粘贴保存）。")
 
     def gen_master(self) -> None:
         exe = builder_exe()
@@ -527,6 +555,7 @@ class BuildTab(QWidget):
 
         self.log_view.clear()
         self.copy_hint.setText("")
+        self._cancelled = False
         self._append(f"题库目录 {tmpdir}")
         self._append(f"清单 {manifest_path}")
         self.btn_build.setEnabled(False)
@@ -540,6 +569,24 @@ class BuildTab(QWidget):
         # 输入框是密码回显，且这是教师自己的电脑。
         self.worker.start()
 
+    def _remove_partial_output(self) -> None:
+        """删掉被打断时留下的 `<输出名>.tmp`。
+
+        builder 是"先写 .tmp 再 rename"，进程被 terminate 时 .tmp 会留下来。
+        它不会影响下次打包（rename 目标是最终文件），但对教师是个莫名其妙的
+        陌生文件，顺手清掉。
+        """
+        out = self.edit_out.text().strip()
+        if not out:
+            return
+        partial = Path(f"{out}.tmp")
+        try:
+            if partial.is_file():
+                partial.unlink()
+                self._append(f"  已清理半成品 {partial.name}")
+        except OSError:
+            pass
+
     def _cleanup_tmp(self) -> None:
         """删除打包用的临时目录。
 
@@ -552,6 +599,7 @@ class BuildTab(QWidget):
 
     def cancel_build(self) -> None:
         if self.worker:
+            self._cancelled = True
             self.worker.cancel()
             self._append("… 已请求取消")
 
@@ -565,6 +613,17 @@ class BuildTab(QWidget):
         self.progress.setVisible(False)
 
         if not ok:
+            if self._cancelled:
+                # 主动取消不是故障，别用红色错误框吓人
+                self._remove_partial_output()
+                self._append("… 已取消打包（未生成文件）")
+                QMessageBox.information(
+                    self,
+                    "已取消",
+                    "已取消打包，没有生成文件。\n如需重试，改好参数后再点【开始打包】。",
+                )
+                self._cancelled = False
+                return
             self._append(f"✗ 失败：{info}")
             QMessageBox.critical(self, "打包失败", info)
             return

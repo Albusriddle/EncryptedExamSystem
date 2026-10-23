@@ -238,3 +238,97 @@ def test_master_never_written_to_build_log(qapp, state_with_banks, tmp_path, mon
         tab.worker = None
         tab._cleanup_tmp()
         tab.deleteLater()
+
+
+def test_cancel_reports_cancelled_not_failure(
+    qapp, state_with_banks, tmp_path, monkeypatch
+) -> None:
+    """取消打包不该弹「打包失败」——那会让人以为程序坏了。"""
+    from PySide6.QtWidgets import QMessageBox
+
+    from app.ui import tab_build
+
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda *a, **k: shown.append(("info", a[1] if len(a) > 1 else "")),
+    )
+    monkeypatch.setattr(
+        QMessageBox, "critical", lambda *a, **k: shown.append(("crit", a[1] if len(a) > 1 else ""))
+    )
+
+    tab = tab_build.BuildTab(state_with_banks)
+    tab.edit_out.setText(str(tmp_path / "out.exe"))
+    tab._cancelled = True
+    tab._on_done(False, "打包程序退出码 1")
+
+    assert shown and shown[-1][0] == "info", f"应弹信息框而非错误框，实际 {shown}"
+    assert "已取消" in shown[-1][1]
+    assert "已取消" in tab.log_view.toPlainText()
+
+
+def test_cancel_removes_partial_tmp(qapp, state_with_banks, tmp_path) -> None:
+    from app.ui import tab_build
+
+    out = tmp_path / "out.exe"
+    leftover = tmp_path / "out.exe.tmp"
+    leftover.write_bytes(b"partial")
+
+    tab = tab_build.BuildTab(state_with_banks)
+    tab.edit_out.setText(str(out))
+    tab._cancelled = True
+    tab._on_done(False, "打包程序退出码 1")
+
+    assert not leftover.exists(), "取消后应清理 .tmp 半成品"
+
+
+def test_copy_verifies_clipboard_readback(qapp, state_with_banks, monkeypatch) -> None:
+    """剪贴板被占用、setText 静默失败时，不能谎报"已复制"。"""
+    from app.ui import tab_build
+
+    class _DeadClipboard:
+        def setText(self, _text: str) -> None:  # noqa: N802 - 模仿 Qt 命名
+            pass
+
+        def text(self) -> str:
+            return ""
+
+    class _FakeApp:
+        @staticmethod
+        def clipboard():  # noqa: ANN205
+            return _DeadClipboard()
+
+    monkeypatch.setattr(tab_build, "QGuiApplication", _FakeApp)
+
+    tab = tab_build.BuildTab(state_with_banks)
+    tab.edit_master.setText("ab" * 32)
+    tab.copy_master()
+
+    assert "复制失败" in tab.copy_hint.text()
+
+
+def test_master_auto_cleared_after_timeout(qapp, state_with_banks) -> None:
+    """复制 5 分钟后自动清空，避免密钥长期留在界面上。"""
+    from app.ui import tab_build
+
+    tab = tab_build.BuildTab(state_with_banks)
+    key = "ef" * 32
+    tab.edit_master.setText(key)
+    tab.copy_master()
+    assert tab.edit_master.text() == key
+
+    tab._clear_master_if_unchanged(key)
+
+    assert tab.edit_master.text() == ""
+    assert "自动清空" in tab.copy_hint.text()
+
+
+def test_auto_clear_keeps_user_edited_value(qapp, state_with_banks) -> None:
+    """教师已经改成别的密钥时，定时器不能把它抹掉。"""
+    from app.ui import tab_build
+
+    tab = tab_build.BuildTab(state_with_banks)
+    tab.edit_master.setText("11" * 32)
+    tab._clear_master_if_unchanged("22" * 32)
+    assert tab.edit_master.text() == "11" * 32

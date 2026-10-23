@@ -120,6 +120,10 @@ pub struct ExamApp {
     autologin: Option<u64>,
     /// 诊断用：首帧模拟点击题号 `EES_NAV_JUMP=<N>`
     jump_once: Option<usize>,
+    /// 中文字体是否加载成功（false 时界面中文会变成方块，需要提示）
+    cjk_ok: bool,
+    /// 上一次写诊断文件的 (时间, 是否收卷)，用于避免每帧写盘
+    last_state_dump: Option<(Option<u64>, bool)>,
     /// 网络时间时钟（解锁成功后才有；debug 跳过门禁时为 None）
     clock: Option<SyncedClock>,
     /// 是否已到结束时刻（到点后锁定试卷）
@@ -136,7 +140,7 @@ impl ExamApp {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: UnlockOpts) -> Self {
         // 中文字体：egui 默认字体不含 CJK，必须手动加载系统字体，
         // 否则界面上所有中文都是"□"。
-        install_cjk_font(&cc.egui_ctx);
+        let cjk_ok = install_cjk_font(&cc.egui_ctx);
         let key_hint = workflow::peek_key_source(&opts);
         Self {
             stage: Stage::Idle {
@@ -150,6 +154,8 @@ impl ExamApp {
             nav: NavState::default(),
             jump_once: diag_env::<usize>("EES_NAV_JUMP").filter(|v| *v > 0),
             autologin: diag_env::<u64>("EES_AUTOLOGIN").filter(|v| *v > 0),
+            cjk_ok,
+            last_state_dump: None,
             clock: None,
             expired: false,
             focus_pending: true,
@@ -272,6 +278,15 @@ impl eframe::App for ExamApp {
             Stage::Idle { input, error } => {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
+                    // 字体缺失时中文全是方块，此时中文提示也没用——用英文说明。
+                    if !self.cjk_ok {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 60, 60),
+                            "CJK font not found: Chinese text may appear as boxes. \
+                             Install Microsoft YaHei / SimHei and restart.",
+                        );
+                        ui.add_space(10.0);
+                    }
                     ui.label(egui::RichText::new("请输入学号").size(18.0));
                     ui.add_space(12.0);
 
@@ -361,11 +376,17 @@ impl eframe::App for ExamApp {
 
             // 诊断放在收卷判断**之前**：这样收卷后 dump 仍在更新，
             // 能验证"时间在走 + 到点变 expired=true"，不依赖截图。
-            if let Some(path) = diag_path("EES_DEBUG_NAV") {
-                // 单独一个 .state 文件：完整 dump 只在渲染试卷时写，
-                // 收卷后就不写了，无法用来观察"到点"这件事。
-                let state_path = path.with_extension("state");
-                self.nav.dump_state(&state_path, now, self.expired);
+            // 只在"秒数或收卷状态变化"时写盘：这一帧会因为鼠标移动而
+            // 每秒重绘几十次，每帧都写就是几十次磁盘 IO。
+            let snapshot = (now, self.expired);
+            if self.last_state_dump != Some(snapshot) {
+                self.last_state_dump = Some(snapshot);
+                if let Some(path) = diag_path("EES_DEBUG_NAV") {
+                    // 单独一个 .state 文件：完整 dump 只在渲染试卷时写，
+                    // 收卷后就不写了，无法用来观察"到点"这件事。
+                    let state_path = path.with_extension("state");
+                    self.nav.dump_state(&state_path, now, self.expired);
+                }
             }
 
             if self.expired {
@@ -580,24 +601,29 @@ fn render_paper(
     out.state.offset
 }
 
-/// 安装中文字体。
+/// 中文字体候选（按优先级）。
+const CJK_CANDIDATES: &[&str] = &[
+    r"C:\Windows\Fonts\msyh.ttc", // 微软雅黑
+    r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\simhei.ttf", // 黑体
+    r"C:\Windows\Fonts\simsun.ttc", // 宋体
+    "/System/Library/Fonts/PingFang.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+];
+
+/// 安装中文字体；返回是否成功。
 ///
 /// egui 自带字体只覆盖拉丁字母，中文会显示成豆腐块。
-/// 这里按优先级尝试 Windows 自带的中文字体；找不到时**不 panic**，
-/// 只是界面中文会是方块——总比崩掉好。
-fn install_cjk_font(ctx: &egui::Context) {
-    const CANDIDATES: &[&str] = &[
-        r"C:\Windows\Fonts\msyh.ttc", // 微软雅黑
-        r"C:\Windows\Fonts\msyhbd.ttc",
-        r"C:\Windows\Fonts\simhei.ttf", // 黑体
-        r"C:\Windows\Fonts\simsun.ttc", // 宋体
-        "/System/Library/Fonts/PingFang.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    ];
+/// 找不到任何候选字体时**不 panic**，但要在界面上提示——否则学生只看到
+/// 一屏方块，不知道为什么（中文提示本身也是方块，所以提示用英文）。
+fn install_cjk_font(ctx: &egui::Context) -> bool {
+    install_cjk_font_from(ctx, CJK_CANDIDATES)
+}
 
+fn install_cjk_font_from(ctx: &egui::Context, candidates: &[&str]) -> bool {
     let mut fonts = egui::FontDefinitions::default();
-    for path in CANDIDATES {
+    for path in candidates {
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
@@ -616,10 +642,10 @@ fn install_cjk_font(ctx: &egui::Context) {
             .or_default()
             .push("cjk".to_owned());
         ctx.set_fonts(fonts);
-        return;
+        return true;
     }
-    // 找不到中文字体：记录但不中断。
     eprintln!("⚠ 未找到系统中文字体，界面中文可能显示为方块");
+    false
 }
 
 /// 启动 GUI。
@@ -667,5 +693,25 @@ mod clock_tests {
             c.now_unix_at(Duration::from_secs(10)),
             end
         ));
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::{CJK_CANDIDATES, install_cjk_font_from};
+    use eframe::egui;
+
+    /// 候选表不能是空的，否则永远加载不到字体。
+    #[test]
+    fn candidates_not_empty() {
+        assert!(CJK_CANDIDATES.len() >= 3);
+    }
+
+    /// 找不到字体时必须返回 false（界面据此显示英文提示），而不是 panic。
+    #[test]
+    fn missing_font_reports_failure() {
+        let ctx = egui::Context::default();
+        assert!(!install_cjk_font_from(&ctx, &["/definitely/not/here.ttf"]));
+        assert!(!install_cjk_font_from(&ctx, &[]));
     }
 }
