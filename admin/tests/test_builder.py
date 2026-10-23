@@ -331,7 +331,7 @@ def test_default_out_skips_unwritable_dirs(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_writable_detects_readonly_dir(tmp_path: Path) -> None:
-    from app.ui.tab_build import _writable
+    _writable = _tab_build()._writable
 
     ok = tmp_path / "ok"
     ok.mkdir()
