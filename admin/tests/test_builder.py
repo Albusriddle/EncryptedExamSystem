@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,10 @@ from app.core import builder as bmod
 from app.core.builder import BuilderError, build_package
 
 MASTER = "ab" * 32  # 64 hex
+
+# stub 文件名与平台相关（tab_build.default_stub 用 os.name 判断）。
+# 测试若写死 ".exe"，在 Linux CI 上必然失败——这正是真跑 UI 测试后才暴露的。
+STUB_NAME = "stub-template.exe" if os.name == "nt" else "stub-template"
 
 
 class _FakeProc:
@@ -249,7 +254,7 @@ def test_default_stub_uses_program_dir_when_frozen(
 
     exe_dir = tmp_path / "ExamAdmin"
     exe_dir.mkdir()
-    stub = exe_dir / "stub-template.exe"
+    stub = exe_dir / STUB_NAME
     stub.write_bytes(b"x")
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
