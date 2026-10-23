@@ -391,7 +391,28 @@ impl eframe::App for ExamApp {
 
             if self.expired {
                 // 到点收卷：直接关掉试卷与题号卡，避免"时间到了还能看题"。
-                egui::CentralPanel::default().show(ctx, |ui| render_locked(ui, unlocked, now));
+                let mut card_rect = egui::Rect::NOTHING;
+                let mut panel_rect = egui::Rect::NOTHING;
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    panel_rect = ui.max_rect();
+                    card_rect = render_locked(ui, unlocked, now);
+                });
+                // 布局自检：卡片必须水平居中、且落在下半屏、且不被裁掉。
+                #[cfg(debug_assertions)]
+                if let Some(path) = diag_path("EES_DEBUG_NAV") {
+                    let out = path.with_extension("locked");
+                    let _ = std::fs::write(
+                        &out,
+                        format!(
+                            "window={panel_rect:?}\ncard={card_rect:?}\n\
+                             center_dx={:.1}\ncard_top_ratio={:.3}\ncard_bottom_ratio={:.3}\n",
+                            card_rect.center().x - panel_rect.center().x,
+                            (card_rect.min.y - panel_rect.min.y) / panel_rect.height(),
+                            (card_rect.max.y - panel_rect.min.y) / panel_rect.height(),
+                        ),
+                    );
+                }
+                let _ = (card_rect, panel_rect);
                 return;
             }
 
@@ -467,25 +488,64 @@ fn format_duration(secs: u64) -> String {
 }
 
 /// 到点后的锁定页：不再渲染任何题目。
-fn render_locked(ui: &mut egui::Ui, unlocked: &Unlocked, now: Option<u64>) {
-    ui.add_space(60.0);
-    ui.vertical_centered(|ui| {
-        ui.heading("本场考试已结束");
-        ui.add_space(14.0);
-        ui.label(format!("场次 #{}", unlocked.session_id));
-        ui.label(format!("结束时间：{}", unlocked.end));
-        if let Some(n) = now {
-            ui.label(format!(
-                "当前网络时间：{}",
-                common::timegate::format_unix_local_zoned(n)
-            ));
-        }
-        ui.add_space(16.0);
-        ui.label(
-            egui::RichText::new("试卷已关闭，无法继续查看。如需帮助请联系监考老师。")
-                .color(egui::Color32::GRAY),
-        );
+///
+/// 页面下半部放一块圆角小卡片，内容与启动欢迎弹窗一致（版本/作者/许可证等）。
+/// 用 `Frame` 而不是浮层：它在流式布局里，天然不会盖住上面的"已结束"信息。
+///
+/// 返回卡片矩形（供 debug 自检）。
+fn render_locked(ui: &mut egui::Ui, unlocked: &Unlocked, now: Option<u64>) -> egui::Rect {
+    /// 卡片内容宽度的上限（不含内边距）
+    const CARD_MAX_W: f32 = 380.0;
+
+    let mut card = egui::Rect::NOTHING;
+
+    // 窗口被拉得很矮时（或卡片比剩余空间高），用滚动兜底：
+    // 宁可滚动，也不能把卡片裁掉一半——裁掉等于信息丢失。
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.add_space(36.0);
+        ui.vertical_centered(|ui| {
+            ui.heading("本场考试已结束");
+            ui.add_space(14.0);
+            ui.label(format!("场次 #{}", unlocked.session_id));
+            ui.label(format!("结束时间：{}", unlocked.end));
+            if let Some(n) = now {
+                ui.label(format!(
+                    "当前网络时间：{}",
+                    common::timegate::format_unix_local_zoned(n)
+                ));
+            }
+            ui.add_space(16.0);
+            ui.label(
+                egui::RichText::new("试卷已关闭，无法继续查看。如需帮助请联系监考老师。")
+                    .color(egui::Color32::GRAY),
+            );
+        });
+
+        // 居中偏下：把卡片推到剩余空间的下半部。
+        // 注意：这里在 ScrollArea 内部，available_height() 是"视口剩余高度"。
+        // 取 25% 作为留白，卡片整体的中心大约落在窗口的 60% 高度处（偏下）。
+        let left = ui.available_height();
+        ui.add_space((left * 0.25).max(16.0));
+
+        // 窗口很窄时卡片跟着缩，避免撑出横向滚动条
+        let card_w = (ui.available_width() - 40.0).clamp(240.0, CARD_MAX_W);
+        ui.vertical_centered(|ui| {
+            let frame = egui::Frame::none()
+                .rounding(egui::Rounding::same(12.0))
+                .inner_margin(egui::Margin::same(14.0))
+                .fill(ui.visuals().extreme_bg_color)
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    ui.visuals().widgets.noninteractive.bg_stroke.color,
+                ));
+            let resp = frame.show(ui, |ui| {
+                ui.set_width(card_w);
+                crate::welcome::brand_body(ui);
+            });
+            card = resp.response.rect;
+        });
     });
+    card
 }
 
 /// 渲染试卷。返回滚动区域的当前偏移，便于诊断验证"跳转是否真的滚动了"。
@@ -713,5 +773,25 @@ mod font_tests {
         let ctx = egui::Context::default();
         assert!(!install_cjk_font_from(&ctx, &["/definitely/not/here.ttf"]));
         assert!(!install_cjk_font_from(&ctx, &[]));
+    }
+}
+
+#[cfg(test)]
+mod brand_wiring {
+    /// 收卷页与欢迎弹窗必须共用同一份品牌内容。
+    ///
+    /// 两处各写一遍的话，改版权信息时必然漏掉一处——这里用"读源码"的接线测试守住。
+    #[test]
+    fn locked_page_reuses_welcome_brand_body() {
+        let gui_src = include_str!("gui.rs");
+        assert!(
+            gui_src.contains("crate::welcome::brand_body(ui)"),
+            "收卷页应调用 welcome::brand_body，而不是自己另写一份"
+        );
+        let welcome_src = include_str!("welcome.rs");
+        assert!(
+            welcome_src.contains("pub fn brand_body"),
+            "brand_body 应定义在 welcome.rs"
+        );
     }
 }

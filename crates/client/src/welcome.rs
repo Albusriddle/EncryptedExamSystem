@@ -56,6 +56,50 @@ pub struct Welcome {
     dont_show: bool,
 }
 
+/// 品牌信息正文：版本、简介、项目地址、许可证、致谢、Star 邀请。
+///
+/// 欢迎弹窗与"考试已结束"页共用同一份内容——两处都直接读 `branding.json`，
+/// 改文案只需要改一处。
+pub fn brand_body(ui: &mut egui::Ui) {
+    let b = branding();
+    ui.heading(b.display_name());
+    ui.label(
+        egui::RichText::new(format!("版本 {} · {}", common::version(), b.license_name))
+            .size(12.0)
+            .color(egui::Color32::from_gray(140)),
+    );
+
+    ui.add_space(8.0);
+    ui.add(egui::Label::new(&b.tagline).wrap());
+
+    ui.add_space(10.0);
+    ui.label("项目地址：");
+    let short = b
+        .repo_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    ui.hyperlink_to(short, &b.repo_url)
+        .on_hover_text(&b.repo_url);
+    ui.label(format!("许可证：{}（{}）", b.license_name, b.license));
+
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new(&b.credits_title).strong());
+    for c in &b.credits {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("· {}：", c.role));
+            ui.hyperlink_to(&c.name, &c.url);
+        });
+    }
+
+    ui.add_space(10.0);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(&b.star_hint).color(egui::Color32::from_rgb(90, 170, 90)),
+        )
+        .wrap(),
+    );
+}
+
 impl Welcome {
     pub fn new() -> Self {
         Self {
@@ -69,7 +113,6 @@ impl Welcome {
         if !self.open {
             return false;
         }
-        let b = branding();
         let mut closed = false;
 
         // 用 Window + anchor(CENTER_CENTER) 居中：Window 会先测量自身尺寸
@@ -101,44 +144,7 @@ impl Welcome {
             .show(ctx, |ui| {
                 ui.set_width(W);
                 ui.add_space(2.0);
-                ui.heading(b.display_name());
-                ui.label(
-                    egui::RichText::new(format!("版本 {} · {}", common::version(), b.license_name))
-                        .size(12.0)
-                        .color(egui::Color32::from_gray(140)),
-                );
-
-                ui.add_space(8.0);
-                ui.add(egui::Label::new(&b.tagline).wrap());
-
-                ui.add_space(10.0);
-                ui.label("项目地址：");
-                let short = b
-                    .repo_url
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://");
-                ui.hyperlink_to(short, &b.repo_url)
-                    .on_hover_text(&b.repo_url);
-                ui.label(format!("许可证：{}（{}）", b.license_name, b.license));
-
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new(&b.credits_title).strong());
-                for c in &b.credits {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(format!("· {}：", c.role));
-                        ui.hyperlink_to(&c.name, &c.url);
-                    });
-                }
-
-                ui.add_space(10.0);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&b.star_hint)
-                            .color(egui::Color32::from_rgb(90, 170, 90)),
-                    )
-                    .wrap(),
-                );
-
+                crate::welcome::brand_body(ui);
                 ui.add_space(12.0);
                 ui.separator();
                 ui.horizontal(|ui| {
