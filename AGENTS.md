@@ -111,6 +111,7 @@ bash scripts/preflight-release.sh          # 全过
 | `admin/app/core/` 不依赖 Qt | 核心逻辑可脱离 GUI 独立测试 |
 | 时间必须带显式时区 | 两端都拒绝无偏移时间（会被当成 UTC，静默偏移 8 小时） |
 | 同一学生不得同时出现在重叠场次 | Rust `check_student_overlap` + Python `_check_student_overlap` |
+| 答题卡 `qids`/`answers` 等长同序，且绑定试卷指纹 | `common/src/answer_sheet.rs`（改格式需同时改客户端与 builder 校验） |
 
 ---
 
