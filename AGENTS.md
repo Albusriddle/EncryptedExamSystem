@@ -147,7 +147,7 @@ bash scripts/preflight-release.sh          # 全过
 - 提交信息：中文，首行 `type(scope): 摘要`（type ∈ feat/fix/docs/test/chore/refactor/perf），正文写**根因**、**方案**、**验证结果**。
 - 发布流程：
   1. 改 `VERSION` + `Cargo.toml` + `admin/pyproject.toml`
-  2. 全量验证全绿
+  2. 全量验证全绿，并**推送 commit 后等 CI 全绿**（尤其是 Windows 的 admin-package job）
   3. `git tag v<版本>` 并推送 tag
   4. 等 `release` 工作流完成，**核对资产齐全**（zip + 两个 exe）
 - 只改文档时 **不需要** 发新版本，直接提交推送即可。
