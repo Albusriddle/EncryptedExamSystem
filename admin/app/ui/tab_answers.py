@@ -35,6 +35,17 @@ from app.ui.tab_build import builder_exe
 COLUMNS = ["文件", "学号", "场次", "题数", "已答", "未答", "交卷时间", "状态", "说明"]
 
 
+def collect_eea(paths: list[Path]) -> list[Path]:
+    """展开拖进来的路径：目录取其下所有 .eea，文件只收 .eea。"""
+    out: list[Path] = []
+    for p in paths:
+        if p.is_dir():
+            out.extend(sorted(p.glob("*.eea")))
+        elif p.suffix.lower() == ".eea":
+            out.append(p)
+    return out
+
+
 def run_tool(cmd: list[str], env: dict[str, str]) -> tuple[str, str, int]:
     """调用外部工具并按 **UTF-8** 解码输出。
 
@@ -112,6 +123,7 @@ class AnswersTab(QWidget):
         self.worker: VerifyWorker | None = None
 
         lay = QVBoxLayout(self)
+        self.setAcceptDrops(True)
 
         tip = QLabel(
             "把学生交上来的 answers-<学号>-<场次>.eea 拖进来（或点【添加文件】）。\n"
@@ -126,6 +138,15 @@ class AnswersTab(QWidget):
         self.master.setEchoMode(QLineEdit.EchoMode.Password)
         self.master.setPlaceholderText("64 位十六进制；只经环境变量传给校验进程")
         row.addWidget(self.master, 1)
+        self.btn_eye = QPushButton("显示")
+        self.btn_eye.setCheckable(True)
+        self.btn_eye.setFixedWidth(56)
+        self.btn_eye.toggled.connect(
+            lambda on: self.master.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+            )
+        )
+        row.addWidget(self.btn_eye)
 
         row.addWidget(QLabel("学生端包（可选）"))
         self.pkg = QLineEdit()
@@ -167,6 +188,33 @@ class AnswersTab(QWidget):
 
         self.status = QLabel("尚未校验")
         lay.addWidget(self.status)
+
+        # 结果只对"当时那把主密钥 + 那个包"有效；改了输入还留着"通过"等于给错误背书
+        self.master.textChanged.connect(self._invalidate)
+        self.pkg.textChanged.connect(self._invalidate)
+
+    # ---------------------------------------------------------------- 拖放
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt 约定
+        if event.mimeData().hasUrls() and any(
+            u.toLocalFile().lower().endswith(".eea") for u in event.mimeData().urls()
+        ):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - Qt 约定
+        files = collect_eea([Path(u.toLocalFile()) for u in event.mimeData().urls()])
+        if files:
+            self._append(files)
+            event.acceptProposedAction()
+
+    def _invalidate(self) -> None:
+        """主密钥/包变了，之前的结果全部作废。"""
+        if not self.results:
+            return
+        self.results.clear()
+        self.btn_csv.setEnabled(False)
+        self._refill()
+        self.status.setText("输入已变更，请重新校验")
 
     # ---------------------------------------------------------------- 文件
 
@@ -251,18 +299,31 @@ class AnswersTab(QWidget):
             return
         sheet = result.get("sheet") or {}
         ok = bool(result.get("ok"))
-        self._set(row, 1, str(sheet.get("student_id", "—")))
-        self._set(row, 2, str(sheet.get("session_id", "—")))
-        total = len(sheet.get("qids") or [])
-        answered = sum(1 for a in (sheet.get("answers") or []) if a is not None)
-        self._set(row, 3, str(total))
-        self._set(row, 4, str(answered))
-        self._set(row, 5, str(total - answered))
-        sub = sheet.get("submitted_unix")
-        submitted = datetime.fromtimestamp(sub).strftime("%Y-%m-%d %H:%M") if sub else "未交卷"
-        self._set(row, 6, submitted)
-        self._set(row, 7, "✓ 通过" if ok else "✗ 失败", None if ok else "#c0392b")
+        binding = result.get("binding")
+        if ok:
+            # 没给包时 binding 为 null：不能显示成"通过"就完事，教师要知道没校验绑定
+            status = "✓ 通过（已绑定）" if binding else "✓ 通过（未校验绑定）"
+        else:
+            status = "✗ 失败"
+        if not sheet:
+            for col in range(1, 7):
+                self._set(row, col, "—")
+        else:
+            total = len(sheet.get("qids") or [])
+            answered = sum(1 for a in (sheet.get("answers") or []) if a is not None)
+            self._set(row, 1, str(sheet.get("student_id", "—")))
+            self._set(row, 2, str(sheet.get("session_id", "—")))
+            self._set(row, 3, str(total))
+            self._set(row, 4, str(answered))
+            self._set(row, 5, str(total - answered))
+            sub = sheet.get("submitted_unix")
+            submitted = datetime.fromtimestamp(sub).strftime("%Y-%m-%d %H:%M") if sub else "未交卷"
+            self._set(row, 6, submitted)
+        self._set(row, 7, status, None if ok else "#c0392b")
         self._set(row, 8, "" if ok else str(result.get("message", ""))[:120])
+        tooltip = str(result.get("message", ""))
+        if tooltip:
+            self.table.item(row, 7).setToolTip(tooltip)
 
     def _on_all(self) -> None:
         self.btn_verify.setEnabled(True)

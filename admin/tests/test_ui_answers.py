@@ -143,3 +143,55 @@ def test_verify_worker_reports_builder_error_in_chinese(tmp_path) -> None:
     assert result["ok"] is False
     assert "无输出" not in result["message"], "解码失败时不能只报'无输出'"
     assert "读取" in result["message"] or "失败" in result["message"]
+
+
+def test_binding_status_is_explicit(qapp) -> None:
+    """没给包时必须显示"未校验绑定"，不能只说"通过"。"""
+    tab = AnswersTab()
+    try:
+        a, b = Path("a.eea"), Path("b.eea")
+        tab._append([a, b])
+        tab._on_one(str(a), {"ok": True, "binding": True, "sheet": _sheet()})
+        tab._on_one(str(b), {"ok": True, "binding": None, "sheet": _sheet()})
+        assert "已绑定" in tab.table.item(0, 7).text()
+        assert "未校验绑定" in tab.table.item(1, 7).text()
+    finally:
+        tab.deleteLater()
+
+
+def test_failure_row_shows_dash_not_zero(qapp) -> None:
+    tab = AnswersTab()
+    try:
+        f = Path("bad.eea")
+        tab._append([f])
+        tab._on_one(str(f), {"ok": False, "message": "解密失败"})
+        assert tab.table.item(0, 3).text() == "—"
+        assert tab.table.item(0, 1).text() == "—"
+    finally:
+        tab.deleteLater()
+
+
+def test_results_invalidated_when_master_changes(qapp) -> None:
+    tab = AnswersTab()
+    try:
+        f = Path("a.eea")
+        tab._append([f])
+        tab._on_one(str(f), {"ok": True, "binding": True, "sheet": _sheet()})
+        assert tab.results
+        tab.master.setText("11" * 32)
+        assert tab.results == {}, "换了主密钥，旧结果必须作废"
+        assert "重新校验" in tab.status.text()
+    finally:
+        tab.deleteLater()
+
+
+def test_collect_eea_expands_directory(tmp_path) -> None:
+    from app.ui.tab_answers import collect_eea
+
+    d = tmp_path / "收上来的"
+    d.mkdir()
+    (d / "a.eea").write_bytes(b"x")
+    (d / "b.eea").write_bytes(b"x")
+    (d / "说明.txt").write_text("ignore", encoding="utf-8")
+    out = collect_eea([d, d / "说明.txt"])
+    assert [p.name for p in out] == ["a.eea", "b.eea"]
