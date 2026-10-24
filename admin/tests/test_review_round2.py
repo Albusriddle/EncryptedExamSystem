@@ -229,3 +229,53 @@ def test_unassigned_view_is_read_only(qapp) -> None:
         assert "2" in tab.edit.toPlainText()
     finally:
         tab.deleteLater()
+
+
+def test_import_disabled_on_unassigned(qapp) -> None:
+    from app.core.models import StudentClass
+    from app.core.state import ProjectState
+
+    st = ProjectState()
+    st.set_students([1, 2])
+    st.classes = [StudentClass(name="一班", students=[1])]
+    tab = StudentsTab(st)
+    try:
+        row = next(i for i in range(tab.list.count()) if "未分班" in tab.list.item(i).text())
+        tab.list.setCurrentRow(row)
+        assert not tab.btn_import.isEnabled(), "只读视图不该允许导入"
+
+        tab.list.setCurrentRow(0)  # 全部学生
+        assert tab.btn_import.isEnabled()
+    finally:
+        tab.deleteLater()
+
+
+def test_rename_conflict_does_not_save_members(qapp, monkeypatch) -> None:
+    """改名冲突时整页都不保存，不能出现'名字没改、成员却写进去'。"""
+    from PySide6.QtWidgets import QMessageBox
+
+    from app.core.models import StudentClass
+    from app.core.state import ProjectState
+
+    warned: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[1]))
+
+    st = ProjectState()
+    st.set_students([1, 2])
+    st.classes = [
+        StudentClass(name="一班", students=[1]),
+        StudentClass(name="二班", students=[2]),
+    ]
+    tab = StudentsTab(st)
+    try:
+        row = next(i for i in range(tab.list.count()) if "一班" in tab.list.item(i).text())
+        tab.list.setCurrentRow(row)
+        tab.edit.setPlainText("1\n2\n3")  # 想加 3
+        tab.edit_name.setText("二班")  # 但改成重名
+        tab.apply_to_state()
+
+        assert warned, "重名必须提示"
+        assert st.class_by_name("一班").students == [1], "成员不能被保存"
+        assert 3 not in st.students, "全局名单也不能被改动"
+    finally:
+        tab.deleteLater()

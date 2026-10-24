@@ -160,6 +160,8 @@ class StudentsTab(QWidget):
         self.edit_code.setEnabled(is_class)
         self.btn_delete.setEnabled(is_class)
         self.btn_apply.setEnabled(self.current != UNASSIGNED)
+        # 未分班是只读视图：导入进来的内容既不能应用、切走又会丢
+        self.btn_import.setEnabled(self.current != UNASSIGNED)
 
         if self.current is None:
             self.edit_name.setText("")
@@ -307,18 +309,24 @@ class StudentsTab(QWidget):
             return
 
         name = self.current
-        self.state.set_class_members(name, good)
         c = self.state.class_by_name(name)
-        if c is not None:
-            # 允许在编辑成员的同时改班级名/编号（重名由 add 时的校验拦住）
-            new_name = self.edit_name.text().strip()
-            if new_name and new_name != c.name:
-                if self.state.class_by_name(new_name) is not None:
-                    QMessageBox.warning(self, "无法改名", f"班级名重复：{new_name}")
-                else:
-                    c.name = new_name
-                    self.current = new_name
-            c.code = self.edit_code.text().strip()
+        if c is None:
+            return
+
+        # **先**校验新名字，再保存成员：否则会出现"名字没改成、成员却已写进去"，
+        # 老师会以为整页都没保存。
+        new_name = self.edit_name.text().strip()
+        if new_name and new_name != c.name and self.state.class_by_name(new_name) is not None:
+            QMessageBox.warning(
+                self, "无法保存", f"班级名重复：{new_name}\n本页没有保存，请换一个名字。"
+            )
+            return
+
+        self.state.set_class_members(name, good)
+        if new_name and new_name != c.name:
+            c.name = new_name
+            self.current = new_name
+        c.code = self.edit_code.text().strip()
         self.changed.emit()
         self.refresh()
         QMessageBox.information(

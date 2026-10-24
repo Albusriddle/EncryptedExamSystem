@@ -464,3 +464,23 @@ def test_roster_info_warns_when_no_class_matches(qapp, state_with_banks) -> None
         assert "未匹配到班级" in tab.lbl_roster_info.text()
     finally:
         tab.deleteLater()
+
+
+def test_empty_class_selection_keeps_roster(qapp, state_with_banks, monkeypatch) -> None:
+    """一个班都没勾就点确定，绝不能把已有名单清空。"""
+    from PySide6.QtWidgets import QMessageBox
+
+    from app.core.models import StudentClass
+
+    state_with_banks.students = [1, 2]
+    state_with_banks.classes = [StudentClass(name="一班", students=[1])]
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    tab = SessionsTab(state_with_banks)
+    try:
+        tab.edit_roster.setText("1 2")
+        monkeypatch.setattr(tab, "_pick_classes", lambda: [])
+        tab.combo_roster.setCurrentIndex(tab.combo_roster.findData("by_class"))
+        assert tab.edit_roster.text() == "1 2", "空选择不能改动名单"
+        assert tab.combo_roster.currentData() != "by_class", "应回到之前的模式"
+    finally:
+        tab.deleteLater()

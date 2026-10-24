@@ -394,15 +394,28 @@ class SessionsTab(QWidget):
         mode = self.combo_roster.currentData()
         if mode == "by_class":
             picked = self._pick_classes()
+            if not picked:
+                # 取消或一个班都没勾：**不能**把已有名单清空（实测会静默丢名单）
+                if picked is not None:
+                    QMessageBox.information(
+                        self, "没有选择班级", "没有勾选任何班级，本场名单保持不变。"
+                    )
+                prev = getattr(self, "_roster_mode", "custom")
+                self.combo_roster.blockSignals(True)
+                self.combo_roster.setCurrentIndex(self.combo_roster.findData(prev))
+                self.combo_roster.blockSignals(False)
+                self.edit_roster.setEnabled(prev == "custom")
+                self._update_roster_info()
+                return
             # 选完就切到"自定义"：场次里存的永远是具体学号（快照），
             # 不依赖班级后续怎么改。
             self.combo_roster.blockSignals(True)
             self.combo_roster.setCurrentIndex(self.combo_roster.findData("custom"))
             self.combo_roster.blockSignals(False)
             mode = "custom"
-            if picked is not None:
-                merged = list(dict.fromkeys([*picked]))
-                self.edit_roster.setText(" ".join(str(x) for x in merged))
+            merged = list(dict.fromkeys([*picked]))
+            self.edit_roster.setText(" ".join(str(x) for x in merged))
+        self._roster_mode = mode
         self.edit_roster.setEnabled(mode == "custom")
         if mode == "all" and not self.edit_roster.text():
             self.edit_roster.setText(" ".join(str(x) for x in self.state.students))
