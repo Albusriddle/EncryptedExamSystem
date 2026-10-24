@@ -56,6 +56,10 @@ pub struct NavState {
     /// 必须**有上限**：找不到 rect 时如果不加限制地 `request_repaint()`，
     /// 一旦出现（例如试卷被替换）就是永久 100% CPU。
     pending_retries: u8,
+    /// 当前视窗顶部那道题（1 起）。由上一帧的矩形算出，用于绿色描边。
+    current: Option<usize>,
+    /// 每道题是否已作答（按题号 1 起索引，0 号位弃用）。
+    answered: Vec<bool>,
     /// 诊断：本帧题号按钮的矩形 `(题号, rect)`，用于验证一行 5 个且不越界。
     button_rects: Vec<(usize, egui::Rect)>,
     /// 诊断：题号面板的实际可用宽度。
@@ -213,6 +217,21 @@ impl NavState {
         out.push_str(&format!("panel_width_pt={:.1}\n", expanded_width()));
         out.push_str(&format!("per_row={PER_ROW}\n"));
         out.push_str(&format!("total_questions={total}\n"));
+        out.push_str(&format!(
+            "current={}\n",
+            self.current
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "none".into())
+        ));
+        let mut flags = String::new();
+        for i in 1..=total {
+            flags.push(if self.answered.get(i).copied().unwrap_or(false) {
+                '1'
+            } else {
+                '0'
+            });
+        }
+        out.push_str(&format!("answered={flags}\n"));
         out.push_str(&format!("rows={}\n", total.div_ceil(PER_ROW)));
         out.push_str(&format!("pending={:?}\n", self.pending));
         out.push_str(&format!(
@@ -304,32 +323,84 @@ impl NavState {
             });
     }
 
+    /// 题号按钮的三态配色。
+    ///
+    /// 抽成纯函数是为了能单测：颜色是"肉眼才看得出"的东西，没有断言就只能靠人看。
+    pub fn button_style(
+        answered: bool,
+        current: bool,
+        hovered: bool,
+        pressed: bool,
+    ) -> (egui::Color32, egui::Color32, f32) {
+        const BLUE: egui::Color32 = egui::Color32::from_rgb(59, 130, 246);
+        const GREEN: egui::Color32 = egui::Color32::from_rgb(60, 160, 90);
+        let fill = if pressed {
+            egui::Color32::from_rgb(37, 99, 235)
+        } else if answered {
+            BLUE
+        } else if hovered {
+            egui::Color32::from_rgb(120, 120, 120)
+        } else {
+            egui::Color32::from_rgb(90, 90, 90)
+        };
+        let (stroke, width) = if current {
+            (GREEN, 2.5_f32)
+        } else {
+            (egui::Color32::TRANSPARENT, 0.0)
+        };
+        (fill, stroke, width)
+    }
+
+    /// 视窗顶部那道题：取"顶部不超过视窗顶 + 40pt"的最后一道。
+    pub fn current_from_rects(
+        rects: &std::collections::HashMap<usize, egui::Rect>,
+        viewport_top: f32,
+    ) -> Option<usize> {
+        let mut best: Option<(usize, f32)> = None;
+        for (idx, r) in rects {
+            if r.top() <= viewport_top + 40.0 && best.is_none_or(|(_, top)| r.top() >= top) {
+                best = Some((*idx, r.top()));
+            }
+        }
+        best.map(|(i, _)| i)
+    }
+
+    /// 记录每帧的作答状态（按题号 1 起）。
+    pub fn set_answered(&mut self, flags: Vec<bool>) {
+        self.answered = flags;
+    }
+
+    /// 用本帧的题目矩形 + 视窗顶边，更新"当前题"，供下一帧描边。
+    pub fn update_current(&mut self, viewport_top: f32) {
+        self.current = Self::current_from_rects(&self.rects, viewport_top);
+    }
+
     /// 单个圆形按钮。
     fn circle_button(&mut self, ui: &mut egui::Ui, idx: usize) {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(BTN, BTN), egui::Sense::click());
-        let visuals = ui.visuals();
-        let fill = if resp.is_pointer_button_down_on() {
-            visuals.selection.bg_fill
-        } else if resp.hovered() {
-            visuals.widgets.hovered.bg_fill
-        } else {
-            visuals.widgets.inactive.bg_fill
-        };
+        let answered = self.answered.get(idx).copied().unwrap_or(false);
+        let current = self.current == Some(idx);
+        let (fill, stroke, width) = Self::button_style(
+            answered,
+            current,
+            resp.hovered(),
+            resp.is_pointer_button_down_on(),
+        );
         let painter = ui.painter();
         painter.circle_filled(rect.center(), BTN / 2.0, fill);
-        if resp.hovered() {
-            painter.circle_stroke(
-                rect.center(),
-                BTN / 2.0,
-                egui::Stroke::new(1.0_f32, visuals.selection.stroke.color),
-            );
+        if width > 0.0 {
+            painter.circle_stroke(rect.center(), BTN / 2.0, egui::Stroke::new(width, stroke));
         }
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             idx.to_string(),
             egui::FontId::proportional(12.0),
-            visuals.text_color(),
+            if answered {
+                egui::Color32::WHITE
+            } else {
+                ui.visuals().text_color()
+            },
         );
         self.button_rects.push((idx, rect));
         if resp.clicked() {
@@ -469,5 +540,56 @@ mod tests {
         let size = egui::vec2(BTN, BTN);
         assert_eq!(size.x, size.y, "圆形按钮必须等宽等高");
         assert_eq!(BTN / 2.0, 14.0);
+    }
+}
+
+#[cfg(test)]
+mod nav_state_tests {
+    use super::*;
+
+    #[test]
+    fn unanswered_is_gray_answered_is_blue() {
+        let (gray, stroke, w) = NavState::button_style(false, false, false, false);
+        let (blue, _s, _w2) = NavState::button_style(true, false, false, false);
+        assert_eq!(gray, egui::Color32::from_rgb(90, 90, 90));
+        assert_eq!(blue, egui::Color32::from_rgb(59, 130, 246));
+        assert_ne!(gray, blue);
+        assert_eq!(
+            (stroke, w),
+            (egui::Color32::TRANSPARENT, 0.0),
+            "非当前题不描边"
+        );
+    }
+
+    #[test]
+    fn current_has_green_stroke() {
+        let (_fill, stroke, w) = NavState::button_style(false, true, false, false);
+        assert_eq!(stroke, egui::Color32::from_rgb(60, 160, 90));
+        assert!(w > 2.0, "当前题描边要明显：{w}");
+    }
+
+    #[test]
+    fn current_item_follows_viewport() {
+        let mut rects = std::collections::HashMap::new();
+        rects.insert(
+            1,
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 100.0)),
+        );
+        rects.insert(
+            2,
+            egui::Rect::from_min_size(egui::pos2(0.0, 120.0), egui::vec2(10.0, 100.0)),
+        );
+        rects.insert(
+            3,
+            egui::Rect::from_min_size(egui::pos2(0.0, 240.0), egui::vec2(10.0, 100.0)),
+        );
+
+        assert_eq!(NavState::current_from_rects(&rects, 0.0), Some(1));
+        assert_eq!(NavState::current_from_rects(&rects, 130.0), Some(2));
+        assert_eq!(NavState::current_from_rects(&rects, 300.0), Some(3));
+        assert_eq!(
+            NavState::current_from_rects(&std::collections::HashMap::new(), 0.0),
+            None
+        );
     }
 }
