@@ -1057,21 +1057,7 @@ fn render_table(
 
     let ncols = header.len().max(1);
     let mut widths = vec![60.0f32; ncols];
-    let measure = |ui: &egui::Ui, spans: &[crate::markdown::Span]| -> f32 {
-        let text: String = spans
-            .iter()
-            .map(|s| match s {
-                crate::markdown::Span::Text(t)
-                | crate::markdown::Span::Code(t)
-                | crate::markdown::Span::Bold(t) => t.as_str(),
-            })
-            .collect();
-        ui.fonts(|f| {
-            f.layout_no_wrap(text, egui::FontId::proportional(14.0), egui::Color32::WHITE)
-                .size()
-                .x
-        })
-    };
+    let measure = measure_spans;
 
     for (i, cell) in header.iter().enumerate() {
         widths[i] = widths[i].max((measure(ui, cell) + PAD).min(MAX_COL));
@@ -1106,6 +1092,26 @@ fn render_table(
                 }
             });
         });
+}
+
+/// 量一段富文本的宽度：按每个 span 自己的字体累加。
+///
+/// 行内代码是等宽字体，比比例字体宽；统一按比例字体量会让代码列偏窄、代码被折行。
+fn measure_spans(ui: &egui::Ui, spans: &[crate::markdown::Span]) -> f32 {
+    let mut width = 0.0;
+    for span in spans {
+        let (text, font) = match span {
+            crate::markdown::Span::Text(t) => (t.as_str(), egui::FontId::proportional(14.0)),
+            crate::markdown::Span::Bold(t) => (t.as_str(), egui::FontId::proportional(14.0)),
+            crate::markdown::Span::Code(t) => (t.as_str(), egui::FontId::monospace(13.3)),
+        };
+        width += ui.fonts(|f| {
+            f.layout_no_wrap(text.to_owned(), font, egui::Color32::WHITE)
+                .size()
+                .x
+        });
+    }
+    width
 }
 
 fn table_row(
@@ -1773,6 +1779,25 @@ mod markdown_render_tests {
                 });
             });
         });
+    }
+
+    #[test]
+    fn code_span_is_measured_wider_than_text() {
+        use crate::markdown::Span;
+
+        let ctx = egui::Context::default();
+        let mut code_w = 0.0;
+        let mut text_w = 0.0;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                code_w = super::measure_spans(ui, &[Span::Code("iiiiiiii".into())]);
+                text_w = super::measure_spans(ui, &[Span::Text("iiiiiiii".into())]);
+            });
+        });
+        assert!(
+            code_w > text_w,
+            "等宽字体应更宽：code={code_w} text={text_w}"
+        );
     }
 
     #[test]
