@@ -112,6 +112,7 @@ bash scripts/preflight-release.sh          # 全过
 | 时间必须带显式时区 | 两端都拒绝无偏移时间（会被当成 UTC，静默偏移 8 小时） |
 | 同一学生不得同时出现在重叠场次 | Rust `check_student_overlap` + Python `_check_student_overlap` |
 | 答题卡 `qids`/`answers` 等长同序，且绑定试卷指纹 | `common/src/answer_sheet.rs`（改格式需同时改客户端与 builder 校验） |
+| 调用外部进程必须显式 `encoding="utf-8"` | 中文 Windows 默认 GBK；解码失败发生在读取线程里、不会抛给调用方，只会得到空输出 |
 
 ---
 
@@ -132,6 +133,13 @@ bash scripts/preflight-release.sh          # 全过
 - 注释里不要写会过期的数字（如版本号、测试数量）；必需时用占位或从源头读取。
 
 ---
+
+## 7.5 平台相关（MUST）
+
+- 跨语言边界（Python 调 Rust/子进程）MUST 显式 `encoding="utf-8"`；**MUST NOT** 依赖
+  `locale.getpreferredencoding()`。真实事故：v0.3.1 收卷页因此把"解密成功"显示成"无输出"。
+- CI MUST 至少有一个 **Windows** job 跑完整测试（`admin-package` 已包含）；
+  ubuntu 上的 UTF-8 locale 永远暴露不了 GBK 类问题。
 
 ## 8. 提交与发布
 
