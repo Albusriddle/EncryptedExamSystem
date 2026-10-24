@@ -164,6 +164,7 @@ fn verify_answer_sheet(
                 false,
                 &format!("读取 {} 失败：{e}", file.display()),
                 None,
+                None,
             );
             return Ok(5);
         }
@@ -177,7 +178,7 @@ fn verify_answer_sheet(
                 answer_sheet::AnswerSheetError::Decrypt => 2,
                 _ => 3,
             };
-            emit_result(as_json, false, &format!("{e}"), None);
+            emit_result(as_json, false, &format!("{e}"), None, None);
             return Ok(code);
         }
     };
@@ -193,12 +194,21 @@ fn verify_answer_sheet(
                     false,
                     "绑定校验失败：试卷指纹或题目列表与包内数据不一致",
                     Some(&sheet),
+                    Some(false),
                 );
                 return Ok(4);
             }
             Err(e) => {
-                emit_result(as_json, false, &format!("绑定校验失败：{e}"), Some(&sheet));
-                return Ok(4);
+                // 包用不了（不是同一个 master 的包、包里没这个场次/学号）与
+                // "指纹不一致"是两回事：前者是工具/环境问题，后者才是真的对不上。
+                emit_result(
+                    as_json,
+                    false,
+                    &format!("无法完成绑定校验：{e}"),
+                    Some(&sheet),
+                    None,
+                );
+                return Ok(5);
             }
         }
     }
@@ -221,7 +231,7 @@ fn verify_answer_sheet(
             _ => "  绑定 －（未提供 --package）",
         }
     );
-    emit_result(as_json, true, &summary, Some(&sheet));
+    emit_result(as_json, true, &summary, Some(&sheet), binding);
     Ok(0)
 }
 
@@ -282,11 +292,14 @@ fn emit_result(
     ok: bool,
     message: &str,
     sheet: Option<&common::answer_sheet::AnswerSheet>,
+    binding: Option<bool>,
 ) {
     if as_json {
         let payload = serde_json::json!({
             "ok": ok,
             "message": message,
+            // null = 没做绑定校验（未提供 --package），不能当成"校验通过"
+            "binding": binding,
             "sheet": sheet,
         });
         println!("{payload}");
@@ -711,6 +724,15 @@ mod tests {
 
     /// 造一个最小可用的包，返回 (包路径, K_manifest)。
     fn make_package(dir: &std::path::Path, master: &str, out_name: &str) -> (PathBuf, [u8; 32]) {
+        make_package_with_salt(dir, master, out_name, "00112233445566778899aabbccddeeff")
+    }
+
+    fn make_package_with_salt(
+        dir: &std::path::Path,
+        master: &str,
+        out_name: &str,
+        salt: &str,
+    ) -> (PathBuf, [u8; 32]) {
         let banks = dir.join("banks");
         std::fs::create_dir_all(&banks).unwrap();
         std::fs::write(
@@ -724,11 +746,13 @@ mod tests {
         let manifest = dir.join("manifest.json");
         std::fs::write(
             &manifest,
-            r#"{"version":2,"salt":"00112233445566778899aabbccddeeff",
-                "kdf":{"m_cost":8,"t_cost":1,"p_cost":1},
-                "sessions":[{"session_id":1,"start":"2026-01-01T00:00:00+08:00",
+            format!(
+                r#"{{"version":2,"salt":"{salt}",
+                "kdf":{{"m_cost":8,"t_cost":1,"p_cost":1}},
+                "sessions":[{{"session_id":1,"start":"2026-01-01T00:00:00+08:00",
                              "end":"2026-12-31T23:59:59+08:00","students":[2021001],
-                             "exams":[{"file":"m.json","pick":2}]}]}"#,
+                             "exams":[{{"file":"m.json","pick":2}}]}}]}}"#
+            ),
         )
         .unwrap();
 
@@ -812,7 +836,34 @@ mod tests {
 
         let code =
             verify_answer_sheet(&file, true, Some(&pkg_b), Some(master_hex()), None).unwrap();
-        assert_eq!(code, 4, "拿错包必须判绑定失败");
+        assert_eq!(
+            code, 5,
+            "拿错包（不同 master）属于'包用不了'，不是绑定不一致"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn verify_sheet_with_same_master_but_other_paper_is_mismatch() {
+        let dir = tmpdir("mismatch");
+        let (pkg_a, k_a) = make_package(&dir, &master_hex(), "a.exe");
+        // 同一个 master，但换一份 salt：密钥能解开，试卷指纹对不上
+        let dir_b = dir.join("b");
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let (pkg_b, _k_b) = make_package_with_salt(
+            &dir_b,
+            &master_hex(),
+            "b.exe",
+            "ffeeddccbbaa99887766554433221100",
+        );
+
+        let sheet = make_sheet(&pkg_a, &k_a);
+        let file = dir.join("answers-2021001-1.eea");
+        write_atomic(&file, &seal(&k_a, &sheet).unwrap()).unwrap();
+
+        let code =
+            verify_answer_sheet(&file, true, Some(&pkg_b), Some(master_hex()), None).unwrap();
+        assert_eq!(code, 4, "同一 master 下换了一份卷：必须判绑定不一致");
         std::fs::remove_dir_all(&dir).ok();
     }
 
