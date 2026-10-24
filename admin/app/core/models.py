@@ -147,6 +147,48 @@ class ExamBank(BaseModel):
         return self
 
 
+class StudentClass(BaseModel):
+    """一个班级：全局名单的一个命名分组。
+
+    为什么不是"班级各自持有名单"：那会让"谁在名单里"出现两套真相，
+    补人/删人时容易对不上。这里班级只是**全局名单的子集**，
+    成员必须同时存在于全局名单里（由 `ProjectState` 维护）。
+    """
+
+    name: str
+    code: str = ""
+    students: list[int] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        text = v.strip()
+        if not text:
+            raise ValueError("班级名不能为空")
+        if len(text) > 40:
+            raise ValueError("班级名过长（最多 40 个字符）")
+        return text
+
+    @field_validator("code")
+    @classmethod
+    def _check_code(cls, v: str) -> str:
+        return v.strip()
+
+    @field_validator("students")
+    @classmethod
+    def _check_members(cls, v: list[int]) -> list[int]:
+        for sid in v:
+            if sid <= 0:
+                raise ValueError(f"学号必须是正整数: {sid}")
+        if len(v) != len(set(v)):
+            raise ValueError("班级名单存在重复学号")
+        return v
+
+    def key(self) -> str:
+        """用于比较/查重的规范名：去空白、忽略大小写。"""
+        return self.name.strip().casefold()
+
+
 class SessionExam(BaseModel):
     file: str
     # 上限对齐 Rust 的 u32；下限为 0（空卷允许）

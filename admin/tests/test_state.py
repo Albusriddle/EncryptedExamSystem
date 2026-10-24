@@ -226,3 +226,57 @@ def test_validate_reports_empty_roster() -> None:
     st.sessions[0].students = []
     problems = st.validate()
     assert any("学号名单为空" in p for p in problems)
+
+
+# ---------------------------------------------------------------- 班级（第十四轮之后）
+
+
+def test_classes_roundtrip(tmp_path) -> None:
+    from app.core.models import StudentClass
+    from app.core.state import ProjectState
+
+    st = ProjectState(salt="00" * 16, students=[1, 2, 3])
+    st.classes = [StudentClass(name="一班", code="C1", students=[1, 2])]
+    p = tmp_path / "proj.json"
+    st.save(p)
+
+    back = ProjectState.load(p)
+    assert [c.name for c in back.classes] == ["一班"]
+    assert back.classes[0].students == [1, 2]
+    assert back.classes[0].code == "C1"
+
+
+def test_old_project_without_classes_loads(tmp_path) -> None:
+    """老工程没有 classes 字段，必须能正常打开。"""
+    import json
+
+    from app.core.state import ProjectState
+
+    p = tmp_path / "old.json"
+    p.write_text(
+        json.dumps({"version": 1, "salt": "00" * 16, "students": [1], "sessions": []}),
+        encoding="utf-8",
+    )
+    st = ProjectState.load(p)
+    assert st.students == [1]
+    assert st.classes == []
+
+
+def test_class_members_must_be_in_global_list() -> None:
+    from app.core.models import StudentClass
+    from app.core.state import ProjectState
+
+    st = ProjectState(students=[1])
+    st.classes = [StudentClass(name="一班", students=[1, 999])]
+    problems = st.validate()
+    assert any("不在学生名单" in x for x in problems), problems
+
+
+def test_set_students_prunes_class_members() -> None:
+    from app.core.models import StudentClass
+    from app.core.state import ProjectState
+
+    st = ProjectState(students=[1, 2, 3])
+    st.classes = [StudentClass(name="一班", students=[1, 2, 3])]
+    st.set_students([1, 3])
+    assert st.classes[0].students == [1, 3], "删掉的学号必须同步从班级里移除"

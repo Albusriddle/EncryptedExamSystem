@@ -24,7 +24,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from app.core.bank_import import BankImportError, load_bank_from_path, validate_bank_answers
-from app.core.models import ExamBank, KdfParams, Manifest, Session
+from app.core.models import ExamBank, KdfParams, Manifest, Session, StudentClass
 
 
 @dataclass
@@ -35,6 +35,8 @@ class ProjectState:
     banks: dict[str, ExamBank] = field(default_factory=dict)
     #: 全局学号池（场次从这里挑人）
     students: list[int] = field(default_factory=list)
+    #: 班级：全局名单的命名分组（成员必须是 students 的子集）
+    classes: list[StudentClass] = field(default_factory=list)
     #: 场次列表
     sessions: list[Session] = field(default_factory=list)
     #: Argon2id 参数
@@ -96,6 +98,48 @@ class ProjectState:
             s.exams = [e for e in s.exams if match_bank_exam_id(e.file, self.banks) != exam_id]
         self.banks.pop(exam_id, None)
         self.bank_paths.pop(exam_id, None)
+
+    # ---------------------------------------------------------------- 班级
+
+    def set_students(self, ids: list[int]) -> None:
+        """替换全局名单，并把班级里已不存在的成员剪掉。
+
+        为什么必须剪：班级成员是全局名单的子集是硬不变量；教师删人后
+        班级里还留着旧学号，打包时就会出现"场次里有这个学生、名单里没有"。
+        """
+        self.students = list(dict.fromkeys(ids))
+        alive = set(self.students)
+        for c in self.classes:
+            c.students = [sid for sid in c.students if sid in alive]
+
+    def class_by_name(self, name: str) -> StudentClass | None:
+        key = name.strip().casefold()
+        return next((c for c in self.classes if c.key() == key), None)
+
+    def add_class(self, name: str, code: str = "") -> StudentClass:
+        if self.class_by_name(name) is not None:
+            raise ValueError(f"班级名重复：{name}")
+        c = StudentClass(name=name, code=code, students=[])
+        self.classes.append(c)
+        return c
+
+    def remove_class(self, name: str) -> None:
+        key = name.strip().casefold()
+        self.classes = [c for c in self.classes if c.key() != key]
+
+    def set_class_members(self, name: str, ids: list[int]) -> None:
+        """设置班级成员；新学号自动并入全局名单。"""
+        c = self.class_by_name(name)
+        if c is None:
+            raise ValueError(f"没有这个班级：{name}")
+        uniq = list(dict.fromkeys(ids))
+        c.students = uniq
+        for sid in uniq:
+            if sid not in self.students:
+                self.students.append(sid)
+
+    def classes_of(self, student_id: int) -> list[str]:
+        return [c.name for c in self.classes if student_id in c.students]
 
     # ---------------------------------------------------------------- 场次
 
@@ -179,6 +223,16 @@ class ProjectState:
             problems.append("还没有导入学生名单")
         if not self.sessions:
             problems.append("还没有编排任何场次")
+
+        # 班级：名字唯一、成员必须在全局名单里
+        seen_names: set[str] = set()
+        for c in self.classes:
+            if c.key() in seen_names:
+                problems.append(f"班级名重复：{c.name}")
+            seen_names.add(c.key())
+            missing = [sid for sid in c.students if sid not in self.students]
+            if missing:
+                problems.append(f"班级 {c.name} 的成员不在学生名单里：{missing[:5]}")
 
         # 答案自洽性：原生题库以前只查形状，`answer: "E"` 配 A/B 选项也能过。
         # 放在这里而不是只在导入时查，是因为题库源文件可能在导入后被改过。
@@ -276,6 +330,7 @@ class ProjectState:
             "kdf": self.kdf.model_dump(),
             "bank_paths": self.bank_paths,
             "students": self.students,
+            "classes": [c.model_dump() for c in self.classes],
             "sessions": [s.model_dump() for s in self.sessions],
         }
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -291,6 +346,7 @@ class ProjectState:
             kdf=KdfParams.model_validate(data.get("kdf", {})),
             salt=salt,
             students=list(data.get("students", [])),
+            classes=[StudentClass.model_validate(c) for c in data.get("classes", [])],
         )
         st.sessions = [Session.model_validate(s) for s in data.get("sessions", [])]
         st.bank_paths = dict(data.get("bank_paths", {}))
