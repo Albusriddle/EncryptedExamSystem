@@ -2,9 +2,11 @@
 
 管理端编排多场考试 → 打包加密题库 → 学生凭**学号 + 网络时间门禁**解锁个人试卷。
 
+题干支持代码块、表格（左右拖动）、内嵌图片等 Markdown 写法；学生端离线作答，交卷后答题卡加密落盘。
+
 ## 教师：下载这个
 
-**下载 `ExamAdmin-<版本>-windows.zip`**（约 54 MB，见本页底部 Assets）
+**下载 `ExamAdmin-<版本>-windows.zip`**（约 57 MB，见本页底部 Assets）
 
 下载 → 解压 → 进 `ExamAdmin` 文件夹 → 双击 `ExamAdmin.exe`。
 
