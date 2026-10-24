@@ -114,6 +114,17 @@ impl AnswerSheet {
         {
             return Err(AnswerSheetError::BadFingerprint);
         }
+        // 交卷标志与交卷时间必须一致，否则教师端会显示"未交卷"却已冻结
+        if self.submitted && self.submitted_unix.is_none() {
+            return Err(AnswerSheetError::BadContent(
+                "submitted=true 但缺少 submitted_unix".into(),
+            ));
+        }
+        if !self.submitted && self.submitted_unix.is_some() {
+            return Err(AnswerSheetError::BadContent(
+                "submitted=false 却带有 submitted_unix".into(),
+            ));
+        }
         if self.qids.len() != self.answers.len() {
             return Err(AnswerSheetError::BadContent(format!(
                 "题目数 {} 与答案数 {} 不一致",
@@ -462,6 +473,19 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"two");
         assert!(!p.with_extension("tmp").exists(), "不应残留 .tmp");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn submitted_must_have_timestamp() {
+        let mut s = sheet();
+        s.submitted = true; // 没有 submitted_unix
+        assert!(matches!(s.validate(), Err(AnswerSheetError::BadContent(_))));
+        s.submitted_unix = Some(5);
+        assert!(s.validate().is_ok());
+
+        let mut t = sheet();
+        t.submitted_unix = Some(5); // 没交卷却有时间
+        assert!(matches!(t.validate(), Err(AnswerSheetError::BadContent(_))));
     }
 
     #[test]
