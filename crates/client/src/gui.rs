@@ -885,21 +885,21 @@ fn avail_w(ui: &egui::Ui) -> f32 {
 fn render_stem(ui: &mut egui::Ui, stem: &str) {
     use crate::markdown::Block;
 
-    for block in crate::markdown::parse(stem) {
+    for block in crate::markdown::parse_cached(stem).iter() {
         match block {
             Block::Paragraph(spans) => {
                 let w = avail_w(ui);
-                render_spans(ui, &spans, 15.0, w);
+                render_spans(ui, spans, 15.0, w);
             }
             Block::Heading { level, spans } => {
-                let size = match level {
+                let size = match *level {
                     1 => 18.0,
                     2 => 16.5,
                     _ => 15.5,
                 };
                 ui.add_space(2.0);
                 let w = avail_w(ui);
-                render_spans(ui, &spans, size, w);
+                render_spans(ui, spans, size, w);
             }
             Block::List {
                 ordered,
@@ -908,8 +908,8 @@ fn render_stem(ui: &mut egui::Ui, stem: &str) {
             } => {
                 ui.indent("md_list", |ui| {
                     for (i, item) in items.iter().enumerate() {
-                        let bullet = if ordered {
-                            format!("{}. ", start + i as u64)
+                        let bullet = if *ordered {
+                            format!("{}. ", *start + i as u64)
                         } else {
                             "• ".to_owned()
                         };
@@ -936,16 +936,16 @@ fn render_stem(ui: &mut egui::Ui, stem: &str) {
                     })
                     .show(ui, |ui| {
                         let w = avail_w(ui);
-                        render_spans(ui, &spans, 14.5, w);
+                        render_spans(ui, spans, 14.5, w);
                     });
             }
-            Block::Code { lines, .. } => render_mono_block(ui, &lines, false),
+            Block::Code { lines, .. } => render_mono_block(ui, lines, false),
             Block::Table {
                 header,
                 rows,
                 aligns,
-            } => render_table(ui, &header, &rows, &aligns),
-            Block::Image { alt, src } => render_image(ui, &alt, &src),
+            } => render_table(ui, header, rows, aligns),
+            Block::Image { alt, src } => render_image(ui, alt, src),
         }
     }
 }
@@ -955,6 +955,16 @@ fn render_stem(ui: &mut egui::Ui, stem: &str) {
 /// `wrap` 是换行宽度：段落用可用宽度，表格单元格固定 360pt
 /// （否则一个 500 字的单元格会把表格撑到没法看）。
 fn render_spans(ui: &mut egui::Ui, spans: &[crate::markdown::Span], size: f32, wrap: f32) {
+    render_spans_ex(ui, spans, size, wrap, false);
+}
+
+fn render_spans_ex(
+    ui: &mut egui::Ui,
+    spans: &[crate::markdown::Span],
+    size: f32,
+    wrap: f32,
+    bold_text: bool,
+) {
     use crate::markdown::Span;
 
     let visuals = ui.visuals().clone();
@@ -964,15 +974,22 @@ fn render_spans(ui: &mut egui::Ui, spans: &[crate::markdown::Span], size: f32, w
 
     for span in spans {
         match span {
-            Span::Text(text) => job.append(
-                text,
-                0.0,
-                egui::TextFormat {
-                    font_id: egui::FontId::proportional(size),
-                    color: visuals.text_color(),
-                    ..Default::default()
-                },
-            ),
+            Span::Text(text) => {
+                let (font_id, color) = if bold_text {
+                    bold_style(ui, size)
+                } else {
+                    (egui::FontId::proportional(size), visuals.text_color())
+                };
+                job.append(
+                    text,
+                    0.0,
+                    egui::TextFormat {
+                        font_id,
+                        color,
+                        ..Default::default()
+                    },
+                );
+            }
             Span::Code(code) => job.append(
                 code,
                 0.0,
@@ -1096,7 +1113,7 @@ fn table_row(
     cells: &[Vec<crate::markdown::Span>],
     widths: &[f32],
     aligns: &[crate::markdown::Align],
-    _header: bool,
+    header: bool,
 ) {
     use crate::markdown::Align;
 
@@ -1110,7 +1127,7 @@ fn table_row(
                 Align::Right => egui::Layout::top_down(egui::Align::Max),
             };
             ui.allocate_ui_with_layout(egui::vec2(*w, 0.0), layout, |ui| {
-                render_spans(ui, cell, 14.0, *w - 4.0);
+                render_spans_ex(ui, cell, 14.0, *w - 4.0, header);
             });
         }
     });

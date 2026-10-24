@@ -68,6 +68,41 @@ pub enum Block {
     },
 }
 
+/// 解析缓存：题干每帧都要画，20 题每帧重新解析纯属浪费。
+///
+/// 键用 blake3(题干) 的前 8 字节；缓存 128 条（一道题反复出现也不会爆）。
+pub fn parse_cached(input: &str) -> std::rc::Rc<Vec<Block>> {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    thread_local! {
+        static CACHE: RefCell<VecDeque<(u64, std::rc::Rc<Vec<Block>>)>> =
+            const { RefCell::new(VecDeque::new()) };
+    }
+    const LIMIT: usize = 128;
+
+    let h = blake3::hash(input.as_bytes());
+    let key = u64::from_le_bytes(h.as_bytes()[..8].try_into().unwrap_or_default());
+
+    if let Some(hit) = CACHE.with(|c| {
+        c.borrow()
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, blocks)| blocks.clone())
+    }) {
+        return hit;
+    }
+    let blocks = std::rc::Rc::new(parse(input));
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        c.push_back((key, blocks.clone()));
+        while c.len() > LIMIT {
+            c.pop_front();
+        }
+    });
+    blocks
+}
+
 /// 把题干解析成块列表。
 pub fn parse(input: &str) -> Vec<Block> {
     let text = input.replace("\r\n", "\n").replace('\r', "\n");
@@ -580,6 +615,14 @@ mod tests {
 #[cfg(test)]
 mod parse_edge_tests {
     use super::*;
+
+    #[test]
+    fn cached_parse_reuses_result() {
+        let a = parse_cached("- 甲\n\n| 列 |\n|---|\n| 1 |");
+        let b = parse_cached("- 甲\n\n| 列 |\n|---|\n| 1 |");
+        assert!(std::rc::Rc::ptr_eq(&a, &b), "同样输入必须命中缓存");
+        assert_eq!(a.len(), 2);
+    }
 
     #[test]
     fn list_then_table() {
