@@ -92,6 +92,17 @@ jobs:
         run: cd admin && uv sync --extra gui --extra build
       - name: 打包并自检
         run: cd admin && uv run python buildtools/build_exe.py
+      # Windows 上跑一遍测试。
+      #
+      # 为什么必须在这个 job 里跑：v0.3.1 的收卷页用了 subprocess.run(text=True)
+      # 没指定 encoding，中文 Windows 上按 GBK 解 UTF-8 输出，异常在读取线程里
+      # 被吞掉，界面只显示"无输出"。ubuntu 的 python/e2e job 永远绿——只有
+      # Windows locale 能暴露这类问题。
+      - name: 测试（Windows locale）
+        working-directory: admin
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: uv run pytest -q
 
   # 端到端：真的打一个包再用学生端解开，防止"单元测试全绿但装不起来"。
   e2e:
