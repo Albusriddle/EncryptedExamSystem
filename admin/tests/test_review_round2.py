@@ -185,3 +185,47 @@ def test_watermark_comes_from_branding() -> None:
     b = branding()
     expected = f"{b.abbr} v{app_version()} Powered by {b.credits[0].name}"
     assert watermark() == expected
+
+
+# ---------------------------------------------------------------- 班级（第十四轮之后）
+
+
+def test_new_class_and_members_flow(qapp) -> None:
+    from app.core.state import ProjectState
+
+    st = ProjectState()
+    st.set_students([1, 2])
+    tab = StudentsTab(st)
+    try:
+        st.add_class("计算机 2021-1", "CS2101")
+        tab.refresh()
+        labels = [tab.list.item(i).text() for i in range(tab.list.count())]
+        assert any("计算机 2021-1" in x for x in labels)
+        assert any("全部学生" in x for x in labels)
+
+        # 切到班级并保存成员：新学号应自动并入全局名单
+        idx = next(i for i in range(tab.list.count()) if "计算机 2021-1" in tab.list.item(i).text())
+        tab.list.setCurrentRow(idx)
+        tab.edit.setPlainText("1\n2\n3")
+        tab.apply_to_state()
+        assert st.class_by_name("计算机 2021-1").students == [1, 2, 3]
+        assert 3 in st.students
+    finally:
+        tab.deleteLater()
+
+
+def test_unassigned_view_is_read_only(qapp) -> None:
+    from app.core.models import StudentClass
+    from app.core.state import ProjectState
+
+    st = ProjectState()
+    st.set_students([1, 2])
+    st.classes = [StudentClass(name="一班", students=[1])]
+    tab = StudentsTab(st)
+    try:
+        row = next(i for i in range(tab.list.count()) if "未分班" in tab.list.item(i).text())
+        tab.list.setCurrentRow(row)
+        assert tab.edit.isReadOnly()
+        assert "2" in tab.edit.toPlainText()
+    finally:
+        tab.deleteLater()
