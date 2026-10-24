@@ -868,19 +868,278 @@ fn blank_marker(k: usize) -> String {
 }
 
 /// 渲染题干：把 ``` 围栏代码块单独画成等宽块，其余按文本排版。
+/// 取一个**有限**的可用宽度。
+///
+/// egui 在 `ui.horizontal` 里 `available_width()` 可能返回 `f32::INFINITY`，
+/// 直接拿去设 `LayoutJob.wrap.max_width` 或 `ScrollArea::max_width` 会让
+/// 布局无界展开（实测内存一路涨到十几 GB 后卡死）。
+fn avail_w(ui: &egui::Ui) -> f32 {
+    let w = ui.available_width();
+    if w.is_finite() {
+        w.clamp(80.0, 4096.0)
+    } else {
+        800.0
+    }
+}
+
 fn render_stem(ui: &mut egui::Ui, stem: &str) {
     use crate::markdown::Block;
 
-    for block in crate::markdown::split_blocks(stem) {
+    for block in crate::markdown::parse(stem) {
         match block {
-            Block::Text(text) => {
-                ui.label(egui::RichText::new(text).size(15.0));
+            Block::Paragraph(spans) => {
+                let w = avail_w(ui);
+                render_spans(ui, &spans, 15.0, w);
             }
-            Block::Code { lines, .. } => {
-                render_mono_block(ui, &lines, false);
+            Block::Heading { level, spans } => {
+                let size = match level {
+                    1 => 18.0,
+                    2 => 16.5,
+                    _ => 15.5,
+                };
+                ui.add_space(2.0);
+                let w = avail_w(ui);
+                render_spans(ui, &spans, size, w);
+            }
+            Block::List {
+                ordered,
+                start,
+                items,
+            } => {
+                ui.indent("md_list", |ui| {
+                    for (i, item) in items.iter().enumerate() {
+                        let bullet = if ordered {
+                            format!("{}. ", start + i as u64)
+                        } else {
+                            "• ".to_owned()
+                        };
+                        let text: String = item
+                            .iter()
+                            .map(|sp| match sp {
+                                crate::markdown::Span::Text(t)
+                                | crate::markdown::Span::Code(t)
+                                | crate::markdown::Span::Bold(t) => t.as_str(),
+                            })
+                            .collect();
+                        ui.label(egui::RichText::new(format!("{bullet}{text}")).size(15.0));
+                    }
+                });
+            }
+            Block::Quote(spans) => {
+                egui::Frame::none()
+                    .fill(ui.visuals().faint_bg_color)
+                    .inner_margin(egui::Margin {
+                        left: 10.0,
+                        right: 8.0,
+                        top: 6.0,
+                        bottom: 6.0,
+                    })
+                    .show(ui, |ui| {
+                        let w = avail_w(ui);
+                        render_spans(ui, &spans, 14.5, w);
+                    });
+            }
+            Block::Code { lines, .. } => render_mono_block(ui, &lines, false),
+            Block::Table {
+                header,
+                rows,
+                aligns,
+            } => render_table(ui, &header, &rows, &aligns),
+            Block::Image { alt, src } => render_image(ui, &alt, &src),
+        }
+    }
+}
+
+/// 行内混排：普通文本 + 行内代码 + 加粗。
+///
+/// `wrap` 是换行宽度：段落用可用宽度，表格单元格固定 360pt
+/// （否则一个 500 字的单元格会把表格撑到没法看）。
+fn render_spans(ui: &mut egui::Ui, spans: &[crate::markdown::Span], size: f32, wrap: f32) {
+    use crate::markdown::Span;
+
+    let visuals = ui.visuals().clone();
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap.max(60.0);
+    job.halign = egui::Align::LEFT;
+
+    for span in spans {
+        match span {
+            Span::Text(text) => job.append(
+                text,
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::proportional(size),
+                    color: visuals.text_color(),
+                    ..Default::default()
+                },
+            ),
+            Span::Code(code) => job.append(
+                code,
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::monospace(size * 0.95),
+                    color: visuals.text_color(),
+                    background: visuals.extreme_bg_color,
+                    ..Default::default()
+                },
+            ),
+            Span::Bold(text) => {
+                let (font_id, color) = bold_style(ui, size);
+                job.append(
+                    text,
+                    0.0,
+                    egui::TextFormat {
+                        font_id,
+                        color,
+                        ..Default::default()
+                    },
+                );
             }
         }
     }
+
+    ui.label(job);
+}
+
+/// 加粗：优先用系统粗体字族，找不到就用强调色（缺字形时不能变方块）。
+fn bold_style(ui: &egui::Ui, size: f32) -> (egui::FontId, egui::Color32) {
+    let visuals = ui.visuals();
+    let bold_ready = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(egui::Id::new("ees_bold_family")))
+        .unwrap_or(false);
+    if bold_ready {
+        (
+            egui::FontId::new(size, egui::FontFamily::Name("bold".into())),
+            visuals.text_color(),
+        )
+    } else {
+        (
+            egui::FontId::proportional(size),
+            visuals.strong_text_color(),
+        )
+    }
+}
+
+/// 表格：横向滑块（可拖拽）+ 长表格限高纵向滚动。
+///
+/// ## 为什么不用 `egui::Grid`
+///
+/// Grid 放进横向 ScrollArea 后，列宽是按"可用宽度"推算的；一旦可用宽度
+/// 异常（横向布局里可能是 INFINITY），布局会无界展开——实测内存能涨到
+/// 十几 GB 后卡死。这里改成**先量文字宽度、再自己排**：
+/// 内容总宽是显式算出来的，ScrollArea 只是视口，不存在无界展开。
+fn render_table(
+    ui: &mut egui::Ui,
+    header: &[Vec<crate::markdown::Span>],
+    rows: &[Vec<Vec<crate::markdown::Span>>],
+    aligns: &[crate::markdown::Align],
+) {
+    const PAD: f32 = 16.0;
+    const MAX_COL: f32 = 360.0;
+
+    let ncols = header.len().max(1);
+    let mut widths = vec![60.0f32; ncols];
+    let measure = |ui: &egui::Ui, spans: &[crate::markdown::Span]| -> f32 {
+        let text: String = spans
+            .iter()
+            .map(|s| match s {
+                crate::markdown::Span::Text(t)
+                | crate::markdown::Span::Code(t)
+                | crate::markdown::Span::Bold(t) => t.as_str(),
+            })
+            .collect();
+        ui.fonts(|f| {
+            f.layout_no_wrap(text, egui::FontId::proportional(14.0), egui::Color32::WHITE)
+                .size()
+                .x
+        })
+    };
+
+    for (i, cell) in header.iter().enumerate() {
+        widths[i] = widths[i].max((measure(ui, cell) + PAD).min(MAX_COL));
+    }
+    for row in rows {
+        for (i, cell) in row.iter().enumerate().take(ncols) {
+            widths[i] = widths[i].max((measure(ui, cell) + PAD).min(MAX_COL));
+        }
+    }
+    let total: f32 = widths.iter().sum();
+
+    egui::Frame::none()
+        .fill(ui.visuals().faint_bg_color)
+        .inner_margin(egui::Margin::same(6.0))
+        .show(ui, |ui| {
+            let avail = avail_w(ui);
+            ui.set_max_width(avail);
+            let tall = rows.len() > 30;
+            let mut area = if tall {
+                egui::ScrollArea::both().max_height(360.0).max_width(avail)
+            } else {
+                egui::ScrollArea::horizontal().max_width(avail)
+            };
+            area = area.drag_to_scroll(true).auto_shrink([false, true]);
+            area.show(ui, |ui| {
+                // 显式给出内容宽度：这是避免无界展开的关键
+                ui.set_width(total.max(avail - 16.0));
+                table_row(ui, header, &widths, aligns, true);
+                ui.add_space(2.0);
+                for row in rows {
+                    table_row(ui, row, &widths, aligns, false);
+                }
+            });
+        });
+}
+
+fn table_row(
+    ui: &mut egui::Ui,
+    cells: &[Vec<crate::markdown::Span>],
+    widths: &[f32],
+    aligns: &[crate::markdown::Align],
+    _header: bool,
+) {
+    use crate::markdown::Align;
+
+    ui.horizontal(|ui| {
+        for (i, cell) in cells.iter().enumerate() {
+            let Some(w) = widths.get(i) else { break };
+            let align = aligns.get(i).copied().unwrap_or(Align::Left);
+            let layout = match align {
+                Align::Left => egui::Layout::top_down(egui::Align::Min),
+                Align::Center => egui::Layout::top_down(egui::Align::Center),
+                Align::Right => egui::Layout::top_down(egui::Align::Max),
+            };
+            ui.allocate_ui_with_layout(egui::vec2(*w, 0.0), layout, |ui| {
+                render_spans(ui, cell, 14.0, *w - 4.0);
+            });
+        }
+    });
+}
+
+/// 图片：只接受 data URI；解码失败显示占位文字，不影响其它题目。
+fn render_image(ui: &mut egui::Ui, alt: &str, src: &str) {
+    match crate::images::texture_for_uri(ui.ctx(), src) {
+        Some(tex) => {
+            let max_w = avail_w(ui).min(720.0);
+            let size = fit_image(tex.size_vec2(), max_w, 480.0);
+            ui.add(egui::Image::new((tex.id(), size)));
+        }
+        None => {
+            ui.label(
+                egui::RichText::new(format!("[图片无法显示：{alt}]"))
+                    .color(egui::Color32::from_rgb(180, 120, 60)),
+            );
+        }
+    }
+}
+
+/// 等比缩放到最大宽/高之内。
+fn fit_image(size: egui::Vec2, max_w: f32, max_h: f32) -> egui::Vec2 {
+    if size.x <= 0.0 || size.y <= 0.0 {
+        return egui::vec2(1.0, 1.0);
+    }
+    let k = (max_w / size.x).min(max_h / size.y).min(1.0);
+    egui::vec2(size.x * k, size.y * k)
 }
 
 /// 等宽代码块：底色 + 横向滚动（长行不能被裁掉）。
@@ -1113,6 +1372,15 @@ fn render_paper(
 }
 
 /// 中文字体候选（按优先级）。
+/// 粗体字体候选：Markdown 的 **加粗** 用；全缺失时退化为强调色。
+const BOLD_CANDIDATES: &[&str] = &[
+    "C:/Windows/Fonts/msyhbd.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+];
+
 const CJK_CANDIDATES: &[&str] = &[
     r"C:\Windows\Fonts\msyh.ttc", // 微软雅黑
     r"C:\Windows\Fonts\msyhbd.ttc",
@@ -1134,6 +1402,7 @@ fn install_cjk_font(ctx: &egui::Context) -> bool {
 
 fn install_cjk_font_from(ctx: &egui::Context, candidates: &[&str]) -> bool {
     let mut fonts = egui::FontDefinitions::default();
+    let mut ok = false;
     for path in candidates {
         let Ok(bytes) = std::fs::read(path) else {
             continue;
@@ -1152,11 +1421,40 @@ fn install_cjk_font_from(ctx: &egui::Context, candidates: &[&str]) -> bool {
             .entry(egui::FontFamily::Monospace)
             .or_default()
             .push("cjk".to_owned());
-        ctx.set_fonts(fonts);
-        return true;
+        ok = true;
+        break;
     }
-    eprintln!("⚠ 未找到系统中文字体，界面中文可能显示为方块");
-    false
+
+    // 粗体字族：Markdown 的 **加粗** 用它；找不到就退化为强调色（见 bold_style）。
+    let mut bold_ok = false;
+    for path in BOLD_CANDIDATES {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        fonts
+            .font_data
+            .insert("bold".to_owned(), egui::FontData::from_owned(bytes));
+        let mut chain = vec!["bold".to_owned()];
+        if fonts.font_data.contains_key("cjk") {
+            chain.push("cjk".to_owned());
+        }
+        if let Some(defaults) = fonts.families.get(&egui::FontFamily::Proportional) {
+            chain.extend(defaults.iter().cloned());
+        }
+        fonts
+            .families
+            .insert(egui::FontFamily::Name("bold".into()), chain);
+        bold_ok = true;
+        break;
+    }
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("ees_bold_family"), bold_ok));
+
+    if ok {
+        ctx.set_fonts(fonts);
+    } else {
+        eprintln!("⚠ 未找到系统中文字体，界面中文可能显示为方块");
+    }
+    ok
 }
 
 /// 启动 GUI。
@@ -1440,5 +1738,80 @@ mod migration_tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod markdown_render_tests {
+    use super::render_stem;
+    use eframe::egui;
+
+    /// 无窗口跑一帧，验证渲染路径不 panic。
+    fn run_frame(stem: &str) {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    render_stem(ui, stem);
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn renders_text_blocks() {
+        run_frame("普通段落，含 `行内代码` 与 **加粗**。");
+        run_frame("# 标题\n\n### 三级");
+        run_frame("- 甲\n- 乙\n\n1. 一\n2. 二");
+        run_frame("> 引用一行");
+    }
+
+    #[test]
+    fn renders_code_block() {
+        run_frame("```c\nint x = 1;\n```");
+    }
+
+    #[test]
+    fn renders_table() {
+        run_frame("| 列1 | 列2 |\n|:--|--:|\n| a | b |");
+    }
+
+    #[test]
+    fn renders_every_block_kind_in_one_frame() {
+        let stem = "# 标题\n\n普通段落，含 `行内代码` 与 **加粗**。\n\n- 甲\n- 乙\n\n1. 一\n2. 二\n\n> 引用一行\n\n| 列1 | 列2 |\n|:--|--:|\n| a | b |\n\n```c\nint x = 1;\n```\n\n![图](data:image/png;base64,AAAA)";
+        run_frame(stem);
+    }
+
+    #[test]
+    fn renders_every_block_kind() {
+        let stem = "# 标题\n\n普通段落，含 `行内代码` 与 **加粗**。\n\n- 甲\n- 乙\n\n1. 一\n2. 二\n\n> 引用一行\n\n| 列1 | 列2 |\n|:--|--:|\n| a | b |\n\n```c\nint x = 1;\n```\n\n![图](data:image/png;base64,AAAA)";
+        run_frame(stem);
+    }
+
+    #[test]
+    fn renders_long_table() {
+        let mut stem = String::from("| 列1 | 列2 | 列3 |\n|---|---|---|\n");
+        for i in 0..40 {
+            stem.push_str(&format!("| 数据{i} | 更多{i} | 更长一点的数据{i} |\n"));
+        }
+        run_frame(&stem);
+    }
+
+    #[test]
+    fn renders_broken_image() {
+        run_frame("![图](data:image/png;base64,AAAA)");
+    }
+
+    #[test]
+    fn renders_malformed_input_without_panic() {
+        for stem in [
+            "```未闭合",
+            "| 只有表头 |\n| --- |",
+            "**未闭合加粗",
+            "`未闭合代码",
+            "",
+        ] {
+            run_frame(stem);
+        }
     }
 }
