@@ -428,3 +428,39 @@ def test_bank_label_avoids_duplicate_name(qapp, state_with_banks) -> None:
         assert not [x for x in labels if x.count("same") > 1], f"名称重复显示：{labels}"
     finally:
         editor.deleteLater()
+
+
+# ---------------------------------------------------------------- 班级（第十四轮之后）
+
+
+def test_by_class_selection_fills_roster(qapp, state_with_banks, monkeypatch) -> None:
+    """选班级后：学号并入自定义名单，并切回 custom 模式（场次存快照）。"""
+    from app.core.models import StudentClass
+
+    state_with_banks.students = [1, 2, 3, 4]
+    state_with_banks.classes = [
+        StudentClass(name="一班", code="C1", students=[1, 2]),
+        StudentClass(name="二班", code="C2", students=[3]),
+    ]
+    tab = SessionsTab(state_with_banks)
+    try:
+        monkeypatch.setattr(tab, "_pick_classes", lambda: [1, 2, 3])
+        tab.combo_roster.setCurrentIndex(tab.combo_roster.findData("by_class"))
+        assert tab.combo_roster.currentData() == "custom", "选完必须切回自定义（存快照）"
+        assert tab.edit_roster.text().split() == ["1", "2", "3"]
+        assert "来自 2 个班" in tab.lbl_roster_info.text()
+    finally:
+        tab.deleteLater()
+
+
+def test_roster_info_warns_when_no_class_matches(qapp, state_with_banks) -> None:
+    from app.core.models import StudentClass
+
+    state_with_banks.students = [1, 2]
+    state_with_banks.classes = [StudentClass(name="一班", students=[1])]
+    tab = SessionsTab(state_with_banks)
+    try:
+        tab.edit_roster.setText("2 9")
+        assert "未匹配到班级" in tab.lbl_roster_info.text()
+    finally:
+        tab.deleteLater()

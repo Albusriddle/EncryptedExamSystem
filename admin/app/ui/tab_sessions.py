@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateTimeEdit,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -189,14 +191,21 @@ class SessionsTab(QWidget):
 
         self.combo_roster = QComboBox()
         self.combo_roster.addItem("使用全部学生", "all")
+        self.combo_roster.addItem("按班级选择…", "by_class")
         self.combo_roster.addItem("自定义名单", "custom")
         self.combo_roster.currentIndexChanged.connect(self._on_roster_mode)
         form.addRow("学号名单", self.combo_roster)
 
         self.edit_roster = QLineEdit()
         self.edit_roster.setPlaceholderText("逗号或空格分隔，例如 2021001 2021002")
+        self.edit_roster.textChanged.connect(self._update_roster_info)
         self.edit_roster.setEnabled(False)
         form.addRow("自定义学号", self.edit_roster)
+
+        # 场次人数与来源：让老师一眼看出"是不是漏加了某个班"
+        self.lbl_roster_info = QLabel("")
+        self.lbl_roster_info.setStyleSheet("color: #888;")
+        form.addRow("", self.lbl_roster_info)
 
         rl.addWidget(form_box)
 
@@ -382,9 +391,80 @@ class SessionsTab(QWidget):
                 pick.setValue(e.pick)
 
     def _on_roster_mode(self) -> None:
-        self.edit_roster.setEnabled(self.combo_roster.currentData() == "custom")
-        if self.combo_roster.currentData() == "all" and not self.edit_roster.text():
+        mode = self.combo_roster.currentData()
+        if mode == "by_class":
+            picked = self._pick_classes()
+            # 选完就切到"自定义"：场次里存的永远是具体学号（快照），
+            # 不依赖班级后续怎么改。
+            self.combo_roster.blockSignals(True)
+            self.combo_roster.setCurrentIndex(self.combo_roster.findData("custom"))
+            self.combo_roster.blockSignals(False)
+            mode = "custom"
+            if picked is not None:
+                merged = list(dict.fromkeys([*picked]))
+                self.edit_roster.setText(" ".join(str(x) for x in merged))
+        self.edit_roster.setEnabled(mode == "custom")
+        if mode == "all" and not self.edit_roster.text():
             self.edit_roster.setText(" ".join(str(x) for x in self.state.students))
+        self._update_roster_info()
+
+    def _update_roster_info(self) -> None:
+        """显示本场人数与来源班级（用于自查漏加）。"""
+        ids = []
+        for tok in self.edit_roster.text().replace("，", ",").replace(",", " ").split():
+            if tok.isdigit():
+                ids.append(int(tok))
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            self.lbl_roster_info.setText("")
+            return
+        sources: dict[str, int] = {}
+        for sid in ids:
+            for name in self.state.classes_of(sid):
+                sources[name] = sources.get(name, 0) + 1
+        if sources:
+            detail = "；".join(f"{n}：{c} 人" for n, c in sorted(sources.items()))
+            self.lbl_roster_info.setText(
+                f"本场 {len(ids)} 人，来自 {len(sources)} 个班（{detail}）"
+            )
+        else:
+            self.lbl_roster_info.setText(f"本场 {len(ids)} 人（未匹配到班级）")
+
+    def _pick_classes(self) -> list[int] | None:
+        """按班级选人：多选班级，返回去重后的学号；取消返回 None。"""
+        if not self.state.classes:
+            QMessageBox.information(self, "还没有班级", "请先到「学生」页新建班级并导入成员。")
+            return None
+        dlg = QDialog(self)
+        dlg.setWindowTitle("按班级添加学生")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("勾选要加入本场的班级（可多选）："))
+        lst = QListWidget(dlg)
+        for c in self.state.classes:
+            item = QListWidgetItem(
+                f"{c.name}（{len(c.students)} 人）" + (f"  [{c.code}]" if c.code else "")
+            )
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, c.name)
+            lst.addItem(item)
+        lay.addWidget(lst, 1)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        picked: list[int] = []
+        for i in range(lst.count()):
+            item = lst.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                c = self.state.class_by_name(item.data(Qt.ItemDataRole.UserRole))
+                if c is not None:
+                    picked.extend(c.students)
+        return picked
 
     def new_session(self) -> None:
         s = self.state.new_draft_session()
