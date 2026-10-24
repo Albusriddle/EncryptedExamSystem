@@ -217,7 +217,11 @@ impl ExamApp {
                 self.clock = unlocked.net.as_ref().map(|n| SyncedClock::new(n.unix));
                 self.expired = false;
                 let now = self.clock.as_ref().map(|c| c.now_unix()).unwrap_or(0);
-                let path = answer_sheet_path(unlocked.student_id, unlocked.session_id);
+                let path = answer_sheet_path(
+                    unlocked.student_id,
+                    unlocked.session_id,
+                    &unlocked.paper.fingerprint(),
+                );
                 // 已有答题卡且是同一份卷：恢复；否则新建
                 let restored = std::fs::read(&path)
                     .ok()
@@ -1200,8 +1204,12 @@ fn now_or_wall_clock(now: Option<u64>) -> u64 {
     })
 }
 
-fn answer_sheet_path(student_id: u64, session_id: u32) -> std::path::PathBuf {
-    let name = format!("answers-{student_id}-{session_id}.eea");
+fn answer_sheet_path(
+    student_id: u64,
+    session_id: u32,
+    paper_fingerprint: &str,
+) -> std::path::PathBuf {
+    let name = answer_sheet_file_name(student_id, session_id, paper_fingerprint);
 
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
@@ -1219,6 +1227,16 @@ fn answer_sheet_path(student_id: u64, session_id: u32) -> std::path::PathBuf {
     let dir = base.join("ExamSystem").join("answers");
     let _ = std::fs::create_dir_all(&dir);
     dir.join(name)
+}
+
+/// 答题卡文件名。
+///
+/// **必须带上试卷指纹**：同一学生同一场次在不同包里都叫 `answers-<学号>-<场次>.eea`，
+/// 老师在同一台机器上试开第二份包就会把学生的真实答案覆盖掉（实测：第二份包
+/// 会把第一份挤成 `.bak`，第三份再把 `.bak` 顶掉——真的会丢数据）。
+fn answer_sheet_file_name(student_id: u64, session_id: u32, paper_fingerprint: &str) -> String {
+    let short = paper_fingerprint.get(..8).unwrap_or(paper_fingerprint);
+    format!("answers-{student_id}-{session_id}-{short}.eea")
 }
 
 /// 目录可写探测：写一个探针文件再删掉。
@@ -1272,5 +1290,24 @@ impl ExamApp {
                 self.save_error = Some(format!("保存答题卡失败：{e}\n路径：{}", path.display()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn answer_sheet_name_includes_paper_fingerprint() {
+        let a = answer_sheet_file_name(2, 1, "91d7055714f35f870b8790ff3a19a20f");
+        let b = answer_sheet_file_name(2, 1, "ffffffffffffffffffffffffffffffff");
+        assert_eq!(a, "answers-2-1-91d70557.eea");
+        assert_ne!(a, b, "不同试卷必须落到不同文件，否则会互相覆盖");
+    }
+
+    #[test]
+    fn answer_sheet_name_tolerates_short_fingerprint() {
+        let name = answer_sheet_file_name(2, 1, "abc");
+        assert_eq!(name, "answers-2-1-abc.eea");
     }
 }
