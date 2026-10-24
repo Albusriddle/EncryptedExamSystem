@@ -80,6 +80,13 @@ pub fn parse_cached(input: &str) -> std::rc::Rc<Vec<Block>> {
             const { RefCell::new(VecDeque::new()) };
     }
     const LIMIT: usize = 128;
+    /// 超过这个大小就不缓存：题干里可能塞着 4MB 的 base64 图片，
+    /// 缓存 128 条最坏能留下几百 MB。
+    const MAX_CACHE_BYTES: usize = 64 * 1024;
+
+    if input.len() > MAX_CACHE_BYTES {
+        return std::rc::Rc::new(parse(input));
+    }
 
     let h = blake3::hash(input.as_bytes());
     let key = u64::from_le_bytes(h.as_bytes()[..8].try_into().unwrap_or_default());

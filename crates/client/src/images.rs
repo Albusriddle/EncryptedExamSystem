@@ -10,7 +10,8 @@
 //!
 //! - 单张解码后 ≤ 4MB：防止一个超大 data URI 把内存打满；
 //! - 解码后像素 ≤ 4096×4096：防止解压炸弹；
-//! - 纹理缓存 32 张：翻回前面的题时不重复解码。
+//! - 纹理缓存：128 MB 字节预算 + 32 张上限；
+//! - **失败也缓存**：坏图不能每帧重试解码（一张坏掉的 4MB 图会持续吃 CPU）。
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -32,7 +33,12 @@ thread_local! {
     /// (键, 纹理, 估算字节数)
     static CACHE: RefCell<VecDeque<([u8; 16], egui::TextureHandle, usize)>> =
         const { RefCell::new(VecDeque::new()) };
+    /// 解码失败的键：命中直接返回 None，不再重复解码
+    static FAILED: RefCell<VecDeque<[u8; 16]>> = const { RefCell::new(VecDeque::new()) };
 }
+
+/// 失败缓存条数（坏图通常只有一两张，32 足够）。
+const FAILED_LIMIT: usize = 32;
 
 /// 取图片纹理：命中缓存直接返回，否则解码并上传。
 ///
@@ -50,8 +56,24 @@ pub fn texture_for_uri(ctx: &egui::Context, uri: &str) -> Option<egui::TextureHa
         return Some(hit);
     }
 
-    let bytes = decode_data_uri(uri)?;
-    let tex = decode_texture(ctx, &bytes, key)?;
+    if FAILED.with(|f| f.borrow().contains(&key)) {
+        return None;
+    }
+
+    let bytes = match decode_data_uri(uri) {
+        Some(b) => b,
+        None => {
+            remember_failure(key);
+            return None;
+        }
+    };
+    let tex = match decode_texture(ctx, &bytes, key) {
+        Some(t) => t,
+        None => {
+            remember_failure(key);
+            return None;
+        }
+    };
     let approx = tex.size()[0] * tex.size()[1] * 4;
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
@@ -66,6 +88,19 @@ pub fn texture_for_uri(ctx: &egui::Context, uri: &str) -> Option<egui::TextureHa
         }
     });
     Some(tex)
+}
+
+fn remember_failure(key: [u8; 16]) {
+    FAILED.with(|f| {
+        let mut f = f.borrow_mut();
+        if f.contains(&key) {
+            return;
+        }
+        f.push_back(key);
+        while f.len() > FAILED_LIMIT {
+            f.pop_front();
+        }
+    });
 }
 
 /// 用 blake3 取 URI 的前 16 字节做键（避免 DefaultHasher 的碰撞串图风险）。
@@ -146,6 +181,15 @@ mod tests {
         let ctx = egui::Context::default();
         let tex = texture_for_uri(&ctx, PNG_1PX).expect("应能生成纹理");
         assert_eq!(tex.size(), [1, 1]);
+    }
+
+    #[test]
+    fn broken_image_is_cached_as_failure() {
+        let ctx = egui::Context::default();
+        let uri = "data:image/png;base64,AAAA";
+        assert!(texture_for_uri(&ctx, uri).is_none());
+        // 第二次必须走失败缓存（不再解码），结果依旧是 None
+        assert!(texture_for_uri(&ctx, uri).is_none());
     }
 
     #[test]
