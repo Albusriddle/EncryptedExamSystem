@@ -75,6 +75,13 @@ class BanksTab(QWidget):
 
         incoming = [x.bank for x in loaded]
 
+        # 题干里的内嵌图片：打包前先把问题挑出来（尺寸/体积/坏数据）
+        from app.core.images import check_bank_images
+
+        for item in loaded:
+            for problem in check_bank_images(item.bank):
+                warns.append(f"{item.bank.title}（{item.bank.exam_id}）：{problem}")
+
         # 冲突确认：同一 exam_id 已存在时**不能静默覆盖**。
         conflicts = self.state.conflicting_bank_ids(incoming)
         overwrite = False
