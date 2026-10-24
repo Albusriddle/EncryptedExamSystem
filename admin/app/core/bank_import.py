@@ -322,6 +322,8 @@ def _convert_one(
     body, internal_type = _build_body(qtype, kind, content, difficulty, verdict, where)
 
     if qtype == "choice":
+        if len(body.options) > 26:
+            raise BankImportError(f"{where}: 选项 {len(body.options)} 个，超过 26 个（A–Z）")
         keys = {o.key for o in body.options}
         letters = answer_letters(verdict) or []
         if not letters:
@@ -361,6 +363,11 @@ def _build_body(
         options = content.get("options")
         if not isinstance(options, dict) or not options:
             raise BankImportError(f"{where}: content.options 必须是非空对象")
+        if len(options) > 26:
+            raise BankImportError(
+                f"{where}: 选项 {len(options)} 个，超过 26 个（A–Z）——"
+                "答题卡用字母表示多选答案，超过会歧义"
+            )
         keys = list(options.keys())
         expected = [chr(ord("A") + i) for i in range(len(keys))]
         if keys != expected:

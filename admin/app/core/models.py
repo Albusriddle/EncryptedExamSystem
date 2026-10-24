@@ -43,6 +43,10 @@ class QuestionBody(BaseModel):
         if self.kind == "options":
             if not self.options:
                 raise ValueError("kind=options 时 options 不能为空")
+            # 答题卡用字母拼接表示多选答案（"AC"），超过 26 个会出现 "27"
+            # 这种多字符键，和 "2"+"7" 无法区分——在入口就拦住。
+            if len(self.options) > 26:
+                raise ValueError("选项不能超过 26 个（A–Z）")
             keys = [o.key for o in self.options]
             if len(keys) != len(set(keys)):
                 raise ValueError("选项键重复")

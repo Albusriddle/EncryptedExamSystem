@@ -131,6 +131,19 @@ impl ExamBank {
                     qid: q.id.clone(),
                 });
             }
+            // 选项键只能是 A–Z：答题卡用"字母拼接"表示多选答案，
+            // 超过 26 个会出现 "27" 这种多字符键，和 "2"+"7" 无法区分。
+            let option_count = match &q.body {
+                crate::model::QuestionBody::Options { options } => options.len(),
+                _ => q.options.len(), // 旧格式只有 options 数组
+            };
+            if option_count > 26 {
+                return Err(crate::model::ModelError::TooManyOptions {
+                    exam_id: self.exam_id.clone(),
+                    qid: q.id.clone(),
+                    count: option_count,
+                });
+            }
         }
         Ok(())
     }
@@ -190,4 +203,62 @@ pub enum ModelError {
     },
     #[error("题库 {exam_id} 存在重复题目 ID: {qid}")]
     DuplicateQuestionId { exam_id: String, qid: String },
+    #[error("题库 {exam_id} 的题 {qid} 有 {count} 个选项，超过 26 个（A–Z）")]
+    TooManyOptions {
+        exam_id: String,
+        qid: String,
+        count: usize,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn q_with_options(n: usize) -> Question {
+        Question {
+            id: "q".into(),
+            qtype: "multiple".into(),
+            stem: "s".into(),
+            options: Vec::new(),
+            body: QuestionBody::Options {
+                options: (0..n)
+                    .map(|i| ChoiceOption {
+                        key: crate::model::option_label(i),
+                        text: "x".into(),
+                    })
+                    .collect(),
+            },
+            kp: None,
+            difficulty: None,
+            answer: None,
+            judge: None,
+            score: 2,
+        }
+    }
+
+    #[test]
+    fn rejects_more_than_26_options() {
+        let bank = ExamBank {
+            exam_id: "m".into(),
+            title: "t".into(),
+            pick: 1,
+            questions: vec![q_with_options(27)],
+        };
+        assert!(matches!(
+            bank.validate(),
+            Err(ModelError::TooManyOptions { .. })
+        ));
+    }
+
+    #[test]
+    fn allows_26_options() {
+        let bank = ExamBank {
+            exam_id: "m".into(),
+            title: "t".into(),
+            pick: 1,
+            questions: vec![q_with_options(26)],
+        };
+        assert!(bank.validate().is_ok());
+    }
 }

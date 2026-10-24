@@ -525,3 +525,49 @@ def test_pick_must_fit_u32() -> None:
         ExamBank(exam_id="m", title="t", pick=-1, questions=[q])
     # 0 仍然允许（用户明确要求保留空卷能力）
     ExamBank(exam_id="m", title="t", pick=0, questions=[q])
+
+
+def test_import_rejects_more_than_26_options(tmp_path: Path) -> None:
+    """答题卡用字母拼接表示多选答案，超过 26 个选项会歧义。"""
+    keys = [chr(ord("A") + i) if i < 26 else str(i + 1) for i in range(27)]
+    q = {
+        "format_version": 2,
+        "type": "choice",
+        "role": "questions",
+        "count": 1,
+        "questions": [
+            {
+                "id": "CH-1",
+                "difficulty": 0,
+                "stem": "多选",
+                "content": {"kind": "options", "options": {k: "x" for k in keys}},
+            }
+        ],
+    }
+    a = {
+        "format_version": 2,
+        "type": "choice",
+        "role": "answers",
+        "count": 1,
+        "answers": [{"id": "CH-1", "verdict": {"kind": "multi", "answer": ["A"]}, "judge": None}],
+    }
+    qp = _write(tmp_path / "big.questions.json", q)
+    _write(tmp_path / "big.answers.json", a)
+    loaded, errors, _ = load_paths([qp])
+    assert not loaded
+    assert errors and "26" in errors[0]
+
+
+def test_model_rejects_27_options() -> None:
+    from pydantic import ValidationError
+
+    from app.core.models import Question
+
+    keys = [chr(ord("A") + i) if i < 26 else str(i + 1) for i in range(27)]
+    with pytest.raises(ValidationError):
+        Question(
+            id="q",
+            type="multiple",
+            stem="s",
+            body={"kind": "options", "options": [{"key": k, "text": "x"} for k in keys]},
+        )
