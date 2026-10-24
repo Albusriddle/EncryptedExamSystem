@@ -100,8 +100,9 @@ jobs:
       # Windows locale 能暴露这类问题。
       - name: 测试（Windows locale）
         working-directory: admin
-        env:
-          QT_QPA_PLATFORM: offscreen
+        # 这里**不能**设 QT_QPA_PLATFORM=offscreen：Windows 上 offscreen 插件在
+        # 解释器退出时会崩（本机实测 195 passed 但退出码 127），而 runner 有桌面
+        # 会话，直接用原生 windows 平台是干净的（退出码 0）。
         run: uv run pytest -q
 
   # 端到端：真的打一个包再用学生端解开，防止"单元测试全绿但装不起来"。
