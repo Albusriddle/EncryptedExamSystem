@@ -69,3 +69,4 @@ examadm-*/
 /*.rs
 # 本地临时测试目录（advisor: 每次打包测试都会产生）
 .t/
+pytest-win.xml
