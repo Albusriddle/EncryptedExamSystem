@@ -71,6 +71,21 @@ enum Cmd {
         #[arg(long)]
         no_embed_key: bool,
     },
+    /// 解密并校验学生答题卡（教师用）
+    VerifyAnswerSheet {
+        /// 答题卡文件（.eea）
+        file: PathBuf,
+        /// 输出机器可读 JSON（供管理端调用）
+        #[arg(long)]
+        json: bool,
+        /// 学生端包：提供时做交叉校验（试卷指纹与题目必须对得上）
+        #[arg(long)]
+        package: Option<PathBuf>,
+        #[arg(long, conflicts_with = "master_file")]
+        master: Option<String>,
+        #[arg(long)]
+        master_file: Option<PathBuf>,
+    },
     /// 校验一个包能否被指定密钥解开
     Verify {
         #[arg(long)]
@@ -126,6 +141,162 @@ fn install_broken_pipe_guard() {
     }));
 }
 
+/// 校验答题卡，返回进程退出码：
+/// 0 通过 / 2 解密失败 / 3 结构错误 / 4 绑定不匹配 / 5 IO 或参数错误。
+fn verify_answer_sheet(
+    file: &std::path::Path,
+    as_json: bool,
+    package: Option<&std::path::Path>,
+    master: Option<String>,
+    master_file: Option<PathBuf>,
+) -> Result<i32> {
+    use common::answer_sheet;
+
+    let master_hex = resolve_master(master, master_file)?;
+    let master = crypto::master_from_hex(&master_hex).context("解析主密钥")?;
+    let k_manifest = container::manifest_key(&master);
+
+    let bytes = match std::fs::read(file) {
+        Ok(b) => b,
+        Err(e) => {
+            emit_result(
+                as_json,
+                false,
+                &format!("读取 {} 失败：{e}", file.display()),
+                None,
+            );
+            return Ok(5);
+        }
+    };
+
+    // L1 + L2：解密 + 结构校验（open 内部已做 validate）
+    let sheet = match answer_sheet::open(&k_manifest, &bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            let code = match e {
+                answer_sheet::AnswerSheetError::Decrypt => 2,
+                _ => 3,
+            };
+            emit_result(as_json, false, &format!("{e}"), None);
+            return Ok(code);
+        }
+    };
+
+    // L3：与包交叉校验
+    let mut binding: Option<bool> = None;
+    if let Some(pkg) = package {
+        match check_binding(pkg, &sheet, &k_manifest) {
+            Ok(true) => binding = Some(true),
+            Ok(false) => {
+                emit_result(
+                    as_json,
+                    false,
+                    "绑定校验失败：试卷指纹或题目列表与包内数据不一致",
+                    Some(&sheet),
+                );
+                return Ok(4);
+            }
+            Err(e) => {
+                emit_result(as_json, false, &format!("绑定校验失败：{e}"), Some(&sheet));
+                return Ok(4);
+            }
+        }
+    }
+
+    let summary = format!(
+        "答题卡 {}\n  学号 {}\n  场次 {}\n  题目 {}（已答 {}，未答 {}）\n  试卷指纹 {}\n  交卷 {}\n  解密 ✓  结构 ✓{}",
+        file.display(),
+        sheet.student_id,
+        sheet.session_id,
+        sheet.qids.len(),
+        sheet.answered(),
+        sheet.qids.len() - sheet.answered(),
+        sheet.paper_fingerprint,
+        match sheet.submitted_unix {
+            Some(t) => format!("{} 已冻结", common::timegate::format_unix_local_zoned(t)),
+            None => "未交卷".to_string(),
+        },
+        match binding {
+            Some(true) => "  绑定 ✓（与包一致）",
+            _ => "  绑定 －（未提供 --package）",
+        }
+    );
+    emit_result(as_json, true, &summary, Some(&sheet));
+    Ok(0)
+}
+
+/// 用包内数据重算这名学生的试卷，核对指纹与题目列表。
+///
+/// **不经过时间门禁**：教师校验发生在考试结束之后，门禁必然已经关闭。
+/// 这段逻辑只存在于 builder（教师工具），绝不能进学生端——否则等于给门禁开后门。
+fn check_binding(
+    package: &std::path::Path,
+    sheet: &common::answer_sheet::AnswerSheet,
+    k_manifest: &[u8; 32],
+) -> Result<bool> {
+    use common::picker;
+
+    let bytes =
+        std::fs::read(package).with_context(|| format!("读取包 {} 失败", package.display()))?;
+    let payload = container::extract_payload(&bytes).context("包里没有 payload")?;
+    let (header, blob) = container::parse_header(payload, k_manifest)
+        .context("解析 header 失败（包与主密钥不匹配？）")?;
+    let salt = hex::decode(&header.salt).context("header.salt 不是 hex")?;
+    let session = header
+        .sessions
+        .iter()
+        .find(|s| s.session_id == sheet.session_id)
+        .with_context(|| format!("包内没有场次 {}", sheet.session_id))?;
+    let unlocked = container::try_unlock_session(session, &header, blob, sheet.student_id, &salt)
+        .context("解锁信封失败")?
+        .with_context(|| {
+            format!(
+                "学号 {} 不在场次 {} 的名单中",
+                sheet.student_id, sheet.session_id
+            )
+        })?;
+    let data = container::decrypt_data(&unlocked.session_secret, &salt, &unlocked.data_ct)
+        .context("解密题库失败")?;
+    let paper = picker::generate_paper(
+        sheet.student_id,
+        unlocked.session_id,
+        &salt,
+        &data.banks,
+        |exam_id, fallback| data.pick_for(exam_id, fallback),
+    )
+    .context("重新生成试卷失败")?;
+
+    if paper.fingerprint() != sheet.paper_fingerprint {
+        return Ok(false);
+    }
+    let qids: Vec<String> = paper
+        .sections
+        .iter()
+        .flat_map(|s| s.items.iter().map(|i| i.id.clone()))
+        .collect();
+    Ok(qids == sheet.qids)
+}
+
+fn emit_result(
+    as_json: bool,
+    ok: bool,
+    message: &str,
+    sheet: Option<&common::answer_sheet::AnswerSheet>,
+) {
+    if as_json {
+        let payload = serde_json::json!({
+            "ok": ok,
+            "message": message,
+            "sheet": sheet,
+        });
+        println!("{payload}");
+    } else if ok {
+        println!("{message}");
+    } else {
+        eprintln!("✗ {message}");
+    }
+}
+
 fn main() -> Result<()> {
     install_broken_pipe_guard();
     let cli = Cli::parse();
@@ -134,6 +305,16 @@ fn main() -> Result<()> {
             let key = crypto::generate_master_hex();
             println!("{key}");
             eprintln!("请立即把该密钥存入密码管理器；不要写入任何文件或提交进 git。");
+        }
+        Cmd::VerifyAnswerSheet {
+            file,
+            json,
+            package,
+            master,
+            master_file,
+        } => {
+            let code = verify_answer_sheet(&file, json, package.as_deref(), master, master_file)?;
+            std::process::exit(code);
         }
         Cmd::Build {
             manifest,
@@ -508,4 +689,142 @@ fn verify(package: PathBuf, master_hex: &str) -> Result<()> {
     println!("   包里不含学号明文，信封内容无法在不猜中学号的情况下解开。");
     println!("   总信封数 {total_env} 个（= 各场考生数之和）。");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::answer_sheet::{AnswerSheet, seal, write_atomic};
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let dir = std::path::Path::new("target")
+            .join("verify-tests")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn master_hex() -> String {
+        "11".repeat(32)
+    }
+
+    /// 造一个最小可用的包，返回 (包路径, K_manifest)。
+    fn make_package(dir: &std::path::Path, master: &str, out_name: &str) -> (PathBuf, [u8; 32]) {
+        let banks = dir.join("banks");
+        std::fs::create_dir_all(&banks).unwrap();
+        std::fs::write(
+            banks.join("m.json"),
+            r#"{"exam_id":"m","title":"数学","pick":2,"questions":[
+                 {"id":"q1","type":"single","stem":"1+1?","options":["1","2"],"answer":"B","score":2},
+                 {"id":"q2","type":"single","stem":"2+2?","options":["3","4"],"answer":"B","score":2}]}"#,
+        )
+        .unwrap();
+
+        let manifest = dir.join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{"version":2,"salt":"00112233445566778899aabbccddeeff",
+                "kdf":{"m_cost":8,"t_cost":1,"p_cost":1},
+                "sessions":[{"session_id":1,"start":"2026-01-01T00:00:00+08:00",
+                             "end":"2026-12-31T23:59:59+08:00","students":[2021001],
+                             "exams":[{"file":"m.json","pick":2}]}]}"#,
+        )
+        .unwrap();
+
+        let stub = dir.join("stub.exe");
+        std::fs::write(&stub, b"MZ EXAMKEY:EMBEDDED dummy stub").unwrap();
+
+        let out = dir.join(out_name);
+        build(BuildRequest {
+            manifest_path: manifest,
+            banks_dir: banks,
+            stub_path: stub,
+            out_path: out.clone(),
+            allow_weak_kdf: true,
+            force: true,
+            master_hex: master.to_string(),
+            emit_keyfile: None,
+            embed_key: true,
+        })
+        .unwrap();
+
+        let master_key = crypto::master_from_hex(master).unwrap();
+        let k_manifest = container::manifest_key(&master_key);
+        (out, k_manifest)
+    }
+
+    /// 用包内数据重新生成学生的试卷，造一张答题卡。
+    fn make_sheet(pkg: &std::path::Path, k_manifest: &[u8; 32]) -> AnswerSheet {
+        let bytes = std::fs::read(pkg).unwrap();
+        let payload = container::extract_payload(&bytes).unwrap();
+        let (header, blob) = container::parse_header(payload, k_manifest).unwrap();
+        let salt = hex::decode(&header.salt).unwrap();
+        let session = &header.sessions[0];
+        let unlocked = container::try_unlock_session(session, &header, blob, 2021001, &salt)
+            .unwrap()
+            .unwrap();
+        let data =
+            container::decrypt_data(&unlocked.session_secret, &salt, &unlocked.data_ct).unwrap();
+        let paper = common::picker::generate_paper(2021001, 1, &salt, &data.banks, |e, f| {
+            data.pick_for(e, f)
+        })
+        .unwrap();
+        AnswerSheet::from_paper(&paper, 2021001, 1, 1_700_000_000)
+    }
+
+    #[test]
+    fn verify_sheet_ok_then_tamper_detected() {
+        let dir = tmpdir("ok");
+        let (pkg, k_manifest) = make_package(&dir, &master_hex(), "p.exe");
+        let mut sheet = make_sheet(&pkg, &k_manifest);
+        sheet.set_answer(0, Some("B".into()), 1_700_000_100);
+        sheet.freeze(1_700_000_200);
+
+        let file = dir.join("answers-2021001-1.eea");
+        write_atomic(&file, &seal(&k_manifest, &sheet).unwrap()).unwrap();
+
+        let code = verify_answer_sheet(&file, true, Some(&pkg), Some(master_hex()), None).unwrap();
+        assert_eq!(code, 0, "正常答题卡应通过");
+
+        // 改一个字节：必须解密失败（退出码 2）
+        let mut bytes = std::fs::read(&file).unwrap();
+        let n = bytes.len();
+        bytes[n - 1] ^= 0x01;
+        std::fs::write(&file, &bytes).unwrap();
+        let code = verify_answer_sheet(&file, true, Some(&pkg), Some(master_hex()), None).unwrap();
+        assert_eq!(code, 2, "被改动的文件必须解不开");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn verify_sheet_wrong_package_is_rejected() {
+        let dir = tmpdir("wrong-pkg");
+        let (pkg_a, k_a) = make_package(&dir, &master_hex(), "a.exe");
+        // 另一个 master 的包：指纹/密钥都对不上
+        let other_master = "22".repeat(32);
+        let (pkg_b, _k_b) = make_package(&dir, &other_master, "b.exe");
+
+        let mut sheet = make_sheet(&pkg_a, &k_a);
+        sheet.set_answer(0, Some("A".into()), 1);
+        let file = dir.join("answers-2021001-1.eea");
+        write_atomic(&file, &seal(&k_a, &sheet).unwrap()).unwrap();
+
+        let code =
+            verify_answer_sheet(&file, true, Some(&pkg_b), Some(master_hex()), None).unwrap();
+        assert_eq!(code, 4, "拿错包必须判绑定失败");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn verify_sheet_without_package_skips_binding() {
+        let dir = tmpdir("no-pkg");
+        let (pkg, k_manifest) = make_package(&dir, &master_hex(), "p.exe");
+        let sheet = make_sheet(&pkg, &k_manifest);
+        let file = dir.join("answers-2021001-1.eea");
+        write_atomic(&file, &seal(&k_manifest, &sheet).unwrap()).unwrap();
+        let code = verify_answer_sheet(&file, true, None, Some(master_hex()), None).unwrap();
+        assert_eq!(code, 0, "不给包时只做 L1+L2");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
