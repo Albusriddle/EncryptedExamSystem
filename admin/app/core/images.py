@@ -16,7 +16,7 @@ MAX_BYTES = 1_500_000
 MAX_SIDE = 1200
 
 _IMG = re.compile(
-    r"!\[(?P<alt>[^\]]*)\]\(data:image/(?P<mime>png|jpeg);base64,(?P<data>[A-Za-z0-9+/=\s]+)\)"
+    r"!\[(?P<alt>[^\]]*)\]\(data:image/(?P<mime>png|jpe?g);base64,(?P<data>[A-Za-z0-9+/=\s]+)\)"
 )
 
 
@@ -46,6 +46,16 @@ def _jpeg_size(raw: bytes) -> tuple[int, int] | None:
     return None
 
 
+def image_size(raw: bytes, mime: str) -> tuple[int, int] | None:
+    """读取图片宽高（只读头部，不解码像素）。"""
+    return _png_size(raw) if mime == "image/png" else _jpeg_size(raw)
+
+
+def to_data_uri(raw: bytes, mime: str) -> str:
+    """把图片字节转成 `data:image/...;base64,...`。"""
+    return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+
+
 def check_stem_images(stem: str) -> list[str]:
     """返回该题干里图片的问题列表（空列表表示没问题）。"""
     problems: list[str] = []
@@ -62,7 +72,8 @@ def check_stem_images(stem: str) -> list[str]:
                 f"图片「{alt}」{len(raw) / 1024:.0f} KB，"
                 f"超过建议上限 {MAX_BYTES // 1000} KB，请压缩后再打包"
             )
-        size = _png_size(raw) if m.group("mime") == "png" else _jpeg_size(raw)
+        mime = m.group("mime")
+        size = _png_size(raw) if mime == "png" else _jpeg_size(raw)
         if size is None:
             problems.append(f"图片「{alt}」不是有效的 PNG/JPEG，学生端会显示不出来")
         elif size[0] > MAX_SIDE or size[1] > MAX_SIDE:

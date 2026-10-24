@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.bank_import import load_paths
+from app.core.images import image_size, to_data_uri
 from app.core.state import ProjectState
 from app.ui.import_dialog import ImportConfirmDialog
 
@@ -39,8 +42,12 @@ class BanksTab(QWidget):
         self.btn_add.clicked.connect(self.import_banks)
         self.btn_remove = QPushButton("移除选中")
         self.btn_remove.clicked.connect(self.remove_selected)
+        self.btn_image = QPushButton("插入图片…")
+        self.btn_image.setToolTip("选一张 PNG/JPEG，自动转成可粘进题干的 ![…](data:image/…) 片段")
+        self.btn_image.clicked.connect(self.insert_image)
         bar.addWidget(self.btn_add)
         bar.addWidget(self.btn_remove)
+        bar.addWidget(self.btn_image)
         bar.addStretch(1)
         lay.addLayout(bar)
 
@@ -128,6 +135,59 @@ class BanksTab(QWidget):
             )
         else:
             QMessageBox.information(self, "导入完成", detail + "。")
+
+    def insert_image(self) -> None:
+        """把一张图片转成题干片段并复制到剪贴板。
+
+        教师没有题干编辑器（题库是 JSON 文件），所以这里不直接改文件，
+        只生成 `![说明](data:image/png;base64,…)` 让教师粘到自己的题库里。
+        """
+        from app.core.images import MAX_BYTES, MAX_SIDE
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择图片（PNG/JPEG）", "", "图片 (*.png *.jpg *.jpeg)"
+        )
+        if not path:
+            return
+        try:
+            data = Path(path).read_bytes()
+        except OSError as e:
+            QMessageBox.critical(self, "读取失败", str(e))
+            return
+
+        if len(data) > MAX_BYTES:
+            QMessageBox.warning(
+                self,
+                "图片过大",
+                f"这张图 {len(data) / 1024:.0f} KB，超过建议上限 {MAX_BYTES // 1000} KB。\n"
+                "请先缩小到 1200px 宽以内（照片建议存成 JPEG）再试。",
+            )
+            return
+
+        mime = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+        size = image_size(data, mime)
+        if size is None:
+            QMessageBox.critical(self, "无法识别", "这不是有效的 PNG/JPEG 文件。")
+            return
+        if size[0] > MAX_SIDE or size[1] > MAX_SIDE:
+            QMessageBox.warning(
+                self,
+                "尺寸过大",
+                f"这张图 {size[0]}×{size[1]}，超过建议上限 {MAX_SIDE}px。\n请先缩小再试。",
+            )
+            return
+
+        alt, ok = QInputDialog.getText(self, "图片说明", "给这张图写一句说明（可留空）")
+        alt = (alt or "").strip() if ok else ""
+        snippet = f"![{alt}]({to_data_uri(data, mime)})"
+
+        QGuiApplication.clipboard().setText(snippet)
+        QMessageBox.information(
+            self,
+            "已复制到剪贴板",
+            f"图片 {size[0]}×{size[1]}，{len(data) / 1024:.0f} KB。\n\n"
+            "片段已复制，粘到题库 JSON 的 stem 字段里即可（必须独占一行）。",
+        )
 
     def remove_selected(self) -> None:
         rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)

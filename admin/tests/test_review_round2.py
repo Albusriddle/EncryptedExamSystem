@@ -300,3 +300,16 @@ def test_preview_hides_data_uri_and_bold_markers() -> None:
     assert "**" not in out, "加粗标记要剥掉"
     assert "base64" not in out, "预览里绝不能出现 base64"
     assert "[图片 图]" in out
+
+
+def test_insert_image_button_exists() -> None:
+    """题库页必须有「插入图片…」入口，否则教师没法生成 data URI 片段。"""
+    from app.core.state import ProjectState
+    from app.ui.tab_banks import BanksTab
+
+    tab = BanksTab(ProjectState())
+    try:
+        assert tab.btn_image.isEnabled()
+        assert "插入图片" in tab.btn_image.text()
+    finally:
+        tab.deleteLater()

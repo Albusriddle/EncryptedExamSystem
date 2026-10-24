@@ -55,3 +55,13 @@ def test_bank_reports_question_number() -> None:
     )
     problems = check_bank_images(bank)
     assert len(problems) == 1 and "第 2 题" in problems[0]
+
+
+def test_to_data_uri_roundtrip() -> None:
+    from app.core.images import image_size, to_data_uri
+
+    raw = base64.b64decode(_png(640, 480).split("base64,")[1])
+    uri = to_data_uri(raw, "image/png")
+    assert uri.startswith("data:image/png;base64,")
+    assert image_size(raw, "image/png") == (640, 480)
+    assert check_stem_images(f"![图]({uri})") == []
