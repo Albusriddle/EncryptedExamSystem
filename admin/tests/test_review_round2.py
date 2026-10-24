@@ -279,3 +279,13 @@ def test_rename_conflict_does_not_save_members(qapp, monkeypatch) -> None:
         assert 3 not in st.students, "全局名单也不能被改动"
     finally:
         tab.deleteLater()
+
+
+def test_preview_renders_fenced_stem() -> None:
+    from app.ui.tab_banks import _format_stem
+
+    out = _format_stem("有下列程序：\n```c\nint x = 1;\n```\n下列说法正确的是（ ）。")
+    text = "\n".join(out)
+    assert "```" not in text, "围栏不能原样显示"
+    assert "| int x = 1;" in text, "代码行要带 | 前缀"
+    assert out[0] == "有下列程序："

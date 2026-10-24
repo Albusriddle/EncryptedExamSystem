@@ -150,7 +150,7 @@ class BanksTab(QWidget):
             return
         lines = [f"{bank.title}（{exam_id}）共 {len(bank.questions)} 题", ""]
         for q in bank.questions[:10]:
-            lines.append(f"[{q.qtype}] {q.stem}")
+            lines.extend(_format_stem(q.stem, prefix=f"[{q.qtype}] "))
             # 按正文形态展示：模板/代码题若只打 options，预览里看起来像空题
             if q.body.kind == "options":
                 for opt in q.body.options:
@@ -183,3 +183,26 @@ class BanksTab(QWidget):
                 if c == 2 or c == 3:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(r, c, item)
+
+
+def _format_stem(stem: str, prefix: str = "") -> list[str]:
+    """把题干按 ``` 围栏拆开：围栏里的内容用 "| " 前缀显示成代码块。
+
+    与学生端保持一致的约定（见 docs/题库JSON规范.md）：
+    只识别围栏，未闭合的围栏按普通文本处理。
+    """
+    out: list[str] = []
+    in_code = False
+    started = False
+    for line in stem.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            out.append(f"    | {line}")
+        elif not started:
+            out.append(f"{prefix}{line}")
+            started = True
+        else:
+            out.append(f"    {line}")
+    return out or [prefix.rstrip()]
