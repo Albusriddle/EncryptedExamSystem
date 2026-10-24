@@ -186,11 +186,20 @@ class BanksTab(QWidget):
 
 
 def _format_stem(stem: str, prefix: str = "") -> list[str]:
-    """把题干按 ``` 围栏拆开：围栏里的内容用 "| " 前缀显示成代码块。
+    """把题干按 Markdown 子集拆成便于阅读的纯文本预览。
 
-    与学生端保持一致的约定（见 docs/题库JSON规范.md）：
-    只识别围栏，未闭合的围栏按普通文本处理。
+    与学生端保持一致（见 docs/题库JSON规范.md）：
+    - 围栏里的内容用 "| " 前缀显示成代码块；
+    - 行内代码保留反引号（教师能看出这是代码）；
+    - 加粗去掉 ** 标记；
+    - 图片（data URI）显示成 [图片 说明]，绝不把几百 KB 的 base64 打进预览框。
     """
+    import re
+
+    # ![alt](data:image/...) → [图片 alt]
+    stem = re.sub(r"!\[([^\]]*)\]\(data:image/[^)]*\)", r"[图片 \1]", stem)
+    stem = stem.replace("**", "")
+
     out: list[str] = []
     in_code = False
     started = False

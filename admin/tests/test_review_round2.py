@@ -289,3 +289,14 @@ def test_preview_renders_fenced_stem() -> None:
     assert "```" not in text, "围栏不能原样显示"
     assert "| int x = 1;" in text, "代码行要带 | 前缀"
     assert out[0] == "有下列程序："
+
+
+def test_preview_hides_data_uri_and_bold_markers() -> None:
+    from app.ui.tab_banks import _format_stem
+
+    out = "\n".join(
+        _format_stem("**重点** 与 `code`\n![图](data:image/png;base64,AAAA)\n| a | b |")
+    )
+    assert "**" not in out, "加粗标记要剥掉"
+    assert "base64" not in out, "预览里绝不能出现 base64"
+    assert "[图片 图]" in out
