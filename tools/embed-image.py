@@ -1,5 +1,8 @@
 """把一张图片转成可粘进题库的 data URI 题干片段。
 
+管理端 [题库] 页已内置「插入图片…」按钮（推荐教师用）；
+这个脚本只用于批量/自动化场景。
+
 用法：
     python tools/embed-image.py 图.png --alt 示意图
 
@@ -41,8 +44,10 @@ def main() -> int:
         )
         return 3
 
+    # 说明里带 ] 或 ) 会破坏 ![]( ) 语法（与 core/images.py::sanitize_alt 同规则）
+    alt = args.alt.replace("\n", " ").replace("]", "］").replace(")", "）")
     b64 = base64.b64encode(data).decode("ascii")
-    print(f"![{args.alt}](data:{mime};base64,{b64})")
+    print(f"![{alt}](data:{mime};base64,{b64})")
     return 0
 
 

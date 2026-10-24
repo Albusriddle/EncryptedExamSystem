@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.bank_import import load_paths
-from app.core.images import image_size, to_data_uri
+from app.core.images import image_size, sanitize_alt, to_data_uri
 from app.core.state import ProjectState
 from app.ui.import_dialog import ImportConfirmDialog
 
@@ -178,7 +178,7 @@ class BanksTab(QWidget):
             return
 
         alt, ok = QInputDialog.getText(self, "图片说明", "给这张图写一句说明（可留空）")
-        alt = (alt or "").strip() if ok else ""
+        alt = sanitize_alt(alt) if ok else ""
         snippet = f"![{alt}]({to_data_uri(data, mime)})"
 
         QGuiApplication.clipboard().setText(snippet)

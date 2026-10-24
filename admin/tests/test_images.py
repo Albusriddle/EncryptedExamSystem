@@ -65,3 +65,11 @@ def test_to_data_uri_roundtrip() -> None:
     assert uri.startswith("data:image/png;base64,")
     assert image_size(raw, "image/png") == (640, 480)
     assert check_stem_images(f"![图]({uri})") == []
+
+
+def test_alt_with_brackets_is_sanitized() -> None:
+    from app.core.images import sanitize_alt
+
+    assert sanitize_alt("图(左)") == "图(左）"
+    assert sanitize_alt("a]b") == "a］b"
+    assert sanitize_alt("多\n行") == "多 行"

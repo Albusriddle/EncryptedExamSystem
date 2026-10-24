@@ -46,6 +46,16 @@ def _jpeg_size(raw: bytes) -> tuple[int, int] | None:
     return None
 
 
+def sanitize_alt(text: str) -> str:
+    """把图片说明里的 Markdown 破坏字符换掉。
+
+    `![说明](...)` 里的说明如果带 `]` 或 `)`，会提前终止 alt/URL，
+    生成一段解析不了的片段 —— 学生端只会显示原文。
+    """
+    cleaned = (text or "").replace("\n", " ").replace("\r", " ").strip()
+    return cleaned.replace("]", "］").replace(")", "）")
+
+
 def image_size(raw: bytes, mime: str) -> tuple[int, int] | None:
     """读取图片宽高（只读头部，不解码像素）。"""
     return _png_size(raw) if mime == "image/png" else _jpeg_size(raw)
