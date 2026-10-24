@@ -69,6 +69,28 @@ def find_artifact(name: str, root: Path | None = None) -> Path | None:
 BUILDER = find_artifact(f"exam-builder{EXE}")
 
 
+def copy_legal_files(dest: Path) -> list[str]:
+    """把许可证与第三方声明复制进发布目录。
+
+    合规要求：
+    - Apache-2.0 §4(a)：再分发必须附许可副本；
+    - PySide6/Qt 是 LGPL-3.0：必须附 LGPL/GPL 全文与第三方声明。
+    """
+    copied: list[str] = []
+    for src, name in [
+        (ROOT / "LICENSE", "LICENSE"),
+        (ROOT / "THIRD-PARTY-NOTICES.md", "THIRD-PARTY-NOTICES.md"),
+    ]:
+        if src.exists():
+            shutil.copy2(src, dest / name)
+            copied.append(name)
+    lic_dir = ROOT / "licenses"
+    if lic_dir.is_dir():
+        shutil.copytree(lic_dir, dest / "licenses", dirs_exist_ok=True)
+        copied.append("licenses/")
+    return copied
+
+
 def main() -> int:
     if BUILDER is None:
         print("✗ 找不到 exam-builder 可执行文件")
@@ -191,6 +213,9 @@ def main() -> int:
     if src is not None:
         shutil.copy2(src, rel / f"stub-template{EXE}")
         print(f"✓ 已附带学生端模板 {rel.name}/stub-template{EXE}")
+
+    copied = copy_legal_files(rel)
+    print(f"✓ 已附带许可证文件：{', '.join(copied)}")
 
     manual = ROOT / "docs" / "教师使用手册.md"
     if manual.exists():
