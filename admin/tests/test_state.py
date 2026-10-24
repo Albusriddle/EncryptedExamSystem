@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from app.core.models import ExamBank, KdfParams, Question, Session, SessionExam
 from app.core.state import ProjectState
 
@@ -280,3 +282,39 @@ def test_set_students_prunes_class_members() -> None:
     st.classes = [StudentClass(name="一班", students=[1, 2, 3])]
     st.set_students([1, 3])
     assert st.classes[0].students == [1, 3], "删掉的学号必须同步从班级里移除"
+
+
+def test_project_version_is_2_and_rejects_newer(tmp_path) -> None:
+    import json
+
+    from app.core.state import PROJECT_VERSION, ProjectState
+
+    st = ProjectState(salt="00" * 16, students=[1])
+    p = tmp_path / "p.json"
+    st.save(p)
+    assert json.loads(p.read_text(encoding="utf-8"))["version"] == PROJECT_VERSION
+
+    p.write_text(json.dumps({"version": PROJECT_VERSION + 1, "salt": "00" * 16}), encoding="utf-8")
+    with pytest.raises(ValueError, match="比本程序支持"):
+        ProjectState.load(p)
+
+
+def test_broken_class_gives_readable_error(tmp_path) -> None:
+    import json
+
+    from app.core.state import ProjectState
+
+    p = tmp_path / "bad.json"
+    p.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "salt": "00" * 16,
+                "students": [1],
+                "classes": [{"name": "x", "students": [-5]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="第 1 个班级"):
+        ProjectState.load(p)

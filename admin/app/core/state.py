@@ -27,6 +27,32 @@ from app.core.bank_import import BankImportError, load_bank_from_path, validate_
 from app.core.models import ExamBank, KdfParams, Manifest, Session, StudentClass
 
 
+def _load_classes(raw: object, path: Path) -> list[StudentClass]:
+    """解析班级列表，把 pydantic 的原始报错翻译成老师看得懂的一句话。"""
+    from pydantic import ValidationError
+
+    items = raw if isinstance(raw, list) else []
+    out: list[StudentClass] = []
+    for i, item in enumerate(items, start=1):
+        try:
+            out.append(StudentClass.model_validate(item))
+        except ValidationError as e:
+            first = e.errors()[0]
+            msg = first.get("msg", "格式不正确")
+            raise ValueError(
+                f"工程文件里的第 {i} 个班级数据有问题：{msg}。\n"
+                f"文件：{path.name}\n请检查该班级的学号或名字，或从备份恢复。"
+            ) from e
+    return out
+
+
+#: 工程文件格式版本。
+#:
+#: 1 → 只有 students/sessions
+#: 2 → 增加 classes（班级分组）
+PROJECT_VERSION = 2
+
+
 @dataclass
 class ProjectState:
     """一个考试项目的全部配置。"""
@@ -325,7 +351,7 @@ class ProjectState:
         题库内容也不存——教师会持续修改源文件，存路径更合理。
         """
         data = {
-            "version": 1,
+            "version": PROJECT_VERSION,
             "salt": self.salt,
             "kdf": self.kdf.model_dump(),
             "bank_paths": self.bank_paths,
@@ -342,11 +368,17 @@ class ProjectState:
         salt = data.get("salt")
         if not salt:
             raise ValueError(f"{path.name} 缺少 salt 字段，可能不是本程序保存的工程文件。")
+        version = int(data.get("version", 1))
+        if version > PROJECT_VERSION:
+            raise ValueError(
+                f"工程文件版本 {version} 比本程序支持的 {PROJECT_VERSION} 新，"
+                "请升级管理端后再打开。"
+            )
         st = cls(
             kdf=KdfParams.model_validate(data.get("kdf", {})),
             salt=salt,
             students=list(data.get("students", [])),
-            classes=[StudentClass.model_validate(c) for c in data.get("classes", [])],
+            classes=_load_classes(data.get("classes", []), path),
         )
         st.sessions = [Session.model_validate(s) for s in data.get("sessions", [])]
         st.bank_paths = dict(data.get("bank_paths", {}))
