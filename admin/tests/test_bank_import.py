@@ -386,3 +386,142 @@ def test_reopening_project_keeps_external_banks(tmp_path: Path) -> None:
     assert list(st2.banks) == ["demo"], "重开工程后题库丢了"
     assert len(st2.banks["demo"].questions) == 2
     assert st2.banks["demo"].questions[0].body.kind == "options"
+
+
+# ---------------------------------------------------------------- 答案自洽性（第九轮）
+
+
+def test_answer_letters_variants() -> None:
+    from app.core.bank_import import answer_letters
+
+    assert answer_letters(None) == []
+    assert answer_letters({"kind": "single", "answer": "B"}) == ["B"]
+    assert answer_letters({"kind": "multi", "answer": ["A", "C"]}) == ["A", "C"]
+    assert answer_letters("B") == ["B"]
+    assert answer_letters("AB") == ["A", "B"]
+    assert answer_letters("A,C") == ["A", "C"]
+    assert answer_letters("") == []
+    assert answer_letters({"kind": "blanks", "answer": []}) is None
+
+
+def test_validate_answers_legacy_format() -> None:
+    """旧题库没有 body，只有 options 数组——同样要校验。"""
+    from app.core.bank_import import validate_bank_answers
+    from app.core.models import ExamBank, Question
+
+    bad = ExamBank(
+        exam_id="m",
+        title="t",
+        pick=1,
+        questions=[Question(id="q1", type="single", stem="s", options=["a", "b"], answer="E")],
+    )
+    problems = validate_bank_answers(bad)
+    assert problems and "q1" in problems[0] and "不在选项" in problems[0]
+
+    ok = ExamBank(
+        exam_id="m",
+        title="t",
+        pick=1,
+        questions=[Question(id="q1", type="single", stem="s", options=["a", "b"], answer="B")],
+    )
+    assert validate_bank_answers(ok) == []
+
+
+def test_validate_answers_skips_questions_without_answer() -> None:
+    from app.core.bank_import import validate_bank_answers
+    from app.core.models import ExamBank, Question
+
+    bank = ExamBank(
+        exam_id="m",
+        title="t",
+        pick=1,
+        questions=[Question(id="q1", type="single", stem="s", options=["a", "b"])],
+    )
+    assert validate_bank_answers(bank) == [], "没有答案的题不该报错（可能只用于展示）"
+
+
+def test_native_import_rejects_bad_answer(tmp_path: Path) -> None:
+    native = {
+        "exam_id": "m",
+        "title": "t",
+        "pick": 1,
+        "questions": [
+            {"id": "q1", "type": "single", "stem": "s", "options": ["a", "b"], "answer": "E"}
+        ],
+    }
+    p = _write(tmp_path / "m.json", native)
+    loaded, errors, _ = load_paths([p])
+    assert not loaded
+    assert errors and "不在选项" in errors[0]
+
+
+def test_state_validate_reports_bad_answer() -> None:
+    from app.core.models import ExamBank, Question, Session, SessionExam
+    from app.core.state import ProjectState
+
+    st = ProjectState()
+    st.banks["m"] = ExamBank(
+        exam_id="m",
+        title="t",
+        pick=1,
+        questions=[Question(id="q1", type="single", stem="s", options=["a", "b"], answer="E")],
+    )
+    st.students = [1]
+    st.sessions = [
+        Session(
+            session_id=1,
+            start="2026-12-20T09:00:00+08:00",
+            end="2026-12-20T11:00:00+08:00",
+            students=[1],
+            exams=[SessionExam(file="m.json", pick=1)],
+        )
+    ]
+    problems = st.validate()
+    assert any("不在选项" in x for x in problems), problems
+
+
+# ---------------------------------------------------------------- 整数范围（对齐 Rust）
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"score": -1},
+        {"score": 5000},
+        {"difficulty": 300},
+        {"difficulty": -1},
+    ],
+)
+def test_question_fields_are_bounded(kwargs) -> None:
+    from pydantic import ValidationError
+
+    from app.core.models import Question
+
+    with pytest.raises(ValidationError):
+        Question(id="q", type="single", stem="s", options=["a"], **kwargs)
+
+
+def test_blank_count_is_u8() -> None:
+    from pydantic import ValidationError
+
+    from app.core.models import Question
+
+    with pytest.raises(ValidationError):
+        Question(
+            id="q",
+            type="fill",
+            stem="s",
+            body={"kind": "template", "template": "____①____", "blank_count": 300},
+        )
+
+
+def test_pick_must_fit_u32() -> None:
+    from pydantic import ValidationError
+
+    from app.core.models import ExamBank, Question
+
+    q = Question(id="q", type="single", stem="s", options=["a"])
+    with pytest.raises(ValidationError):
+        ExamBank(exam_id="m", title="t", pick=-1, questions=[q])
+    # 0 仍然允许（用户明确要求保留空卷能力）
+    ExamBank(exam_id="m", title="t", pick=0, questions=[q])

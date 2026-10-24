@@ -58,6 +58,8 @@
         "difficulty": {
           "anyOf": [
             {
+              "maximum": 255,
+              "minimum": 0,
               "type": "integer"
             },
             {
@@ -77,6 +79,8 @@
         },
         "score": {
           "default": 2,
+          "maximum": 1000,
+          "minimum": 0,
           "title": "Score",
           "type": "integer"
         }
@@ -131,6 +135,8 @@
         },
         "blank_count": {
           "default": 0,
+          "maximum": 255,
+          "minimum": 0,
           "title": "Blank Count",
           "type": "integer"
         }
@@ -149,6 +155,8 @@
       "type": "string"
     },
     "pick": {
+      "maximum": 4294967295,
+      "minimum": 0,
       "title": "Pick",
       "type": "integer"
     },

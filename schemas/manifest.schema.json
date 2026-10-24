@@ -25,6 +25,8 @@
     "Session": {
       "properties": {
         "session_id": {
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Session Id",
           "type": "integer"
         },
@@ -70,6 +72,8 @@
         "pick": {
           "anyOf": [
             {
+              "maximum": 4294967295,
+              "minimum": 0,
               "type": "integer"
             },
             {

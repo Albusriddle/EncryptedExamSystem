@@ -23,7 +23,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.core.bank_import import BankImportError, load_bank_from_path
+from app.core.bank_import import BankImportError, load_bank_from_path, validate_bank_answers
 from app.core.models import ExamBank, KdfParams, Manifest, Session
 
 
@@ -179,6 +179,11 @@ class ProjectState:
             problems.append("还没有导入学生名单")
         if not self.sessions:
             problems.append("还没有编排任何场次")
+
+        # 答案自洽性：原生题库以前只查形状，`answer: "E"` 配 A/B 选项也能过。
+        # 放在这里而不是只在导入时查，是因为题库源文件可能在导入后被改过。
+        for bank in self.banks.values():
+            problems.extend(validate_bank_answers(bank))
 
         # 逐个场次单独校验，收集全部错误
         for s in self.sessions:

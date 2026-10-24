@@ -59,6 +59,77 @@ _BLANK_RE = re.compile(r"____([①②③④⑤⑥⑦⑧⑨⑩])____")
 _DUP_SUFFIX_RE = re.compile(r"\s*\(\d+\)$")
 
 
+def answer_letters(answer: Any) -> list[str] | None:
+    """把答案统一成字母列表；无法识别返回 None。
+
+    支持三种写法：
+    - 结构化：`{"kind": "single", "answer": "B"}` / `{"kind": "multi", "answer": ["A","C"]}`
+    - 旧式单字母：`"B"`
+    - 旧式多选：`"AB"` / `"A,B"` / `"A B"`
+
+    没有答案（`None` / 空）返回空列表。
+    """
+    if answer is None:
+        return []
+    if isinstance(answer, dict):
+        kind = answer.get("kind")
+        raw = answer.get("answer")
+        if kind == "single":
+            return [raw] if isinstance(raw, str) and raw else []
+        if kind == "multi":
+            return [str(x) for x in raw] if isinstance(raw, list) else []
+        return None
+    if isinstance(answer, str):
+        text = answer.strip()
+        if not text:
+            return []
+        parts = [x for x in re.split(r"[,;、\s]+", text) if x]
+        if len(parts) > 1:
+            return parts
+        return list(text)
+    return None
+
+
+def validate_bank_answers(bank: ExamBank) -> list[str]:
+    """校验"答案字母是否落在选项里"。返回问题列表（空 = 没问题）。
+
+    为什么需要：原生题库以前只做形状校验，`answer: "E"` 配 A/B 选项也能导入，
+    学生永远选不到正确项。外部格式导入时查过，原生格式没查——两条路径必须一致。
+    """
+    problems: list[str] = []
+    for q in bank.questions:
+        keys = _option_keys(q)
+        if keys is None:
+            continue  # 不是选项题（模板/代码/纯文本）
+        letters = answer_letters(q.answer)
+        if letters is None:
+            problems.append(f"题库 {bank.exam_id} 的题 {q.id}：答案格式无法识别（{q.answer!r}）")
+            continue
+        if not letters:
+            continue  # 没有答案不算错：可能只用于展示
+        bad = [x for x in letters if x not in keys]
+        if bad:
+            problems.append(
+                f"题库 {bank.exam_id} 的题 {q.id}：答案 {bad} 不在选项 {sorted(keys)} 中"
+            )
+        elif len(set(letters)) != len(letters):
+            problems.append(f"题库 {bank.exam_id} 的题 {q.id}：答案里有重复字母 {letters}")
+    return problems
+
+
+def _option_keys(q: Question) -> set[str] | None:
+    """取这道题的合法选项键；不是选项题返回 None。
+
+    要同时支持新格式（`body.kind == "options"`）与旧格式（只有 `options` 数组）：
+    旧格式的键由位置生成，与 Rust 端 `model::option_label` 的规则一致。
+    """
+    if q.body.kind == "options":
+        return {o.key for o in q.body.options}
+    if q.body.kind == "text" and q.options:
+        return {chr(ord("A") + i) if i < 26 else str(i + 1) for i in range(len(q.options))}
+    return None
+
+
 class BankImportError(Exception):
     """导入失败（带用户可读说明）。"""
 
@@ -252,8 +323,7 @@ def _convert_one(
 
     if qtype == "choice":
         keys = {o.key for o in body.options}
-        raw_answer = verdict.get("answer")
-        letters = [raw_answer] if vkind == "single" else list(raw_answer or [])
+        letters = answer_letters(verdict) or []
         if not letters:
             raise BankImportError(f"{where}: 答案为空")
         bad = [x for x in letters if x not in keys]
@@ -456,6 +526,10 @@ def load_paths(paths: list[Path]) -> tuple[list[ImportedBank], list[str], list[s
             bank = ExamBank.model_validate_json(p.read_text(encoding="utf-8-sig"))
         except Exception as e:  # noqa: BLE001 - pydantic 的 ValidationError
             errors.append(f"{p.name}:\n{e}")
+            continue
+        problems = validate_bank_answers(bank)
+        if problems:
+            errors.append(f"{p.name}:\n" + "\n".join(problems[:5]))
             continue
         loaded.append(ImportedBank(bank=bank, source=p))
 

@@ -35,7 +35,8 @@ class QuestionBody(BaseModel):
     options: list[ChoiceOption] = Field(default_factory=list)
     template: str | None = None
     code: list[str] = Field(default_factory=list)
-    blank_count: int = 0
+    # 与 Rust 的 u8 对齐：超范围的值 Python 放行、打包时才报"解析题库"
+    blank_count: int = Field(default=0, ge=0, le=255)
 
     @model_validator(mode="after")
     def _check(self) -> QuestionBody:
@@ -65,12 +66,13 @@ class Question(BaseModel):
     options: list[str] = Field(default_factory=list)
     body: QuestionBody = Field(default_factory=QuestionBody)
     kp: str | None = None
-    difficulty: int | None = None
+    difficulty: int | None = Field(default=None, ge=0, le=255)
     #: 结构化答案（single/multi/blanks/fixes）。打包时会被剥离。
     answer: Any = None
     #: 判分材料（entry/harness/tests）。**绝不进包**，打包时会被剥离。
     judge: Any = None
-    score: int = 2
+    # Rust 是 u32；这里更严（0..=1000），因为"分值上万"没有实际意义
+    score: int = Field(default=2, ge=0, le=1000)
 
     model_config = {"populate_by_name": True}
 
@@ -118,7 +120,8 @@ def validate_exam_id(v: str) -> str:
 class ExamBank(BaseModel):
     exam_id: str
     title: str
-    pick: int
+    # 下限保持 0（空卷是允许的，用户明确要求）；上限对齐 Rust 的 u32
+    pick: int = Field(ge=0, le=2**32 - 1)
     questions: list[Question]
 
     @field_validator("exam_id")
@@ -142,11 +145,13 @@ class ExamBank(BaseModel):
 
 class SessionExam(BaseModel):
     file: str
-    pick: int | None = None
+    # 上限对齐 Rust 的 u32；下限为 0（空卷允许）
+    pick: int | None = Field(default=None, ge=0, le=2**32 - 1)
 
 
 class Session(BaseModel):
-    session_id: int
+    # Rust 是 u32
+    session_id: int = Field(ge=0, le=2**32 - 1)
     start: str
     end: str
     students: list[int]
