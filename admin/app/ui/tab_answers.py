@@ -215,6 +215,9 @@ class AnswersTab(QWidget):
 
     def _invalidate(self) -> None:
         """主密钥/包变了，之前的结果全部作废。"""
+        if self._busy():
+            # 校验进行中输入本该是禁用的；这里是双保险，防止内部改动绕过
+            return
         if not self.results:
             return
         self.results.clear()
@@ -343,9 +346,16 @@ class AnswersTab(QWidget):
             self.table.item(row, 7).setToolTip(tooltip)
 
     def _set_editing_enabled(self, on: bool) -> None:
-        self.btn_add.setEnabled(on)
-        self.btn_dir.setEnabled(on)
-        self.btn_clear.setEnabled(on)
+        # 主密钥/包也算"编辑态"：校验中改它们会触发 _invalidate，把结果清空
+        for w in (
+            self.btn_add,
+            self.btn_dir,
+            self.btn_clear,
+            self.master,
+            self.pkg,
+            self.btn_eye,
+        ):
+            w.setEnabled(on)
 
     def _on_all(self) -> None:
         self._set_editing_enabled(True)

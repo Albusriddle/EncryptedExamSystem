@@ -255,3 +255,23 @@ def test_start_is_not_reentrant(qapp, monkeypatch) -> None:
     finally:
         tab.worker = None
         tab.deleteLater()
+
+
+def test_master_and_package_frozen_while_verifying(qapp, monkeypatch) -> None:
+    import app.ui.tab_answers as mod
+
+    monkeypatch.setattr(mod, "VerifyWorker", _FakeRunningWorker)
+    tab = AnswersTab()
+    try:
+        tab._append([Path("a.eea")])
+        tab.master.setText("11" * 32)
+        tab._start()
+        assert not tab.master.isEnabled(), "校验中不能改主密钥"
+        assert not tab.pkg.isEnabled(), "校验中不能换包"
+        # 即便有人绕过禁用直接改文本，也不能把结果清掉
+        tab.results["x"] = {"ok": True}
+        tab.master.setText("22" * 32)
+        assert "x" in tab.results, "忙时 _invalidate 必须直接返回"
+    finally:
+        tab.worker = None
+        tab.deleteLater()
