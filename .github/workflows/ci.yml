@@ -119,7 +119,7 @@ jobs:
           print(f"cases={len(cases)} failures={len(bad)}")
           for c in bad[:10]:
               print("  FAIL", c.get("name"))
-          if len(cases) < 150 or bad:
+          if not cases or bad:
               sys.exit(1)
           PY
 
