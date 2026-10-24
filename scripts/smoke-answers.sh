@@ -50,7 +50,7 @@ sleep 1
 
 SHEET="$(find "$WORK" -maxdepth 1 -name 'answers-*.eea' | head -1)"
 [ -n "$SHEET" ] || { echo "✗ 没有生成答题卡"; exit 1; }
-echo "答题卡：$(basename "$SHEET")（$(stat -c%s "$SHEET" 2>/dev/null || echo '?') 字节）"
+echo "答题卡：$(basename "$SHEET")（$(wc -c < "$SHEET" | tr -d ' ') 字节）"
 
 OUT="$(EXAM_MASTER="$MASTER" "$BUILDER" verify-answer-sheet "$SHEET" --package "$WORK/pkg.exe" --json)"
 echo "$OUT" | python -c '
