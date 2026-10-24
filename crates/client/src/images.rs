@@ -18,43 +18,65 @@ use std::collections::VecDeque;
 use base64::Engine as _;
 use eframe::egui;
 
+/// 纹理缓存预算：按**字节**而不是张数算。
+///
+/// 单张 4096×4096 RGBA 纹理就是 64MB，按"32 张"限制最坏能吃到 2GB。
+const CACHE_MAX_BYTES: usize = 128 * 1024 * 1024;
+const CACHE_LIMIT: usize = 32;
+
 /// 单张图片解码后的字节上限（base64 前）。
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 /// 单边像素上限。
 const MAX_PIXELS: u32 = 4096;
-/// 纹理缓存条数。
-const CACHE_LIMIT: usize = 32;
-
 thread_local! {
-    static CACHE: RefCell<VecDeque<(u64, egui::TextureHandle)>> = const { RefCell::new(VecDeque::new()) };
+    /// (键, 纹理, 估算字节数)
+    static CACHE: RefCell<VecDeque<([u8; 16], egui::TextureHandle, usize)>> =
+        const { RefCell::new(VecDeque::new()) };
 }
 
 /// 取图片纹理：命中缓存直接返回，否则解码并上传。
+///
+/// **缓存键必须是 URI 字符串的哈希**：早期版本先 base64 解码再算键，
+/// 命中缓存也要先付一次 ~2MB 的解码成本，滚动时每帧都卡。
 pub fn texture_for_uri(ctx: &egui::Context, uri: &str) -> Option<egui::TextureHandle> {
-    let bytes = decode_data_uri(uri)?;
-    let key = hash_bytes(&bytes);
+    let key = key_of(uri);
 
     if let Some(hit) = CACHE.with(|c| {
         c.borrow()
             .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, t)| t.clone())
+            .find(|(k, _, _)| *k == key)
+            .map(|(_, t, _)| t.clone())
     }) {
         return Some(hit);
     }
 
+    let bytes = decode_data_uri(uri)?;
     let tex = decode_texture(ctx, &bytes, key)?;
+    let approx = tex.size()[0] * tex.size()[1] * 4;
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        c.push_back((key, tex.clone()));
-        while c.len() > CACHE_LIMIT {
-            c.pop_front();
+        c.push_back((key, tex.clone(), approx));
+        let mut total: usize = c.iter().map(|(_, _, b)| *b).sum();
+        while c.len() > CACHE_LIMIT || total > CACHE_MAX_BYTES {
+            if let Some((_, _, freed)) = c.pop_front() {
+                total = total.saturating_sub(freed);
+            } else {
+                break;
+            }
         }
     });
     Some(tex)
 }
 
-fn decode_texture(ctx: &egui::Context, bytes: &[u8], key: u64) -> Option<egui::TextureHandle> {
+/// 用 blake3 取 URI 的前 16 字节做键（避免 DefaultHasher 的碰撞串图风险）。
+fn key_of(uri: &str) -> [u8; 16] {
+    let h = blake3::hash(uri.as_bytes());
+    let mut key = [0u8; 16];
+    key.copy_from_slice(&h.as_bytes()[..16]);
+    key
+}
+
+fn decode_texture(ctx: &egui::Context, bytes: &[u8], key: [u8; 16]) -> Option<egui::TextureHandle> {
     let img = image::load_from_memory(bytes).ok()?;
     if img.width() == 0 || img.height() == 0 {
         return None;
@@ -67,7 +89,11 @@ fn decode_texture(ctx: &egui::Context, bytes: &[u8], key: u64) -> Option<egui::T
         [img.width() as usize, img.height() as usize],
         rgba.as_raw(),
     );
-    Some(ctx.load_texture(format!("img-{key:x}"), color, egui::TextureOptions::LINEAR))
+    let name = format!(
+        "img-{}",
+        u64::from_le_bytes(key[..8].try_into().unwrap_or_default())
+    );
+    Some(ctx.load_texture(name, color, egui::TextureOptions::LINEAR))
 }
 
 /// 解析 `data:image/png;base64,…`；其它形式（http/文件路径）一律拒绝。
@@ -88,13 +114,6 @@ pub fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
         return None;
     }
     Some(bytes)
-}
-
-fn hash_bytes(bytes: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut h);
-    h.finish()
 }
 
 #[cfg(test)]
