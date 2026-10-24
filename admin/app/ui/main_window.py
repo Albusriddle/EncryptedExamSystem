@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -33,6 +32,7 @@ from PySide6.QtWidgets import (
 from app.branding import branding
 from app.core.models import Manifest
 from app.core.state import ProjectState
+from app.ui.tab_answers import AnswersTab
 from app.ui.tab_banks import BanksTab
 from app.ui.tab_build import BuildTab
 from app.ui.tab_sessions import SessionsTab
@@ -104,6 +104,7 @@ class MainWindow(QMainWindow):
         self.students_tab = StudentsTab(self.state)
         self.sessions_tab = SessionsTab(self.state)
         self.build_tab = BuildTab(self.state)
+        self.answers_tab = AnswersTab()
 
         # 任何 Tab 改了数据都刷新状态栏与其他 Tab 的联动视图
         for tab in (self.banks_tab, self.students_tab, self.sessions_tab):
@@ -113,23 +114,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.students_tab, "学生")
         self.tabs.addTab(self.sessions_tab, "场次")
         self.tabs.addTab(self.build_tab, "打包")
-        # 收卷判分尚未实现（学生端还没有作答与交卷功能）
-        placeholder = QWidget()
-        tip = QLabel(
-            "收卷与判分将在学生端支持作答后开放。\n\n"
-            "当前版本学生端为「试卷展示器」：可解锁、可看题，但暂不支持作答与交卷。",
-            placeholder,
-        )
-        tip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tip.setWordWrap(True)
-        lay = placeholder.layout()
-        if lay is None:
-            from PySide6.QtWidgets import QVBoxLayout
-
-            lay = QVBoxLayout(placeholder)
-        lay.addWidget(tip)
-        self.tabs.addTab(placeholder, "收卷判分")
-        self.tabs.setTabEnabled(4, False)
+        self.tabs.addTab(self.answers_tab, "收卷判分")
 
         self.setCentralWidget(self.tabs)
 
