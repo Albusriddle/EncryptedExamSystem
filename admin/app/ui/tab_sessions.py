@@ -368,9 +368,9 @@ class SessionsTab(QWidget):
             pass
 
         if set(s.students) == set(self.state.students) and self.state.students:
-            self.combo_roster.setCurrentIndex(0)
+            self.combo_roster.setCurrentIndex(self.combo_roster.findData("all"))
         else:
-            self.combo_roster.setCurrentIndex(1)
+            self.combo_roster.setCurrentIndex(self.combo_roster.findData("custom"))
             self.edit_roster.setText(" ".join(str(x) for x in s.students))
 
         # 勾选本场次的科目。
