@@ -126,7 +126,7 @@ class AnswersTab(QWidget):
         self.setAcceptDrops(True)
 
         tip = QLabel(
-            "把学生交上来的 answers-<学号>-<场次>.eea 拖进来（或点【添加文件】）。\n"
+            "把学生交上来的 answers-<学号>-<场次>-<指纹8位>.eea 拖进来（或点【添加文件】）。\n"
             "校验需要主密钥；指定学生端包后还会核对「这份答题卡是否属于这个包的这个学生」。"
         )
         tip.setWordWrap(True)
@@ -158,15 +158,15 @@ class AnswersTab(QWidget):
         lay.addLayout(row)
 
         btns = QHBoxLayout()
-        btn_add = QPushButton("添加文件…")
-        btn_add.clicked.connect(self._add_files)
-        btns.addWidget(btn_add)
-        btn_dir = QPushButton("添加文件夹…")
-        btn_dir.clicked.connect(self._add_dir)
-        btns.addWidget(btn_dir)
-        btn_clear = QPushButton("清空列表")
-        btn_clear.clicked.connect(self._clear)
-        btns.addWidget(btn_clear)
+        self.btn_add = QPushButton("添加文件…")
+        self.btn_add.clicked.connect(self._add_files)
+        btns.addWidget(self.btn_add)
+        self.btn_dir = QPushButton("添加文件夹…")
+        self.btn_dir.clicked.connect(self._add_dir)
+        btns.addWidget(self.btn_dir)
+        self.btn_clear = QPushButton("清空列表")
+        self.btn_clear.clicked.connect(self._clear)
+        btns.addWidget(self.btn_clear)
         btns.addStretch(1)
         self.btn_verify = QPushButton("开始校验")
         self.btn_verify.clicked.connect(self._start)
@@ -196,12 +196,18 @@ class AnswersTab(QWidget):
     # ---------------------------------------------------------------- 拖放
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt 约定
+        if self._busy():
+            event.ignore()
+            return
         if event.mimeData().hasUrls() and any(
             u.toLocalFile().lower().endswith(".eea") for u in event.mimeData().urls()
         ):
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:  # noqa: N802 - Qt 约定
+        if self._busy():
+            event.ignore()
+            return
         files = collect_eea([Path(u.toLocalFile()) for u in event.mimeData().urls()])
         if files:
             self._append(files)
@@ -236,7 +242,13 @@ class AnswersTab(QWidget):
         if d:
             self._append(sorted(Path(d).glob("*.eea")))
 
+    def _busy(self) -> bool:
+        """校验进行中：列表必须冻结，否则结果会和表格错位。"""
+        return self.worker is not None and self.worker.isRunning()
+
     def _append(self, paths: list[Path]) -> None:
+        if self._busy():
+            return
         for p in paths:
             if p not in self.files:
                 self.files.append(p)
@@ -246,6 +258,8 @@ class AnswersTab(QWidget):
         self._refill()
 
     def _clear(self) -> None:
+        if self._busy():
+            return
         self.files.clear()
         self.results.clear()
         self._refill()
@@ -271,6 +285,8 @@ class AnswersTab(QWidget):
     # ---------------------------------------------------------------- 校验
 
     def _start(self) -> None:
+        if self._busy():
+            return
         if not self.files:
             QMessageBox.information(self, "提示", "请先添加答题卡文件。")
             return
@@ -285,6 +301,7 @@ class AnswersTab(QWidget):
             return
 
         self.results.clear()
+        self._set_editing_enabled(False)
         self.btn_verify.setEnabled(False)
         self.status.setText("校验中…")
         self.worker = VerifyWorker(self.files, master, pkg)
@@ -325,7 +342,13 @@ class AnswersTab(QWidget):
         if tooltip:
             self.table.item(row, 7).setToolTip(tooltip)
 
+    def _set_editing_enabled(self, on: bool) -> None:
+        self.btn_add.setEnabled(on)
+        self.btn_dir.setEnabled(on)
+        self.btn_clear.setEnabled(on)
+
     def _on_all(self) -> None:
+        self._set_editing_enabled(True)
         self.btn_verify.setEnabled(True)
         ok = sum(1 for r in self.results.values() if r.get("ok"))
         self.status.setText(f"校验完成：{ok} 通过 / {len(self.results) - ok} 失败")

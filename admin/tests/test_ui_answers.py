@@ -195,3 +195,63 @@ def test_collect_eea_expands_directory(tmp_path) -> None:
     (d / "说明.txt").write_text("ignore", encoding="utf-8")
     out = collect_eea([d, d / "说明.txt"])
     assert [p.name for p in out] == ["a.eea", "b.eea"]
+
+
+# ---------------------------------------------------------------- 校验期间冻结列表
+
+
+class _FakeRunningWorker:
+    """假的"正在运行"worker：只为验证 UI 的冻结逻辑。"""
+
+    class _Sig:
+        def connect(self, *_a, **_k) -> None:
+            pass
+
+    def __init__(self, *_a, **_k) -> None:
+        self.one_done = self._Sig()
+        self.all_done = self._Sig()
+
+    def isRunning(self) -> bool:  # noqa: N802 - QThread 接口
+        return True
+
+    def start(self) -> None:
+        pass
+
+
+def test_list_is_frozen_while_verifying(qapp, monkeypatch) -> None:
+    import app.ui.tab_answers as mod
+
+    monkeypatch.setattr(mod, "VerifyWorker", _FakeRunningWorker)
+    tab = AnswersTab()
+    try:
+        f = Path("a.eea")
+        tab._append([f])
+        tab.master.setText("11" * 32)
+        tab._start()
+
+        assert not tab.btn_add.isEnabled()
+        assert not tab.btn_clear.isEnabled()
+        tab._append([Path("b.eea")])
+        assert [p.name for p in tab.files] == ["a.eea"], "校验中不允许改列表"
+        tab._clear()
+        assert tab.files, "校验中不允许清空列表"
+    finally:
+        tab.worker = None
+        tab.deleteLater()
+
+
+def test_start_is_not_reentrant(qapp, monkeypatch) -> None:
+    import app.ui.tab_answers as mod
+
+    monkeypatch.setattr(mod, "VerifyWorker", _FakeRunningWorker)
+    tab = AnswersTab()
+    try:
+        tab._append([Path("a.eea")])
+        tab.master.setText("11" * 32)
+        tab._start()
+        first = tab.worker
+        tab._start()
+        assert tab.worker is first, "校验进行中不能再次启动"
+    finally:
+        tab.worker = None
+        tab.deleteLater()
