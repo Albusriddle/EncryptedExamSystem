@@ -223,6 +223,10 @@ impl ExamApp {
                     .ok()
                     .and_then(|b| common::answer_sheet::open(&unlocked.k_manifest, &b).ok())
                     .filter(|s| s.paper_fingerprint == unlocked.paper.fingerprint());
+                if restored.is_none() && path.exists() {
+                    // 换卷/换包时旧卡不能默默丢掉：留一份 .bak，学生换回原包还能恢复
+                    let _ = std::fs::rename(&path, path.with_extension("eea.bak"));
+                }
                 self.sheet = Some(match restored {
                     Some(s) => s,
                     None => common::answer_sheet::AnswerSheet::from_paper(
@@ -446,7 +450,7 @@ impl eframe::App for ExamApp {
                 if let Some(sheet) = self.sheet.as_mut()
                     && !sheet.submitted
                 {
-                    sheet.freeze(now.unwrap_or(0));
+                    sheet.freeze(now_or_wall_clock(now));
                     self.sheet_dirty = true;
                 }
                 // 标题栏也换成"已结束"：学生切到别的窗口后，一眼能看出状态；
@@ -524,15 +528,18 @@ impl eframe::App for ExamApp {
             let mut sheet_changed = false;
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(sheet) = self.sheet.as_mut() {
+                    // 已交卷的卡即便还没到结束时间也不能改——界面要看起来也不可改，
+                    // 否则监考会以为"点了没反应"是程序坏了。
+                    let editable = !self.expired && !sheet.submitted;
                     let (off, ch) = render_paper(
                         ui,
                         unlocked,
                         &mut self.nav,
                         now,
                         sheet,
-                        !self.expired,
+                        editable,
                         &mut self.confirm_submit,
-                        now.unwrap_or(0),
+                        now_or_wall_clock(now),
                     );
                     scroll_offset = off;
                     if ch {
@@ -1183,6 +1190,16 @@ mod brand_wiring {
 /// 优先放在**学生端所在目录**（监考可以直接拷走），不可写时回退到
 /// `%LOCALAPPDATA%\ExamSystem\answers\`：机房常见 Program Files、只读 U 盘、
 /// 光盘，直接写同目录会失败。
+/// 没有网络时钟时（debug / 跳门禁）回退到本机时间，避免写出 1970 的时间戳。
+fn now_or_wall_clock(now: Option<u64>) -> u64 {
+    now.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    })
+}
+
 fn answer_sheet_path(student_id: u64, session_id: u32) -> std::path::PathBuf {
     let name = format!("answers-{student_id}-{session_id}.eea");
 
