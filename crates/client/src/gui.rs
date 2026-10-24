@@ -867,6 +867,41 @@ fn blank_marker(k: usize) -> String {
         .unwrap_or_else(|| format!("①+{k}"))
 }
 
+/// 渲染题干：把 ``` 围栏代码块单独画成等宽块，其余按文本排版。
+fn render_stem(ui: &mut egui::Ui, stem: &str) {
+    use crate::markdown::Block;
+
+    for block in crate::markdown::split_blocks(stem) {
+        match block {
+            Block::Text(text) => {
+                ui.label(egui::RichText::new(text).size(15.0));
+            }
+            Block::Code { lines, .. } => {
+                render_mono_block(ui, &lines, false);
+            }
+        }
+    }
+}
+
+/// 等宽代码块：底色 + 横向滚动（长行不能被裁掉）。
+fn render_mono_block(ui: &mut egui::Ui, lines: &[String], numbered: bool) {
+    egui::Frame::none()
+        .fill(ui.visuals().extreme_bg_color)
+        .inner_margin(egui::Margin::same(8.0))
+        .show(ui, |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                for (i, line) in lines.iter().enumerate() {
+                    let text = if numbered {
+                        format!("{:>3}  {}", i + 1, line)
+                    } else {
+                        line.clone()
+                    };
+                    ui.label(egui::RichText::new(text).monospace().size(13.0));
+                }
+            });
+        });
+}
+
 /// 按题目形态渲染正文。
 ///
 /// 三种形态的差别不是"排版喜好"，而是**信息结构**：
@@ -907,21 +942,7 @@ fn render_body(ui: &mut egui::Ui, item: &common::picker::PaperItem) {
                     .size(12.0)
                     .color(egui::Color32::GRAY),
             );
-            egui::Frame::none()
-                .fill(ui.visuals().extreme_bg_color)
-                .inner_margin(egui::Margin::same(8.0))
-                .show(ui, |ui| {
-                    egui::ScrollArea::horizontal().show(ui, |ui| {
-                        for (i, line) in code.iter().enumerate() {
-                            // 行号右对齐到 3 位，代码才能对齐成块
-                            ui.label(
-                                egui::RichText::new(format!("{:>3}  {}", i + 1, line))
-                                    .monospace()
-                                    .size(13.0),
-                            );
-                        }
-                    });
-                });
+            render_mono_block(ui, code, true);
         }
         QuestionBody::Text => {
             // 旧题库：没有 body，只有 options 数组
@@ -1055,12 +1076,9 @@ fn render_paper(
                     .push_id(format!("item{seq}"), |ui| {
                         ui.vertical(|ui| {
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "{seq}. ({}) {}",
-                                    item.score, item.stem
-                                ))
-                                .size(15.0),
+                                egui::RichText::new(format!("{seq}. ({})", item.score)).size(15.0),
                             );
+                            render_stem(ui, &item.stem);
                             ui.indent(format!("q{seq}"), |ui| {
                                 render_body(ui, item);
                                 if render_answer_inputs(

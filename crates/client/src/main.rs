@@ -14,6 +14,7 @@
 
 mod gui;
 mod keys;
+mod markdown;
 mod nav;
 mod welcome;
 mod workflow;
