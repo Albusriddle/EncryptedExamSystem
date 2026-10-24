@@ -327,28 +327,41 @@ impl NavState {
     ///
     /// 抽成纯函数是为了能单测：颜色是"肉眼才看得出"的东西，没有断言就只能靠人看。
     pub fn button_style(
+        v: &egui::Visuals,
         answered: bool,
         current: bool,
         hovered: bool,
         pressed: bool,
-    ) -> (egui::Color32, egui::Color32, f32) {
+    ) -> (egui::Color32, egui::Color32, egui::Color32, f32) {
         const BLUE: egui::Color32 = egui::Color32::from_rgb(59, 130, 246);
         const GREEN: egui::Color32 = egui::Color32::from_rgb(60, 160, 90);
-        let fill = if pressed {
-            egui::Color32::from_rgb(37, 99, 235)
-        } else if answered {
-            BLUE
+
+        // 未答/悬停/按下全部取自主题：写死深灰在白天主题下会变成"深灰底 + 近黑字"，
+        // 客户实测看不清第几题（v0.4.1 反馈）。
+        let fill = if answered {
+            if pressed {
+                egui::Color32::from_rgb(37, 99, 235)
+            } else {
+                BLUE
+            }
+        } else if pressed {
+            v.widgets.active.bg_fill
         } else if hovered {
-            egui::Color32::from_rgb(120, 120, 120)
+            v.widgets.hovered.bg_fill
         } else {
-            egui::Color32::from_rgb(90, 90, 90)
+            v.widgets.inactive.bg_fill
+        };
+        let text = if answered {
+            egui::Color32::WHITE
+        } else {
+            v.strong_text_color()
         };
         let (stroke, width) = if current {
             (GREEN, 2.5_f32)
         } else {
             (egui::Color32::TRANSPARENT, 0.0)
         };
-        (fill, stroke, width)
+        (fill, text, stroke, width)
     }
 
     /// 视窗顶部那道题：取"顶部不超过视窗顶 + 40pt"的最后一道。
@@ -380,7 +393,8 @@ impl NavState {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(BTN, BTN), egui::Sense::click());
         let answered = self.answered.get(idx).copied().unwrap_or(false);
         let current = self.current == Some(idx);
-        let (fill, stroke, width) = Self::button_style(
+        let (fill, text_color, stroke, width) = Self::button_style(
+            ui.visuals(),
             answered,
             current,
             resp.hovered(),
@@ -396,11 +410,7 @@ impl NavState {
             egui::Align2::CENTER_CENTER,
             idx.to_string(),
             egui::FontId::proportional(12.0),
-            if answered {
-                egui::Color32::WHITE
-            } else {
-                ui.visuals().text_color()
-            },
+            text_color,
         );
         self.button_rects.push((idx, rect));
         if resp.clicked() {
@@ -548,22 +558,34 @@ mod nav_state_tests {
     use super::*;
 
     #[test]
-    fn unanswered_is_gray_answered_is_blue() {
-        let (gray, stroke, w) = NavState::button_style(false, false, false, false);
-        let (blue, _s, _w2) = NavState::button_style(true, false, false, false);
-        assert_eq!(gray, egui::Color32::from_rgb(90, 90, 90));
-        assert_eq!(blue, egui::Color32::from_rgb(59, 130, 246));
-        assert_ne!(gray, blue);
-        assert_eq!(
-            (stroke, w),
-            (egui::Color32::TRANSPARENT, 0.0),
-            "非当前题不描边"
-        );
+    fn unanswered_uses_theme_colors_in_both_themes() {
+        for v in [egui::Visuals::light(), egui::Visuals::dark()] {
+            let (fill, text, stroke, w) = NavState::button_style(&v, false, false, false, false);
+            assert_eq!(fill, v.widgets.inactive.bg_fill, "未答底色必须跟随主题");
+            assert_eq!(text, v.strong_text_color());
+            let (fg, bg) = (text.r() as i32, fill.r() as i32);
+            // 核心回归：白天主题下不能再是"深灰底 + 近黑字"
+            assert!((fg - bg).abs() > 80, "前景背景亮度差太小：fg={fg} bg={bg}");
+            assert_eq!(
+                (stroke, w),
+                (egui::Color32::TRANSPARENT, 0.0),
+                "非当前题不描边"
+            );
+        }
+    }
+
+    #[test]
+    fn answered_is_blue_with_white_text() {
+        let v = egui::Visuals::light();
+        let (fill, text, _s, _w) = NavState::button_style(&v, true, false, false, false);
+        assert_eq!(fill, egui::Color32::from_rgb(59, 130, 246));
+        assert_eq!(text, egui::Color32::WHITE);
     }
 
     #[test]
     fn current_has_green_stroke() {
-        let (_fill, stroke, w) = NavState::button_style(false, true, false, false);
+        let v = egui::Visuals::dark();
+        let (_fill, _text, stroke, w) = NavState::button_style(&v, false, true, false, false);
         assert_eq!(stroke, egui::Color32::from_rgb(60, 160, 90));
         assert!(w > 2.0, "当前题描边要明显：{w}");
     }
