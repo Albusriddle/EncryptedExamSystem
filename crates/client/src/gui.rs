@@ -263,6 +263,13 @@ impl ExamApp {
                     }
                 }
                 // 新建/恢复后立即落盘：万一学生答了两题就断电，磁盘上也有一份
+                // 诊断用：EES_SUBMIT=1 直接冻结，验证"交卷后页面"（release 不含）
+                #[cfg(debug_assertions)]
+                if std::env::var("EES_SUBMIT").is_ok()
+                    && let Some(sh) = self.sheet.as_mut()
+                {
+                    sh.freeze(now_or_wall_clock(Some(now)));
+                }
                 self.sheet_dirty = true;
                 self.last_edit = std::time::Instant::now()
                     .checked_sub(Duration::from_secs(5))
@@ -493,7 +500,7 @@ impl eframe::App for ExamApp {
                 let mut panel_rect = egui::Rect::NOTHING;
                 egui::CentralPanel::default().show(ctx, |ui| {
                     panel_rect = ui.max_rect();
-                    card_rect = render_locked(ui, unlocked, now);
+                    card_rect = render_locked(ui, unlocked, now, LockedMode::Expired);
                 });
                 // 布局自检：卡片必须水平居中、且落在下半屏、且不被裁掉。
                 #[cfg(debug_assertions)]
@@ -518,6 +525,24 @@ impl eframe::App for ExamApp {
                 return;
             }
 
+            // 提前交卷：直接进"已交卷"页，不要让学生继续盯着试卷
+            if let Some(at) = self
+                .sheet
+                .as_ref()
+                .filter(|s| s.submitted)
+                .and_then(|s| s.submitted_unix)
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                    "{} · 已交卷",
+                    common::branding().display_name()
+                )));
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_locked(ui, unlocked, now, LockedMode::Submitted { at });
+                });
+                self.maybe_save_sheet();
+                return;
+            }
+
             let sections: Vec<(String, usize)> = unlocked
                 .paper
                 .sections
@@ -531,6 +556,12 @@ impl eframe::App for ExamApp {
             }
 
             // ① 题号卡（点击只写 pending，不立即滚动）
+            //    已答/未答按答题卡算；索引 0 号位空着，题号从 1 开始。
+            let mut flags = vec![false];
+            if let Some(sheet) = &self.sheet {
+                flags.extend(sheet.answers.iter().map(|a| a.is_some()));
+            }
+            self.nav.set_answered(flags);
             self.nav.show(ctx, &sections);
 
             // ② 试卷：逐题记录矩形；渲染完成后在同一个 Ui 里消费 pending。
@@ -626,7 +657,20 @@ fn format_duration(secs: u64) -> String {
 /// 用 `Frame` 而不是浮层：它在流式布局里，天然不会盖住上面的"已结束"信息。
 ///
 /// 返回卡片矩形（供 debug 自检）。
-fn render_locked(ui: &mut egui::Ui, unlocked: &Unlocked, now: Option<u64>) -> egui::Rect {
+#[derive(Clone, Copy)]
+enum LockedMode {
+    /// 到点收卷
+    Expired,
+    /// 学生主动交卷（提前）
+    Submitted { at: u64 },
+}
+
+fn render_locked(
+    ui: &mut egui::Ui,
+    unlocked: &Unlocked,
+    now: Option<u64>,
+    mode: LockedMode,
+) -> egui::Rect {
     /// 卡片内容宽度的上限（不含内边距）
     const CARD_MAX_W: f32 = 380.0;
 
@@ -637,10 +681,22 @@ fn render_locked(ui: &mut egui::Ui, unlocked: &Unlocked, now: Option<u64>) -> eg
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(36.0);
         ui.vertical_centered(|ui| {
-            ui.heading("本场考试已结束");
+            let (title, tip) = match mode {
+                LockedMode::Expired => ("本场考试已结束", "时间到，试卷已关闭。"),
+                LockedMode::Submitted { .. } => ("已交卷", "答题卡已保存，可以离开考场。"),
+            };
+            ui.heading(title);
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(tip).size(13.0));
             ui.add_space(14.0);
             ui.label(format!("场次 #{}", unlocked.session_id));
             ui.label(format!("结束时间：{}", unlocked.end));
+            if let LockedMode::Submitted { at } = mode {
+                ui.label(format!(
+                    "交卷时间：{}",
+                    common::timegate::format_unix_local_zoned(at)
+                ));
+            }
             if let Some(n) = now {
                 ui.label(format!(
                     "当前网络时间：{}",
@@ -821,11 +877,9 @@ fn render_body(ui: &mut egui::Ui, item: &common::picker::PaperItem) {
     use common::model::QuestionBody;
 
     match &item.body {
-        QuestionBody::Options { options } => {
-            for opt in options {
-                ui.label(format!("{}. {}", opt.key, opt.text));
-            }
-        }
+        // 选项由 render_answer_inputs 统一绘制（可点击/禁用两种状态）。
+        // 这里再画一遍会让每道选择题的选项出现两次——v0.3.5 实测的观感问题。
+        QuestionBody::Options { .. } => {}
         QuestionBody::Template {
             template,
             blank_count,
@@ -892,6 +946,7 @@ fn render_paper(
 ) -> (egui::Vec2, bool) {
     let mut changed = false;
     let mut qidx = 0usize;
+    let viewport_top = ui.clip_rect().top();
     let out = egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -1035,6 +1090,7 @@ fn render_paper(
         // 全部题目渲染完毕，此时 rects 是本帧最新的，消费跳转请求。
         nav.apply_pending_scroll(ui);
     });
+    nav.update_current(viewport_top);
     (out.state.offset, changed)
 }
 
