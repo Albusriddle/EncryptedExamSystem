@@ -29,6 +29,11 @@ import pytest
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
         return
+    # Windows 上跳过：PySide6 的 teardown 在 Windows 是正常的，而 os._exit 会在
+    # ExitProcess 的 DLL detach 阶段触发 access violation（CI 实测：全部测试通过，
+    # 收尾时 "Windows fatal exception: access violation" → 退出码 1）。
+    if sys.platform == "win32":
+        return
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(int(exitstatus))
