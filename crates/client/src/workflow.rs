@@ -69,6 +69,8 @@ pub struct Unlocked {
     pub paper: Paper,
     /// 密钥来源（决定 UI 显示"正式/开发"模式）
     pub key_source: KeySource,
+    /// K_manifest：答题卡加密用（它本来就嵌在包里，不构成新暴露）
+    pub k_manifest: [u8; 32],
 }
 
 /// 完整解锁流程。
@@ -138,6 +140,7 @@ pub fn unlock(student_id: u64, opts: &UnlockOpts) -> Result<Unlocked> {
         net,
         paper,
         key_source,
+        k_manifest,
     })
 }
 

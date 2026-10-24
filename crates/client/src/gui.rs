@@ -130,6 +130,18 @@ pub struct ExamApp {
     /// 所以字段本身也要跟着 cfg——否则 release 里"赋值后从未读取"会告警。
     #[cfg(debug_assertions)]
     last_locked_dump: Option<(egui::Rect, egui::Rect)>,
+    /// 答题卡（解锁成功后才有）
+    sheet: Option<common::answer_sheet::AnswerSheet>,
+    /// 答题卡落盘路径
+    sheet_path: Option<std::path::PathBuf>,
+    /// 是否有未落盘的修改
+    sheet_dirty: bool,
+    /// 最近一次修改时间（用于 400ms 防抖）
+    last_edit: std::time::Instant,
+    /// 保存失败的原因（显示给学生/监考）
+    save_error: Option<String>,
+    /// 交卷二次确认：第一次点击后置 true，再点一次才真正冻结
+    confirm_submit: bool,
     /// 网络时间时钟（解锁成功后才有；debug 跳过门禁时为 None）
     clock: Option<SyncedClock>,
     /// 是否已到结束时刻（到点后锁定试卷）
@@ -161,6 +173,12 @@ impl ExamApp {
             jump_once: diag_env::<usize>("EES_NAV_JUMP").filter(|v| *v > 0),
             autologin: diag_env::<u64>("EES_AUTOLOGIN").filter(|v| *v > 0),
             cjk_ok,
+            sheet: None,
+            sheet_path: None,
+            sheet_dirty: false,
+            last_edit: std::time::Instant::now(),
+            save_error: None,
+            confirm_submit: false,
             last_state_dump: None,
             #[cfg(debug_assertions)]
             last_locked_dump: None,
@@ -198,6 +216,45 @@ impl ExamApp {
                 // 以解锁时取到的网络时间为基准建时钟；之后由单调时钟推进
                 self.clock = unlocked.net.as_ref().map(|n| SyncedClock::new(n.unix));
                 self.expired = false;
+                let now = self.clock.as_ref().map(|c| c.now_unix()).unwrap_or(0);
+                let path = answer_sheet_path(unlocked.student_id, unlocked.session_id);
+                // 已有答题卡且是同一份卷：恢复；否则新建
+                let restored = std::fs::read(&path)
+                    .ok()
+                    .and_then(|b| common::answer_sheet::open(&unlocked.k_manifest, &b).ok())
+                    .filter(|s| s.paper_fingerprint == unlocked.paper.fingerprint());
+                self.sheet = Some(match restored {
+                    Some(s) => s,
+                    None => common::answer_sheet::AnswerSheet::from_paper(
+                        &unlocked.paper,
+                        unlocked.student_id,
+                        unlocked.session_id,
+                        now,
+                    ),
+                });
+                // 诊断用：EES_ANSWER="0=B,1=AC" 预填答案，仅供自动化验证（release 不含）
+                #[cfg(debug_assertions)]
+                if let Ok(spec) = std::env::var("EES_ANSWER")
+                    && let Some(sh) = self.sheet.as_mut()
+                {
+                    {
+                        for part in spec.split(',') {
+                            if let Some((idx, val)) = part.split_once('=')
+                                && let Ok(i) = idx.parse::<usize>()
+                            {
+                                sh.set_answer(i, Some(val.to_string()), 1);
+                            }
+                        }
+                    }
+                }
+                // 新建/恢复后立即落盘：万一学生答了两题就断电，磁盘上也有一份
+                self.sheet_dirty = true;
+                self.last_edit = std::time::Instant::now()
+                    .checked_sub(Duration::from_secs(5))
+                    .unwrap_or_else(std::time::Instant::now);
+                self.sheet_path = Some(path);
+                self.save_error = None;
+                self.confirm_submit = false;
                 self.stage = Stage::Paper(Box::new(unlocked));
                 true
             }
@@ -224,6 +281,11 @@ impl ExamApp {
 }
 
 impl eframe::App for ExamApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // 关窗前立即落盘，避免丢掉最后 400ms 的输入
+        self.save_sheet_now();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 欢迎弹窗置顶绘制；关闭时把焦点还给学号输入框
         if self.welcome.show(ctx) {
@@ -240,6 +302,12 @@ impl eframe::App for ExamApp {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
         self.poll();
+
+        if let Some(err) = &self.save_error {
+            egui::TopBottomPanel::top("save_error").show(ctx, |ui| {
+                ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
+            });
+        }
 
         // 水印条带：声明在最前，所以位于窗口最顶部。
         egui::TopBottomPanel::top("watermark").show(ctx, |ui| {
@@ -375,6 +443,12 @@ impl eframe::App for ExamApp {
             let now = self.clock.as_ref().map(|c| c.now_unix());
             if !self.expired && now.is_some_and(|n| workflow::is_expired(n, unlocked.end_unix)) {
                 self.expired = true;
+                if let Some(sheet) = self.sheet.as_mut()
+                    && !sheet.submitted
+                {
+                    sheet.freeze(now.unwrap_or(0));
+                    self.sheet_dirty = true;
+                }
                 // 标题栏也换成"已结束"：学生切到别的窗口后，一眼能看出状态；
                 // 同时让 release 包的行为可以被外部自动化验证（读窗口标题）。
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
@@ -425,6 +499,7 @@ impl eframe::App for ExamApp {
                     );
                 }
                 let _ = (card_rect, panel_rect);
+                self.maybe_save_sheet();
                 return;
             }
 
@@ -446,15 +521,43 @@ impl eframe::App for ExamApp {
             // ② 试卷：逐题记录矩形；渲染完成后在同一个 Ui 里消费 pending。
             //    必须同一个 CentralPanel：一个 pass 只能有一个 CentralPanel。
             let mut scroll_offset = egui::Vec2::ZERO;
+            let mut sheet_changed = false;
             egui::CentralPanel::default().show(ctx, |ui| {
-                scroll_offset = render_paper(ui, unlocked, &mut self.nav, now);
+                if let Some(sheet) = self.sheet.as_mut() {
+                    let (off, ch) = render_paper(
+                        ui,
+                        unlocked,
+                        &mut self.nav,
+                        now,
+                        sheet,
+                        !self.expired,
+                        &mut self.confirm_submit,
+                        now.unwrap_or(0),
+                    );
+                    scroll_offset = off;
+                    if ch {
+                        sheet_changed = true;
+                    }
+                }
             });
+
+            if sheet_changed {
+                // 改动只标记脏；真正写盘由 update() 里的 400ms 防抖统一处理
+                self.sheet_dirty = true;
+                self.last_edit = std::time::Instant::now();
+            }
 
             // 诊断：EES_DEBUG_NAV=<文件> 时输出题号卡与题目矩形，
             // 便于验证"跳转目标是否被正确记录"（截屏在 DPI 下不可靠）。
             if let Some(path) = diag_path("EES_DEBUG_NAV") {
                 self.nav.dump_debug(&sections, scroll_offset, &path);
             }
+        }
+
+        self.maybe_save_sheet();
+        if self.sheet_dirty {
+            // 防抖期间也要有重绘，否则学生停手后没人触发保存
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
 
         // 闭包结束后再切状态。
@@ -560,6 +663,136 @@ fn render_locked(ui: &mut egui::Ui, unlocked: &Unlocked, now: Option<u64>) -> eg
     card
 }
 
+/// 渲染一道题的作答区。返回是否有改动。
+///
+/// 编码规则（与 `common::answer_sheet` 一致）：
+/// - 单选/判断：`Some("B")`
+/// - 多选：`Some("AC")`（升序拼接）
+/// - 补全/改错：JSON 数组文本
+fn render_answer_inputs(
+    ui: &mut egui::Ui,
+    item: &common::picker::PaperItem,
+    sheet: &mut common::answer_sheet::AnswerSheet,
+    idx: usize,
+    editable: bool,
+    now_unix: u64,
+) -> bool {
+    use common::answer_sheet::{decode_fixes, decode_parts, encode_fixes, encode_parts};
+    use common::model::QuestionBody;
+
+    if idx >= sheet.answers.len() {
+        return false;
+    }
+    let mut changed = false;
+
+    match &item.body {
+        QuestionBody::Options { options } => {
+            let current = sheet.answers[idx].clone().unwrap_or_default();
+            let multiple = item.qtype == "multiple";
+            let mut selected: Vec<String> = if multiple {
+                current.chars().map(|c| c.to_string()).collect()
+            } else {
+                Vec::new()
+            };
+            for opt in options {
+                let on = if multiple {
+                    selected.iter().any(|k| k == &opt.key)
+                } else {
+                    current == opt.key
+                };
+                let text = format!("{}. {}", opt.key, opt.text);
+                if ui
+                    .add_enabled(editable, egui::SelectableLabel::new(on, text))
+                    .clicked()
+                {
+                    if multiple {
+                        if let Some(pos) = selected.iter().position(|k| k == &opt.key) {
+                            selected.remove(pos);
+                        } else {
+                            selected.push(opt.key.clone());
+                        }
+                        selected.sort();
+                        let joined = selected.concat();
+                        let value = if joined.is_empty() {
+                            None
+                        } else {
+                            Some(joined)
+                        };
+                        if sheet.set_answer(idx, value, now_unix) {
+                            changed = true;
+                        }
+                    } else if sheet.set_answer(idx, Some(opt.key.clone()), now_unix) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        QuestionBody::Template { blank_count, .. } => {
+            let n = *blank_count as usize;
+            let mut parts = sheet.answers[idx]
+                .as_deref()
+                .map(decode_parts)
+                .unwrap_or_default();
+            parts.resize(n, String::new());
+            let before = parts.clone();
+            ui.horizontal_wrapped(|ui| {
+                for (k, part) in parts.iter_mut().enumerate() {
+                    ui.label(format!("{}、", blank_marker(k)));
+                    ui.add_enabled(
+                        editable,
+                        egui::TextEdit::singleline(part)
+                            .desired_width(160.0)
+                            .hint_text("作答"),
+                    );
+                }
+            });
+            if parts != before && sheet.set_answer(idx, Some(encode_parts(&parts)), now_unix) {
+                changed = true;
+            }
+        }
+        QuestionBody::Code { blank_count, .. } => {
+            let n = *blank_count as usize;
+            let mut fixes = sheet.answers[idx]
+                .as_deref()
+                .map(decode_fixes)
+                .unwrap_or_default();
+            fixes.resize(n, (String::new(), String::new()));
+            let before = fixes.clone();
+            for (k, (line, text)) in fixes.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("第 {} 处：", k + 1));
+                    ui.add_enabled(
+                        editable,
+                        egui::TextEdit::singleline(line)
+                            .desired_width(48.0)
+                            .hint_text("行号"),
+                    );
+                    ui.add_enabled(
+                        editable,
+                        egui::TextEdit::singleline(text)
+                            .desired_width(320.0)
+                            .hint_text("改为"),
+                    );
+                });
+            }
+            if fixes != before && sheet.set_answer(idx, Some(encode_fixes(&fixes)), now_unix) {
+                changed = true;
+            }
+        }
+        QuestionBody::Text => {}
+    }
+    changed
+}
+
+/// 空位序号：0→①，1→② …（超过 10 个空时退化为 ①+数字）
+fn blank_marker(k: usize) -> String {
+    const MARKS: [&str; 10] = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"];
+    MARKS
+        .get(k)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("①+{k}"))
+}
+
 /// 按题目形态渲染正文。
 ///
 /// 三种形态的差别不是"排版喜好"，而是**信息结构**：
@@ -628,12 +861,19 @@ fn render_body(ui: &mut egui::Ui, item: &common::picker::PaperItem) {
 }
 
 /// 渲染试卷。返回滚动区域的当前偏移，便于诊断验证"跳转是否真的滚动了"。
+#[allow(clippy::too_many_arguments)]
 fn render_paper(
     ui: &mut egui::Ui,
     unlocked: &Unlocked,
     nav: &mut crate::nav::NavState,
     now: Option<u64>,
-) -> egui::Vec2 {
+    sheet: &mut common::answer_sheet::AnswerSheet,
+    editable: bool,
+    confirm_submit: &mut bool,
+    now_unix: u64,
+) -> (egui::Vec2, bool) {
+    let mut changed = false;
+    let mut qidx = 0usize;
     let out = egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -679,6 +919,41 @@ fn render_paper(
                 .color(egui::Color32::GRAY),
         );
 
+        // 作答进度 + 交卷（二次确认，避免误点）
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("已作答 {}/{}", sheet.answered(), sheet.qids.len()))
+                    .size(13.0),
+            );
+            if sheet.submitted {
+                ui.label(
+                    egui::RichText::new("✔ 已交卷（答题卡已保存）")
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(60, 160, 90)),
+                );
+            } else if editable {
+                ui.separator();
+                let label = if *confirm_submit {
+                    "确认交卷（不可再修改）"
+                } else {
+                    "交卷"
+                };
+                if ui.button(label).clicked() {
+                    if *confirm_submit {
+                        sheet.freeze(now_unix);
+                        *confirm_submit = false;
+                        changed = true;
+                    } else {
+                        *confirm_submit = true;
+                    }
+                }
+                if *confirm_submit && ui.button("取消").clicked() {
+                    *confirm_submit = false;
+                }
+            }
+        });
+
         ui.add_space(12.0);
         ui.separator();
 
@@ -698,6 +973,8 @@ fn render_paper(
             ui.add_space(6.0);
             for item in &sec.items {
                 seq += 1;
+                let this_index = qidx;
+                qidx += 1;
                 // 记录整道题（题干 + 选项）的矩形，供题号卡跳转用。
                 // 用 group 把一道题的控件包起来，拿到的是一个整体 rect，
                 // 比只取题干那一行的 rect 更准确（跳过去能看到完整题目）。
@@ -713,6 +990,11 @@ fn render_paper(
                             );
                             ui.indent(format!("q{seq}"), |ui| {
                                 render_body(ui, item);
+                                if render_answer_inputs(
+                                    ui, item, sheet, this_index, editable, now_unix,
+                                ) {
+                                    changed = true;
+                                }
                             });
                         })
                     })
@@ -735,7 +1017,7 @@ fn render_paper(
         // 全部题目渲染完毕，此时 rects 是本帧最新的，消费跳转请求。
         nav.apply_pending_scroll(ui);
     });
-    out.state.offset
+    (out.state.offset, changed)
 }
 
 /// 中文字体候选（按优先级）。
@@ -893,5 +1175,85 @@ mod brand_wiring {
             gui_src.matches("common::branding().product").count() >= 2,
             "窗口标题与收卷标题都应使用 branding().product"
         );
+    }
+}
+
+/// 答题卡落盘路径。
+///
+/// 优先放在**学生端所在目录**（监考可以直接拷走），不可写时回退到
+/// `%LOCALAPPDATA%\ExamSystem\answers\`：机房常见 Program Files、只读 U 盘、
+/// 光盘，直接写同目录会失败。
+fn answer_sheet_path(student_id: u64, session_id: u32) -> std::path::PathBuf {
+    let name = format!("answers-{student_id}-{session_id}.eea");
+
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+        && is_writable(dir)
+    {
+        return dir.join(&name);
+    }
+
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let dir = base.join("ExamSystem").join("answers");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(name)
+}
+
+/// 目录可写探测：写一个探针文件再删掉。
+fn is_writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(".ees-write-probe");
+    match std::fs::write(&probe, b"x") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+impl ExamApp {
+    /// 防抖保存：改动后 400ms 落盘；已交卷的卡立即落盘。
+    fn maybe_save_sheet(&mut self) {
+        if !self.sheet_dirty {
+            return;
+        }
+        let submitted = self.sheet.as_ref().is_some_and(|s| s.submitted);
+        if !submitted && self.last_edit.elapsed() < Duration::from_millis(400) {
+            return;
+        }
+        self.save_sheet_now();
+    }
+
+    /// 立即把答题卡加密写盘。
+    fn save_sheet_now(&mut self) {
+        let (k_manifest, path) = match (&self.stage, &self.sheet_path) {
+            (Stage::Paper(u), Some(p)) => (u.k_manifest, p.clone()),
+            _ => return,
+        };
+        let Some(sheet) = self.sheet.as_ref() else {
+            return;
+        };
+        let sealed = match common::answer_sheet::seal(&k_manifest, sheet) {
+            Ok(b) => b,
+            Err(e) => {
+                self.save_error = Some(format!("答题卡加密失败：{e}"));
+                return;
+            }
+        };
+        match common::answer_sheet::write_atomic(&path, &sealed) {
+            Ok(()) => {
+                self.sheet_dirty = false;
+                self.save_error = None;
+            }
+            Err(e) => {
+                // 保存失败必须让学生/监考看见：静默失败等于答题卡丢了
+                self.save_error = Some(format!("保存答题卡失败：{e}\n路径：{}", path.display()));
+            }
+        }
     }
 }
