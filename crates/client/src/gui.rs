@@ -222,6 +222,13 @@ impl ExamApp {
                     unlocked.session_id,
                     &unlocked.paper.fingerprint(),
                 );
+                // v0.3.3 及更早的文件名没有指纹段：先迁移，再按新名字读
+                let legacy = path.with_file_name(format!(
+                    "answers-{}-{}.eea",
+                    unlocked.student_id, unlocked.session_id
+                ));
+                migrate_legacy_sheet(&path, &legacy);
+
                 // 已有答题卡且是同一份卷：恢复；否则新建
                 let restored = std::fs::read(&path)
                     .ok()
@@ -1239,6 +1246,16 @@ fn answer_sheet_file_name(student_id: u64, session_id: u32, paper_fingerprint: &
     format!("answers-{student_id}-{session_id}-{short}.eea")
 }
 
+/// 把旧命名（无指纹段）的答题卡迁移到新名字。
+///
+/// 为什么不能"不迁移直接读旧文件"：旧文件会永远躺在磁盘上，而新版本按新名字
+/// 找，学生升级客户端后作答会被当成"没有答题卡"。
+fn migrate_legacy_sheet(new_path: &std::path::Path, legacy_path: &std::path::Path) {
+    if !new_path.exists() && legacy_path.exists() {
+        let _ = std::fs::rename(legacy_path, new_path);
+    }
+}
+
 /// 目录可写探测：写一个探针文件再删掉。
 fn is_writable(dir: &std::path::Path) -> bool {
     let probe = dir.join(".ees-write-probe");
@@ -1309,5 +1326,45 @@ mod tests {
     fn answer_sheet_name_tolerates_short_fingerprint() {
         let name = answer_sheet_file_name(2, 1, "abc");
         assert_eq!(name, "answers-2-1-abc.eea");
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_sheet_is_renamed() {
+        let dir = std::path::Path::new("target").join("sheet-migrate");
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("answers-2-1.eea");
+        let new = dir.join("answers-2-1-91d70557.eea");
+        let _ = std::fs::remove_file(&new);
+        std::fs::write(&legacy, b"old").unwrap();
+
+        migrate_legacy_sheet(&new, &legacy);
+        assert!(new.exists(), "旧文件应被改名为新文件");
+        assert!(!legacy.exists(), "旧文件不应残留");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn existing_new_sheet_is_not_overwritten() {
+        let dir = std::path::Path::new("target").join("sheet-migrate2");
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("answers-2-1.eea");
+        let new = dir.join("answers-2-1-91d70557.eea");
+        std::fs::write(&legacy, b"old").unwrap();
+        std::fs::write(&new, b"new").unwrap();
+
+        migrate_legacy_sheet(&new, &legacy);
+        assert_eq!(
+            std::fs::read(&new).unwrap(),
+            b"new",
+            "新文件不能被旧文件覆盖"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
