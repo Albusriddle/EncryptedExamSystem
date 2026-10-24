@@ -102,3 +102,44 @@ def test_append_clears_previous_results(qapp) -> None:
         assert tab.results == {}, "换文件后旧结果必须清掉，否则导出会混进旧数据"
     finally:
         tab.deleteLater()
+
+
+# ---------------------------------------------------------------- 子进程解码（v0.3.1 回归）
+
+
+def test_run_tool_decodes_utf8_output() -> None:
+    """中文 Windows 默认用 GBK 解码子进程输出，会把 UTF-8 中文解坏。
+
+    这是 v0.3.1 的真实故障：教师输入正确 master 也"解不开"，
+    实际是解码线程抛异常后 stdout 变空，界面只显示"无输出"。
+    """
+    import os
+    import sys
+
+    from app.ui.tab_answers import run_tool
+
+    cmd = [
+        sys.executable,
+        "-c",
+        "import sys;sys.stdout.buffer.write('答题卡 ok'.encode('utf-8'))",
+    ]
+    out, err, code = run_tool(cmd, dict(os.environ))
+    assert code == 0
+    assert "答题卡" in out, f"输出被解码坏了：{out!r}（stderr={err!r}）"
+
+
+def test_verify_worker_reports_builder_error_in_chinese(tmp_path) -> None:
+    """真实调用 exam-builder：必须把它的中文报错原样带回来，而不是"无输出"。"""
+    from app.ui.tab_answers import VerifyWorker
+    from app.ui.tab_build import builder_exe
+
+    exe = builder_exe()
+    if not exe.is_file():
+        pytest.skip("本机没有 exam-builder 产物（CI 的 python job 不编译 Rust）")
+
+    missing = tmp_path / "nope.eea"
+    worker = VerifyWorker([missing], "00" * 32, None)
+    result = worker._verify_one(missing)
+    assert result["ok"] is False
+    assert "无输出" not in result["message"], "解码失败时不能只报'无输出'"
+    assert "读取" in result["message"] or "失败" in result["message"]

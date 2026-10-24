@@ -35,6 +35,27 @@ from app.ui.tab_build import builder_exe
 COLUMNS = ["文件", "学号", "场次", "题数", "已答", "未答", "交卷时间", "状态", "说明"]
 
 
+def run_tool(cmd: list[str], env: dict[str, str]) -> tuple[str, str, int]:
+    """调用外部工具并按 **UTF-8** 解码输出。
+
+    为什么必须单独抽出来、且显式指定 encoding：
+    `subprocess.run(..., text=True)` 在中文 Windows 上会用 GBK 解码子进程输出，
+    而 `exam-builder` 输出的是 UTF-8。解码发生在读取线程里，失败时异常不会抛给
+    调用方，只会得到空字符串——界面上表现为"无输出"，把真实原因彻底吞掉
+    （v0.3.1 实测：教师输入正确 master 也解不开，实际是解码失败）。
+    """
+    cp = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=120,
+    )
+    return cp.stdout or "", cp.stderr or "", cp.returncode
+
+
 class VerifyWorker(QThread):
     """逐个调用 `exam-builder verify-answer-sheet --json`。"""
 
@@ -61,18 +82,23 @@ class VerifyWorker(QThread):
         env = dict(os.environ)
         env["EXAM_MASTER"] = self.master
         try:
-            cp = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
+            out, err, code = run_tool(cmd, env)
         except Exception as e:  # noqa: BLE001 - 子进程任何异常都要变成一行结果
             return {"ok": False, "message": f"调用校验工具失败：{e}"}
-        line = (cp.stdout or "").strip().splitlines()
+        line = out.strip().splitlines()
         payload = {}
         if line:
             try:
                 payload = json.loads(line[-1])
             except json.JSONDecodeError:
-                payload = {"ok": False, "message": (cp.stdout or cp.stderr or "").strip()[:200]}
+                payload = {"ok": False, "message": (out or err).strip()[:200]}
         if not payload:
-            payload = {"ok": False, "message": (cp.stderr or "无输出").strip()[:200]}
+            detail = (err or out or "").strip()
+            if not detail:
+                detail = (
+                    f"校验工具没有任何输出（退出码 {code}）——可能被杀毒软件拦截，或程序文件损坏"
+                )
+            payload = {"ok": False, "message": detail[:200]}
         return payload
 
 
