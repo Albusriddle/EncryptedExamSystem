@@ -106,6 +106,9 @@ jobs:
         # CI 上原生平台退出码 1），但用例本身全部通过。用 junitxml 判定"有没有失败"，
         # 顺带断言用例数没有因为中途崩溃而变少——这比 `|| true` 安全。
         shell: bash
+        env:
+          # runner 的控制台是 cp1252，打印中文会 UnicodeEncodeError（这次就踩了）
+          PYTHONIOENCODING: utf-8
         run: |
           uv run pytest -q --junitxml=pytest-win.xml || echo "pytest 退出码=$?（已知的 Qt 收尾崩溃，以 XML 为准）"
           uv run python - <<'PY'
@@ -113,9 +116,9 @@ jobs:
           root = ET.parse("pytest-win.xml").getroot()
           cases = list(root.iter("testcase"))
           bad = [c for c in cases if c.find("failure") is not None or c.find("error") is not None]
-          print(f"用例 {len(cases)} 个，失败 {len(bad)} 个")
+          print(f"cases={len(cases)} failures={len(bad)}")
           for c in bad[:10]:
-              print("  ✗", c.get("name"))
+              print("  FAIL", c.get("name"))
           if len(cases) < 150 or bad:
               sys.exit(1)
           PY
