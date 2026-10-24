@@ -49,7 +49,9 @@ class VerifyWorker(QThread):
 
     def run(self) -> None:  # noqa: D102 - QThread 约定
         for f in self.files:
-            self.one_done.emit(f.name, self._verify_one(f))
+            # 用完整路径而不是文件名：不同机器会产出同名文件
+            # （同一学号同一场次），按名字索引会互相覆盖。
+            self.one_done.emit(str(f), self._verify_one(f))
         self.all_done.emit()
 
     def _verify_one(self, path: Path) -> dict:
@@ -164,6 +166,9 @@ class AnswersTab(QWidget):
         for p in paths:
             if p not in self.files:
                 self.files.append(p)
+        # 列表变了，上一次的校验结果不再可信——清掉，避免导出时混进旧文件
+        self.results.clear()
+        self.btn_csv.setEnabled(False)
         self._refill()
 
     def _clear(self) -> None:
@@ -213,9 +218,9 @@ class AnswersTab(QWidget):
         self.worker.all_done.connect(self._on_all)
         self.worker.start()
 
-    def _on_one(self, name: str, result: dict) -> None:
-        self.results[name] = result
-        row = next((i for i, p in enumerate(self.files) if p.name == name), None)
+    def _on_one(self, key: str, result: dict) -> None:
+        self.results[key] = result
+        row = next((i for i, p in enumerate(self.files) if str(p) == key), None)
         if row is None:
             return
         sheet = result.get("sheet") or {}
@@ -243,7 +248,9 @@ class AnswersTab(QWidget):
 
     def _export_csv(self) -> None:
         rows = []
-        for name, result in self.results.items():
+        for path in self.files:
+            name = path.name
+            result = self.results.get(str(path)) or {}
             sheet = result.get("sheet") or {}
             if not result.get("ok"):
                 continue

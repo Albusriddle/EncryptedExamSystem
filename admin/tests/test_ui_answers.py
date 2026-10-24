@@ -34,8 +34,9 @@ def _sheet(**over):
 def test_verified_row_is_filled(qapp) -> None:
     tab = AnswersTab()
     try:
-        tab._append([Path("answers-2021001-1.eea")])
-        tab._on_one("answers-2021001-1.eea", {"ok": True, "sheet": _sheet()})
+        f = Path("answers-2021001-1.eea")
+        tab._append([f])
+        tab._on_one(str(f), {"ok": True, "sheet": _sheet()})
         assert tab.table.item(0, 1).text() == "2021001"
         assert tab.table.item(0, 3).text() == "3"
         assert tab.table.item(0, 4).text() == "2"
@@ -49,8 +50,9 @@ def test_verified_row_is_filled(qapp) -> None:
 def test_failed_row_shows_reason(qapp) -> None:
     tab = AnswersTab()
     try:
-        tab._append([Path("bad.eea")])
-        tab._on_one("bad.eea", {"ok": False, "message": "解密失败（密钥不匹配或文件被改动）"})
+        f = Path("bad.eea")
+        tab._append([f])
+        tab._on_one(str(f), {"ok": False, "message": "解密失败（密钥不匹配或文件被改动）"})
         assert "失败" in tab.table.item(0, 7).text()
         assert "解密失败" in tab.table.item(0, 8).text()
     finally:
@@ -60,10 +62,43 @@ def test_failed_row_shows_reason(qapp) -> None:
 def test_summary_counts(qapp) -> None:
     tab = AnswersTab()
     try:
-        tab._append([Path("a.eea"), Path("b.eea")])
-        tab._on_one("a.eea", {"ok": True, "sheet": _sheet()})
-        tab._on_one("b.eea", {"ok": False, "message": "x"})
+        a, b = Path("a.eea"), Path("b.eea")
+        tab._append([a, b])
+        tab._on_one(str(a), {"ok": True, "sheet": _sheet()})
+        tab._on_one(str(b), {"ok": False, "message": "x"})
         tab._on_all()
         assert "1 通过" in tab.status.text() and "1 失败" in tab.status.text()
+    finally:
+        tab.deleteLater()
+
+
+def test_same_filename_in_different_dirs_does_not_collide(qapp, tmp_path) -> None:
+    """两台机器会产出同名文件，按文件名索引会互相覆盖。"""
+    a = tmp_path / "a" / "answers-2021001-1.eea"
+    b = tmp_path / "b" / "answers-2021001-1.eea"
+    a.parent.mkdir()
+    b.parent.mkdir()
+
+    tab = AnswersTab()
+    try:
+        tab._append([a, b])
+        tab._on_one(str(a), {"ok": True, "sheet": _sheet(student_id=111)})
+        tab._on_one(str(b), {"ok": True, "sheet": _sheet(student_id=222)})
+        assert len(tab.results) == 2
+        assert tab.table.item(0, 1).text() == "111"
+        assert tab.table.item(1, 1).text() == "222"
+    finally:
+        tab.deleteLater()
+
+
+def test_append_clears_previous_results(qapp) -> None:
+    tab = AnswersTab()
+    try:
+        a, b = Path("a.eea"), Path("b.eea")
+        tab._append([a])
+        tab._on_one(str(a), {"ok": True, "sheet": _sheet()})
+        assert tab.results
+        tab._append([b])
+        assert tab.results == {}, "换文件后旧结果必须清掉，否则导出会混进旧数据"
     finally:
         tab.deleteLater()
