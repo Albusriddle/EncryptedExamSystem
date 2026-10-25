@@ -313,3 +313,12 @@ def test_insert_image_button_exists() -> None:
         assert "插入图片" in tab.btn_image.text()
     finally:
         tab.deleteLater()
+
+
+def test_preview_renders_option_code_block() -> None:
+    from app.ui.tab_banks import _format_stem
+
+    out = "\n".join(_format_stem("程序如下：\n```c\nint x = 1;\n```", prefix="    B. "))
+    assert "```" not in out, "选项里的围栏不能原样出现"
+    assert "| int x = 1;" in out
+    assert out.splitlines()[0] == "    B. 程序如下："

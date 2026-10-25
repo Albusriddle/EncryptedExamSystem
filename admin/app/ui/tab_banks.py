@@ -227,7 +227,8 @@ class BanksTab(QWidget):
             # 按正文形态展示：模板/代码题若只打 options，预览里看起来像空题
             if q.body.kind == "options":
                 for opt in q.body.options:
-                    lines.append(f"    {opt.key}. {opt.text}")
+                    # 选项也可能多行、带代码块：按块格式化（围栏显示成 | 代码行）
+                    lines.extend(_format_stem(opt.text, prefix=f"    {opt.key}. "))
             elif q.body.kind == "template":
                 lines.append(f"    （{q.body.blank_count} 处空白）")
                 lines.extend(f"    | {ln}" for ln in (q.body.template or "").splitlines())
