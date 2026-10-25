@@ -364,6 +364,39 @@ impl NavState {
         (fill, text, stroke, width)
     }
 
+    /// 选中选项的（底色, 左侧竖条色）。
+    ///
+    /// 不要用 `selection.bg_fill.linear_multiply()`：浅色主题的 selection 本身就是
+    /// 浅蓝，再乘 0.35 几乎变白，白底上"选中"等于看不见（客户 v0.6.6 反馈）。
+    /// 这里按主题给固定色，并配一条 3px 竖条，深浅主题都能一眼分辨。
+    pub fn option_fill(v: &egui::Visuals) -> (egui::Color32, egui::Color32) {
+        if v.dark_mode {
+            (
+                egui::Color32::from_rgb(30, 58, 95),
+                egui::Color32::from_rgb(96, 165, 250),
+            )
+        } else {
+            (
+                egui::Color32::from_rgb(219, 234, 254),
+                egui::Color32::from_rgb(37, 99, 235),
+            )
+        }
+    }
+
+    /// 相对亮度（sRGB → 线性，再按 0.2126/0.7152/0.0722 加权）。仅测试用。
+    #[cfg(test)]
+    pub fn luminance(c: egui::Color32) -> f32 {
+        fn lin(v: u8) -> f32 {
+            let s = v as f32 / 255.0;
+            if s <= 0.039_28 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    }
+
     /// 视窗顶部那道题：取"顶部不超过视窗顶 + 40pt"的最后一道。
     pub fn current_from_rects(
         rects: &std::collections::HashMap<usize, egui::Rect>,
@@ -612,6 +645,26 @@ mod nav_state_tests {
         assert_eq!(
             NavState::current_from_rects(&std::collections::HashMap::new(), 0.0),
             None
+        );
+    }
+
+    #[test]
+    fn option_fill_visible_in_both_themes() {
+        let light = NavState::option_fill(&egui::Visuals::light());
+        let dark = NavState::option_fill(&egui::Visuals::dark());
+
+        assert!(
+            NavState::luminance(light.0) > 0.75,
+            "浅色主题底色应足够浅（白底上能看出边界）"
+        );
+        assert!(NavState::luminance(dark.0) < 0.10, "深色主题底色应足够深");
+        assert!(
+            (NavState::luminance(light.1) - NavState::luminance(light.0)).abs() > 0.25,
+            "浅色主题竖条要能和底色区分"
+        );
+        assert!(
+            (NavState::luminance(dark.1) - NavState::luminance(dark.0)).abs() > 0.25,
+            "深色主题竖条要能和底色区分"
         );
     }
 }

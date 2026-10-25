@@ -792,11 +792,21 @@ fn render_answer_inputs(
 
                 // 题支可能是多行、带 ``` 代码块：按块渲染，整块可点。
                 let blocks = crate::markdown::parse_cached(&opt.text);
+                let accent = if on {
+                    Some(crate::nav::NavState::option_fill(ui.visuals()).1)
+                } else {
+                    None
+                };
                 let bg_idx = ui.painter().add(egui::Shape::Noop);
                 let inner = ui
                     .scope(|ui| {
                         ui.horizontal_top(|ui| {
-                            ui.label(egui::RichText::new(format!("{}.", opt.key)).strong());
+                            let key_text = egui::RichText::new(format!("{}.", opt.key)).strong();
+                            let key_text = match accent {
+                                Some(c) => key_text.color(c),
+                                None => key_text,
+                            };
+                            ui.label(key_text);
                             ui.vertical(|ui| {
                                 render_blocks(ui, blocks.as_ref(), true);
                             });
@@ -805,15 +815,20 @@ fn render_answer_inputs(
                     .response;
 
                 let rect = inner.rect.expand2(egui::vec2(2.0, 2.0));
-                let fill = if on {
-                    ui.visuals().selection.bg_fill.linear_multiply(0.35)
+                let shape = if on {
+                    let (fill, bar) = crate::nav::NavState::option_fill(ui.visuals());
+                    let bar_rect =
+                        egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height()));
+                    egui::Shape::Vec(vec![
+                        egui::Shape::rect_filled(rect, 4.0, fill),
+                        egui::Shape::rect_filled(bar_rect, 2.0, bar),
+                    ])
                 } else if inner.hovered() {
-                    ui.visuals().widgets.hovered.bg_fill
+                    egui::Shape::rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill)
                 } else {
-                    egui::Color32::TRANSPARENT
+                    egui::Shape::rect_filled(rect, 4.0, egui::Color32::TRANSPARENT)
                 };
-                ui.painter()
-                    .set(bg_idx, egui::Shape::rect_filled(rect, 4.0, fill));
+                ui.painter().set(bg_idx, shape);
 
                 let sense = if editable {
                     egui::Sense::click()
@@ -1493,7 +1508,8 @@ fn render_paper(
                     .push_id(format!("item{seq}"), |ui| {
                         ui.vertical(|ui| {
                             ui.label(
-                                egui::RichText::new(format!("{seq}. ({})", item.score)).size(15.0),
+                                egui::RichText::new(format!("{seq}. ({}分)", item.score))
+                                    .size(15.0),
                             );
                             render_stem(ui, &item.stem);
                             ui.indent(format!("q{seq}"), |ui| {
