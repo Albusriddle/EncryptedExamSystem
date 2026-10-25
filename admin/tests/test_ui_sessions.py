@@ -599,3 +599,32 @@ def test_difficulty_range_blocks_unlabelled_bank(qapp, state_with_banks, monkeyp
         assert len(st.sessions) == before, "未标注难度时不应保存成功"
     finally:
         tab.deleteLater()
+
+
+def test_difficulty_controls_reset_when_session_has_no_range(qapp, state_with_banks) -> None:
+    """从有区间的场次切到无区间场次，难度框不能残留上一场的值。"""
+    from app.core.models import Session, SessionExam
+
+    st = state_with_banks
+    s1 = Session(
+        session_id=1,
+        start="2026-12-20T09:00:00+08:00",
+        end="2026-12-20T11:00:00+08:00",
+        students=[202108010217],
+        exams=[SessionExam(file="math.json", pick=1, difficulty_min=4, difficulty_max=6)],
+    )
+    s2 = Session(
+        session_id=2,
+        start="2026-12-21T09:00:00+08:00",
+        end="2026-12-21T11:00:00+08:00",
+        students=[202108010217],
+        exams=[SessionExam(file="math.json", pick=1)],
+    )
+    tab = SessionsTab(st)
+    try:
+        tab._load_into_form(s1)
+        tab._load_into_form(s2)
+        row = next(r for r in tab.checks if r.exam_id == "demo-math")
+        assert (row.dmin.value(), row.dmax.value()) == (1, 5)
+    finally:
+        tab.deleteLater()

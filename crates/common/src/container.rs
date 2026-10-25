@@ -247,6 +247,12 @@ pub fn build_payload(
         let picks = resolve_session_picks(&clean_banks, s)?;
         let mut ranges: BTreeMap<String, (u8, u8)> = BTreeMap::new();
         for e in &s.exams {
+            if e.difficulty_min.is_some() != e.difficulty_max.is_some() {
+                return Err(ContainerError::Format(format!(
+                    "场次 {} 的题库 {} 平均难度必须同时设置最小值和最大值",
+                    s.session_id, e.file
+                )));
+            }
             if let (Some(lo), Some(hi)) = (e.difficulty_min, e.difficulty_max) {
                 let bank = match_bank(&e.file, &clean_banks).ok_or_else(|| {
                     ContainerError::Format(format!(

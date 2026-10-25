@@ -267,7 +267,7 @@ fn choose_with_range(
 
     // 内存保护：parent 表 (n+1) × (hi_sum+1) 个 u16
     let cells = (n + 1).saturating_mul(hi_sum + 1);
-    if cells > 3_000_000 {
+    if cells > 8_000_000 {
         return window_fallback(bank, n, order, &diffs, (lo, hi), (lo_sum, hi_sum));
     }
 

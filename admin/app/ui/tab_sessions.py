@@ -446,8 +446,11 @@ class SessionsTab(QWidget):
                 r.limit.setChecked(e.difficulty_min is not None)
                 if e.difficulty_min is not None:
                     r.dmin.setValue(e.difficulty_min)
-                if e.difficulty_max is not None:
-                    r.dmax.setValue(e.difficulty_max)
+                    r.dmax.setValue(e.difficulty_max or e.difficulty_min)
+                else:
+                    # 没有区间时重置为默认，避免沿用上一场的值
+                    r.dmin.setValue(1)
+                    r.dmax.setValue(5)
 
     def _sync_roster(self) -> None:
         """学生名单变化后，把「使用全部学生」的显示刷新成最新名单。"""
