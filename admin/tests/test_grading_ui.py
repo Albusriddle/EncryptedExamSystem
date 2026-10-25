@@ -146,3 +146,40 @@ def test_export_writes_four_csvs(tab, monkeypatch) -> None:
     rows = list(csv.reader(detail.read_text(encoding="utf-8-sig").splitlines()))
     assert rows[0][0] == "学号"
     assert "调整时间" in rows[0]
+
+
+def test_essay_manual_score_moves_to_judged_export(tab, monkeypatch) -> None:
+    """问答题：打完分应进入"已判分"，未判分里不再出现，且带题干摘要。"""
+    from app.core.models import Question
+
+    tab.state.banks["m"].questions.append(
+        Question(
+            id="q9",
+            type="essay",
+            stem="谈谈你对加密的理解",
+            answer=None,
+            score=10,
+        )
+    )
+    tab.results[str(tab.files[0])]["sheet"]["qids"].append("q9")
+    tab.results[str(tab.files[0])]["sheet"]["answers"].append("这是我的回答")
+
+    tab._grade()
+    row = next(r for r in tab.grade_rows if r.qid == "q9")
+    assert row.status == "unjudged" and row.max_score == 10
+
+    idx = tab.grade_rows.index(row)
+    tab.grade_table.item(idx, 7).setText("7")
+    assert tab.grade_rows[idx].manual_score == 7
+
+    out = WORK / "out-essay"
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(out)))
+    tab._export_grading()
+
+    detail = next(out.glob("已判分-明细-*.csv")).read_text(encoding="utf-8-sig")
+    assert "q9" in detail and "7" in detail
+    unjudged = next(out.glob("未判分-*.csv")).read_text(encoding="utf-8-sig")
+    assert "q9" not in unjudged
+    assert "题干摘要" in unjudged.splitlines()[0]

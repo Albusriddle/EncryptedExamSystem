@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.grading import TYPE_LABELS, Policy, grade_sheet, summarize
+from app.core.grading import TYPE_LABELS, Policy, grade_sheet, is_graded, summarize
 from app.core.state import ProjectState
 from app.ui.tab_build import builder_exe
 
@@ -220,11 +220,12 @@ class AnswersTab(QWidget):
         for key, label in (
             ("single", "单选题"),
             ("multiple", "多选题"),
+            ("judge", "判断题"),
             ("fill", "填空题"),
             ("fix", "改错题"),
         ):
             cb = QCheckBox(label)
-            cb.setChecked(key in ("single", "multiple"))
+            cb.setChecked(key in ("single", "multiple", "judge"))
             self.chk_types[key] = cb
             type_row.addWidget(cb)
         type_row.addStretch(1)
@@ -529,6 +530,16 @@ class AnswersTab(QWidget):
                 sheets.append(result.get("sheet") or {})
         return sheets
 
+    @staticmethod
+    def _answer_missing(q) -> bool:
+        """题库里"没有可用标准答案"的题（含 {"kind":"blanks","answer":[]}）。"""
+        if q.answer in (None, {}, []):
+            return True
+        if isinstance(q.answer, dict):
+            ans = q.answer.get("answer")
+            return ans in (None, "", [], {})
+        return False
+
     def _precheck(self) -> None:
         """判分前先把"数据不全"的情况列出来，避免判到一半才发现。"""
         sheets = self._verified_sheets()
@@ -555,13 +566,16 @@ class AnswersTab(QWidget):
                 q = bank.get(str(qid))
                 if q is None:
                     missing_qids.add(str(qid))
-                elif q.answer in (None, {}, []):
+                elif self._answer_missing(q):
                     missing_answer.add(str(qid))
 
+        essay_count = sum(1 for q in bank.values() if q.qtype == "essay")
         lines = [
             f"答题卡：{len(sheets)} 张",
             f"题库题目：{len(bank)} 道",
         ]
+        if essay_count:
+            lines.append(f"ℹ 问答题：{essay_count} 道（不自动判分，生成成绩后双击得分人工打分）")
         if unsubmitted:
             lines.append(f"⚠ 未交卷：{unsubmitted} 张（仍可判分，汇总里会标出）")
         if unbound:
@@ -607,7 +621,7 @@ class AnswersTab(QWidget):
                 str(r.session_id),
                 str(r.seq),
                 TYPE_LABELS.get(r.qtype, r.qtype or "-"),
-                r.status,
+                self._status_text(r),
                 r.student,
                 r.expected,
                 str(r.final_score),
@@ -646,6 +660,14 @@ class AnswersTab(QWidget):
         self.grade_table.blockSignals(False)
         self.grade_summary.setText(self._summary_text(self._policy()))
 
+    @staticmethod
+    def _status_text(r) -> str:
+        if r.manual_score is not None and r.status in ("unjudged", "unknown"):
+            return "人工判分"
+        if r.status == "unjudged" and r.qtype == "essay":
+            return "待人工判分"
+        return r.status
+
     def _summary_text(self, policy: Policy) -> str:
         if not self.grade_rows:
             return "尚未判分"
@@ -674,8 +696,8 @@ class AnswersTab(QWidget):
         # 文件名带时间戳：同一目录导出第二场时不会静默覆盖上一场
         tag = datetime.now().strftime("%Y%m%d-%H%M%S")
 
-        judged = [r for r in self.grade_rows if r.status not in ("unjudged", "unknown")]
-        unjudged = [r for r in self.grade_rows if r.status in ("unjudged", "unknown")]
+        judged = [r for r in self.grade_rows if is_graded(r)]
+        unjudged = [r for r in self.grade_rows if not is_graded(r)]
 
         def write(name: str, header: list[str], rows: list[list]) -> None:
             path = base / name
@@ -727,9 +749,29 @@ class AnswersTab(QWidget):
             rate = f"{score / total:.1%}" if total else "-"
             summary_rows.append([sid, sidx, len(rows), score, total, rate])
 
-        unjudged_header = ["学号", "场次", "题号", "题目ID", "题型", "学生作答", "满分", "状态"]
+        unjudged_header = [
+            "学号",
+            "场次",
+            "题号",
+            "题目ID",
+            "题型",
+            "学生作答",
+            "满分",
+            "状态",
+            "题干摘要",
+        ]
         unjudged_rows = [
-            [r.student_id, r.session_id, r.seq, r.qid, r.qtype, r.student, r.max_score, r.status]
+            [
+                r.student_id,
+                r.session_id,
+                r.seq,
+                r.qid,
+                r.qtype,
+                r.student,
+                r.max_score,
+                self._status_text(r),
+                r.stem[:80].replace("\n", " "),
+            ]
             for r in unjudged
         ]
 
