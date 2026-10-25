@@ -82,12 +82,18 @@ class BanksTab(QWidget):
 
         incoming = [x.bank for x in loaded]
 
-        # 题干里的内嵌图片：打包前先把问题挑出来（尺寸/体积/坏数据）
+        # 题干里的内嵌图片：打包前先把问题挑出来（尺寸/体积/坏数据）。
+        # 图片多时逐张解码要几秒，用等待光标并处理一次事件，避免看起来像卡死。
         from app.core.images import check_bank_images
 
-        for item in loaded:
-            for problem in check_bank_images(item.bank):
-                warns.append(f"{item.bank.title}（{item.bank.exam_id}）：{problem}")
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            QGuiApplication.processEvents()
+            for item in loaded:
+                for problem in check_bank_images(item.bank):
+                    warns.append(f"{item.bank.title}（{item.bank.exam_id}）：{problem}")
+        finally:
+            QGuiApplication.restoreOverrideCursor()
 
         # 冲突确认：同一 exam_id 已存在时**不能静默覆盖**。
         conflicts = self.state.conflicting_bank_ids(incoming)
