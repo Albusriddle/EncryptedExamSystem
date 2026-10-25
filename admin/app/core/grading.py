@@ -43,7 +43,7 @@ class Policy:
         flags = [
             "忽略大小写" if self.ignore_case else "区分大小写",
             "忽略空白" if self.ignore_space else "保留空白",
-            "填空按空给分" if self.blank_partial else "填空整题给分",
+            "填空/改错按项给分" if self.blank_partial else "填空/改错整题给分",
         ]
         return f"题型：{types or '无'}；" + "；".join(flags)
 
@@ -167,7 +167,9 @@ def grade_question(q: Question, raw: str | None, policy: Policy) -> tuple[int, s
         if matched == total:
             return q.score, "correct", "；".join(got), "；".join(expected_list)
         if policy.blank_partial:
-            score = int(round(q.score * matched / total))
+            # int(x + 0.5)：四舍五入。round() 是银行家舍入（2.5 → 2），
+            # 会出现"答对一半却少 1 分"的观感问题。
+            score = int(q.score * matched / total + 0.5)
         else:
             score = 0
         return score, "wrong", "；".join(got), "；".join(expected_list)
@@ -193,7 +195,7 @@ def grade_question(q: Question, raw: str | None, policy: Policy) -> tuple[int, s
         if matched == total:
             return q.score, "correct", exp_display, exp_display
         if policy.blank_partial:
-            return int(round(q.score * matched / total)), "wrong", exp_display, exp_display
+            return int(q.score * matched / total + 0.5), "wrong", exp_display, exp_display
         return 0, "wrong", exp_display, exp_display
 
     return 0, "unknown", "" if raw is None else raw, ""

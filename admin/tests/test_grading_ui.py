@@ -111,6 +111,20 @@ def test_invalid_score_is_clamped(tab) -> None:
     assert tab.grade_rows[0].final_score == 0
 
 
+def test_changing_master_clears_old_grades(tab, monkeypatch) -> None:
+    """改主密钥/换包后，旧成绩必须清空——否则会导出与当前输入不符的分数。"""
+    tab._grade()
+    assert tab.grade_table.rowCount() > 0
+    assert tab.btn_grade_csv.isEnabled()
+
+    tab.master.setText("00" * 32)  # 触发 _invalidate
+
+    assert tab.grade_rows == []
+    assert tab.grade_table.rowCount() == 0
+    assert not tab.btn_grade_csv.isEnabled()
+    assert "尚未判分" in tab.grade_summary.text()
+
+
 def test_export_writes_four_csvs(tab, monkeypatch) -> None:
     tab._grade()
     out = WORK / "out"

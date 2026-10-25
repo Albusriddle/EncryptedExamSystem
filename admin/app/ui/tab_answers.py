@@ -235,8 +235,8 @@ class AnswersTab(QWidget):
         self.chk_case.setChecked(True)
         self.chk_space = QCheckBox("忽略空白字符")
         self.chk_space.setChecked(True)
-        self.chk_partial = QCheckBox("填空题按空给分")
-        self.chk_partial.setToolTip("默认整题全对才给分；勾上后按答对的空数比例给分")
+        self.chk_partial = QCheckBox("填空/改错按项给分")
+        self.chk_partial.setToolTip("默认整题全对才给分；勾上后按答对的空/行比例给分")
         rule_row.addWidget(QLabel("匹配规则："))
         rule_row.addWidget(self.chk_case)
         rule_row.addWidget(self.chk_space)
@@ -300,11 +300,21 @@ class AnswersTab(QWidget):
             self._append(files)
             event.acceptProposedAction()
 
+    def _reset_grading(self) -> None:
+        """输入变了，旧成绩必须一起作废——否则会导出与当前输入不符的分数。"""
+        self.grade_rows = []
+        self.grade_table.blockSignals(True)
+        self.grade_table.setRowCount(0)
+        self.grade_table.blockSignals(False)
+        self.grade_summary.setText("尚未判分")
+        self.btn_grade_csv.setEnabled(False)
+
     def _invalidate(self) -> None:
         """主密钥/包变了，之前的结果全部作废。"""
         if self._busy():
             # 校验进行中输入本该是禁用的；这里是双保险，防止内部改动绕过
             return
+        self._reset_grading()
         if not self.results:
             return
         self.results.clear()
@@ -352,6 +362,7 @@ class AnswersTab(QWidget):
             return
         self.files.clear()
         self.results.clear()
+        self._reset_grading()
         self._refill()
         self.btn_csv.setEnabled(False)
         self.status.setText("尚未校验")
@@ -377,6 +388,7 @@ class AnswersTab(QWidget):
     def _start(self) -> None:
         if self._busy():
             return
+        self._reset_grading()
         if not self.files:
             QMessageBox.information(self, "提示", "请先添加答题卡文件。")
             return
@@ -758,7 +770,7 @@ class AnswersTab(QWidget):
             f"已判题：{len(detail_rows)} 行；未判题：{len(unjudged_rows)} 行\n\n"
             "文件：\n"
             f"  {names['detail']}\n  {names['summary']}\n  {names['unjudged']}\n  {names['all']}\n",
-            encoding="utf-8",
+            encoding="utf-8-sig",
         )
 
         QMessageBox.information(
