@@ -17,8 +17,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
+from PySide6.QtCore import QUrl
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -79,6 +81,11 @@ class MainWindow(QMainWindow):
         act_save = QAction("保存工程…", self)
         act_save.triggered.connect(self.save_project)
         bar.addAction(act_save)
+
+        act_dir = QAction("打开工程目录", self)
+        act_dir.setToolTip("自动保存的工程都在这里（含标准答案，勿分发）")
+        act_dir.triggered.connect(self.open_projects_dir)
+        bar.addAction(act_dir)
 
         bar.addSeparator()
 
@@ -212,9 +219,18 @@ class MainWindow(QMainWindow):
         if self.project_path is not None:
             proj = self.project_path
         else:
-            # 包名相同但目录不同的两个包不能共用一个工程文件（会互相覆盖）：
-            # 取输出路径的短哈希做后缀。
-            digest = hashlib.blake2s(str(prod.resolve()).encode("utf-8"), digest_size=2).hexdigest()
+            # 用**工程内容**做短哈希：这样移动/改名考试包仍复用同一个工程文件，
+            # 而内容不同的两个同名包不会互相覆盖。
+            payload = json.dumps(
+                {
+                    "bank_paths": self.state.bank_paths,
+                    "students": self.state.students,
+                    "sessions": [x.model_dump() for x in self.state.sessions],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            digest = hashlib.blake2s(payload.encode("utf-8"), digest_size=3).hexdigest()
             proj = projects_dir() / f"{prod.stem}-{digest}.eesproj"
 
         legacy = prod.with_suffix(".eesproj")
@@ -274,12 +290,22 @@ class MainWindow(QMainWindow):
         self._reload_tabs()
         missing = set(self.state.bank_paths) - set(self.state.banks)
         if missing:
-            QMessageBox.warning(
-                self,
-                "题库缺失",
-                "以下题库的源文件无法读取，请重新导入：\n\n" + "\n".join(sorted(missing)),
+            # 不弹模态框：启动阶段弹窗会挡住窗口，远程桌面/录屏时尤其难受。
+            names = "、".join(sorted(missing))
+            self.statusBar().showMessage(
+                f"已打开上次工程，但 {len(missing)} 个题库源文件读不到"
+                f"（{names}）——请到「题库」页重新导入",
+                20000,
             )
-        self.statusBar().showMessage(f"已打开上次工程：{path}", 8000)
+            self.setToolTip(f"缺失题库：{names}")
+        else:
+            self.statusBar().showMessage(f"已打开上次工程：{path}", 8000)
+
+    def open_projects_dir(self) -> None:
+        from PySide6.QtGui import QDesktopServices
+
+        d = projects_dir()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
 
     def check_config(self) -> None:
         problems = self.state.validate()

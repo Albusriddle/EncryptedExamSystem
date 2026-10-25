@@ -236,12 +236,8 @@ def main() -> int:
         shutil.copy2(tutorial, rel / "图片使用教程.md")
         print("✓ 已附带图片使用教程.md")
 
-    example = ROOT / "examples" / "image-question.json"
-    if example.exists():
-        demo = rel / "示例题库"
-        demo.mkdir(exist_ok=True)
-        shutil.copy2(example, demo / "图片题示例.json")
-        print("✓ 已附带 示例题库/图片题示例.json")
+    # 图片示例题库统一由 make-release-zip.sh 放到发布包根的 示例题库/，
+    # 这里不再复制，避免同一个文件在包里出现两份。
 
     manual = ROOT / "docs" / "教师使用手册.md"
     if manual.exists():
