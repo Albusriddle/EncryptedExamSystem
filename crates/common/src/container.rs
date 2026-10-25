@@ -294,9 +294,10 @@ pub fn build_payload(
                 }
                 let min_mean = ds[..k].iter().map(|&d| d as f32).sum::<f32>() / k as f32;
                 let max_mean = ds[ds.len() - k..].iter().map(|&d| d as f32).sum::<f32>() / k as f32;
-                if hi as f32 + 0.001 < min_mean || lo as f32 - 0.001 > max_mean {
+                let diffs_u8: Vec<u8> = ds.iter().map(|&d| d as u8).collect();
+                if !crate::picker::feasible_average(&diffs_u8, k, lo, hi) {
                     return Err(ContainerError::Format(format!(
-                        "场次 {} 的题库 {} 抽 {k} 题的可达平均难度为 {min_mean:.2}–{max_mean:.2}，                         无法满足设置的 {lo}–{hi}",
+                        "场次 {} 的题库 {} 抽 {k} 题的可达平均难度为 {min_mean:.2}–{max_mean:.2}，无法满足设置的 {lo}–{hi}",
                         s.session_id, bank.exam_id
                     )));
                 }

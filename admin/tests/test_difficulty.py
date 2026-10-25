@@ -35,3 +35,15 @@ def test_unreachable_range_is_reported() -> None:
 
 def test_invalid_bounds() -> None:
     assert check_difficulty_range(_bank([1, 2]), 2, 5, 3)
+
+
+def test_gap_range_is_rejected_by_exact_check() -> None:
+    """{1,3} 抽 1 题、区间 2–2：min/max 看着可行，实际没有任何子集。"""
+    problems = check_difficulty_range(_bank([1, 3]), 1, 2, 2)
+    assert problems, "区间内没有可行组合时必须报错"
+    assert "没有任何" in problems[0] or "无法满足" in problems[0]
+
+
+def test_exact_check_accepts_boundary() -> None:
+    assert check_difficulty_range(_bank([1, 3]), 1, 1, 1) == []
+    assert check_difficulty_range(_bank([1, 3]), 1, 3, 3) == []

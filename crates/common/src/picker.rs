@@ -206,6 +206,38 @@ fn pick_from_bank(
         .collect())
 }
 
+/// 是否存在 k 个难度、平均值落在 `[lo, hi]` 的子集（精确判定）。
+///
+/// 只看 min/max 会放过 `{1,3}` 抽 1 题、区间 2–2 这种"没有可行组合"的配置。
+pub fn feasible_average(diffs: &[u8], k: usize, lo: u8, hi: u8) -> bool {
+    if k == 0 || k > diffs.len() {
+        return false;
+    }
+    let lo_sum = (k as f32 * lo as f32).ceil() as usize;
+    let hi_sum = ((k as f32 * hi as f32).floor() as usize).min(k * 255);
+    if lo_sum > hi_sum {
+        return false;
+    }
+    let words = hi_sum / 64 + 1;
+    let mut dp = vec![vec![0u64; words]; k + 1];
+    dp[0][0] = 1;
+    for &d in diffs {
+        let d = d as usize;
+        if d > hi_sum {
+            continue;
+        }
+        for j in (1..=k).rev() {
+            for sum in (d..=hi_sum).rev() {
+                let prev = sum - d;
+                if dp[j - 1][prev / 64] >> (prev % 64) & 1 == 1 {
+                    dp[j][sum / 64] |= 1 << (sum % 64);
+                }
+            }
+        }
+    }
+    (lo_sum..=hi_sum).any(|sum| dp[k][sum / 64] >> (sum % 64) & 1 == 1)
+}
+
 /// 在洗牌后的池子里挑 `n` 道，使平均难度落在 `[lo, hi]`。
 ///
 /// 用 0/1 背包位集 DP：`dp[j]` 是"用 j 道题能达到的难度和"位集，
@@ -267,7 +299,13 @@ fn choose_with_range(
 
     // 内存保护：parent 表 (n+1) × (hi_sum+1) 个 u16
     let cells = (n + 1).saturating_mul(hi_sum + 1);
-    if cells > 8_000_000 {
+    // 操作数保护：内层循环约 order.len() × n × hi_sum 次。
+    // 大题库 + 宽区间（如 1000 题抽 150、1–255）会到几十亿次，必须回退。
+    let ops = order
+        .len()
+        .saturating_mul(n)
+        .saturating_mul(hi_sum.saturating_add(1));
+    if cells > 8_000_000 || ops > 50_000_000 {
         return window_fallback(bank, n, order, &diffs, (lo, hi), (lo_sum, hi_sum));
     }
 
@@ -799,5 +837,13 @@ mod tests {
         let bank = bank_with_difficulty(&[1, 1, 1, 1]);
         let err = generate_paper_ranged(1, 1, b"s", &[bank], |_, _| (2, Some((4, 5)))).unwrap_err();
         assert!(matches!(err, PickError::NoFeasibleDifficulty { .. }));
+    }
+
+    #[test]
+    fn feasible_average_rejects_gap() {
+        // {1,3} 抽 1 题、区间 2–2：min/max 看着可行，实际没有组合
+        assert!(!feasible_average(&[1, 3], 1, 2, 2));
+        assert!(feasible_average(&[1, 3], 1, 1, 1));
+        assert!(feasible_average(&[1, 3], 2, 2, 2));
     }
 }

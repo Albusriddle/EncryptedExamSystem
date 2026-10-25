@@ -8,7 +8,30 @@
 
 from __future__ import annotations
 
+import math
+
 from app.core.models import ExamBank
+
+
+def feasible_average(diffs: list[int], k: int, lo: int, hi: int) -> bool:
+    """是否存在 k 个难度的平均值落在 [lo, hi]（精确判定，位集 DP）。
+
+    只看 min/max 会放过 {1,3} 抽 1 题、区间 2–2 这种"区间在范围内但没有
+    任何子集能达到"的情况——那种配置会让学生在考场解锁时失败。
+    """
+    if k <= 0 or k > len(diffs):
+        return False
+    lo_sum = math.ceil(k * lo)
+    hi_sum = math.floor(k * hi)
+    if lo_sum > hi_sum:
+        return False
+    dp = [0] * (k + 1)
+    dp[0] = 1
+    for d in diffs:
+        for j in range(k, 0, -1):
+            dp[j] |= dp[j - 1] << d
+    mask = ((1 << (hi_sum + 1)) - 1) ^ ((1 << lo_sum) - 1)
+    return bool(dp[k] & mask)
 
 
 def check_difficulty_range(bank: ExamBank, pick: int, lo: int, hi: int) -> list[str]:
@@ -34,12 +57,14 @@ def check_difficulty_range(bank: ExamBank, pick: int, lo: int, hi: int) -> list[
         )
         return problems
 
-    vals = sorted(int(q.difficulty) for q in bank.questions if q.difficulty)
-    min_mean = sum(vals[:pick]) / pick
-    max_mean = sum(vals[-pick:]) / pick
-    if hi < min_mean or lo > max_mean:
+    diffs = [int(q.difficulty) for q in bank.questions if q.difficulty]
+    if not feasible_average(diffs, pick, lo, hi):
+        vals = sorted(diffs)
+        min_mean = sum(vals[:pick]) / pick
+        max_mean = sum(vals[-pick:]) / pick
         problems.append(
             f"题库「{bank.title}」抽 {pick} 题的可达平均难度为 "
             f"{min_mean:.2f}–{max_mean:.2f}，你设置的 {lo}–{hi} 无法满足"
+            "（该区间内没有可行的题目组合）"
         )
     return problems
