@@ -9,9 +9,6 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -22,21 +19,14 @@ from PySide6.QtWidgets import (
 )
 
 from app.branding import branding
+from app.ui.app_settings import settings_path
 from app.version import app_version
 
 _SETTINGS_KEY = "welcome/hidden"
 
-
-def settings_path() -> Path:
-    r"""设置文件位置：`%LOCALAPPDATA%\ExamSystem\settings.ini`。
-
-    **不用注册表后端**：实测在教育网/受限账户的机器上，QSettings 默认的
-    注册表写入会返回 Status.AccessError，"不再提示"于是永远存不住——
-    用户勾了也没用。文件后端不依赖注册表，行为可预期。
-    与客户端的 skip_welcome 标记放在同一目录，便于排查。
-    """
-    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
-    return Path(base) / "ExamSystem" / "settings.ini"
+# 说明：**不用注册表后端**——实测在教育网/受限账户的机器上，QSettings 默认的
+# 注册表写入会返回 Status.AccessError，"不再提示"于是永远存不住。
+# 文件后端不依赖注册表，行为可预期。
 
 
 def _settings() -> QSettings:

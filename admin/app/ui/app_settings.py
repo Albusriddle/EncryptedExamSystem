@@ -15,7 +15,7 @@ from PySide6.QtCore import QSettings
 LAST_PROJECT = "last_project"
 #: 启动时是否自动打开上次工程
 AUTOLOAD = "autoload"
-#: 是否已经提示过"工程文件含答案，别随包分发"
+#: 上次提示过"工程文件含答案，别随包分发"的工程路径（不是布尔值）
 WARNED_EESPROJ = "warned_eesproj"
 
 
