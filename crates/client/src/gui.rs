@@ -774,9 +774,13 @@ fn render_answer_inputs(
                 } else {
                     current == opt.key
                 };
-                let text = format!("{}. {}", opt.key, opt.text);
+                // 题支里也会有 `代码` / **加粗**：按行内 Markdown 渲染，
+                // 否则学生看到的是原样的反引号（客户反馈）。
+                let mut spans = vec![crate::markdown::Span::Text(format!("{}. ", opt.key))];
+                spans.extend(crate::markdown::parse_spans(&opt.text));
+                let job = build_job(ui, &spans, 15.0, avail_w(ui) - 24.0, false);
                 if ui
-                    .add_enabled(editable, egui::SelectableLabel::new(on, text))
+                    .add_enabled(editable, egui::SelectableLabel::new(on, job))
                     .clicked()
                 {
                     if multiple {
@@ -965,6 +969,18 @@ fn render_spans_ex(
     wrap: f32,
     bold_text: bool,
 ) {
+    let job = build_job(ui, spans, size, wrap, bold_text);
+    ui.label(job);
+}
+
+/// 把行内片段拼成 LayoutJob（段落与选项按钮共用）。
+fn build_job(
+    ui: &egui::Ui,
+    spans: &[crate::markdown::Span],
+    size: f32,
+    wrap: f32,
+    bold_text: bool,
+) -> egui::text::LayoutJob {
     use crate::markdown::Span;
 
     let visuals = ui.visuals().clone();
@@ -1015,7 +1031,7 @@ fn render_spans_ex(
         }
     }
 
-    ui.label(job);
+    job
 }
 
 /// 加粗：优先用系统粗体字族，找不到就用强调色（缺字形时不能变方块）。
@@ -1809,6 +1825,35 @@ mod markdown_render_tests {
                 });
             });
         });
+    }
+
+    #[test]
+    fn option_job_renders_inline_code_in_monospace() {
+        use crate::markdown::Span;
+
+        let ctx = egui::Context::default();
+        let mut sections = 0usize;
+        let mut mono = false;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let spans = vec![
+                    Span::Text("A. 程序的输出为 ".into()),
+                    Span::Code("1 10".into()),
+                    Span::Text("。".into()),
+                ];
+                let job = super::build_job(ui, &spans, 15.0, 400.0, false);
+                sections = job.sections.len();
+                mono = job
+                    .sections
+                    .iter()
+                    .any(|s| matches!(s.format.font_id.family, egui::FontFamily::Monospace));
+            });
+        });
+        assert!(
+            sections >= 3,
+            "题支里的行内代码必须切成独立 section：{sections}"
+        );
+        assert!(mono, "行内代码段必须用等宽字体");
     }
 
     #[test]
