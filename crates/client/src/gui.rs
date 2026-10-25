@@ -737,6 +737,26 @@ fn render_locked(
     card
 }
 
+/// 选项切换的纯函数：单选覆盖、多选切换并排序。
+fn toggle_key(current: &str, key: &str, multiple: bool) -> Option<String> {
+    if !multiple {
+        return Some(key.to_string());
+    }
+    let mut chars: Vec<char> = current.chars().collect();
+    if let Some(pos) = chars.iter().position(|c| c.to_string() == key) {
+        chars.remove(pos);
+    } else if let Some(c) = key.chars().next() {
+        chars.push(c);
+    }
+    chars.sort();
+    let joined: String = chars.into_iter().collect();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
 /// 渲染一道题的作答区。返回是否有改动。
 ///
 /// 编码规则（与 `common::answer_sheet` 一致）：
@@ -761,46 +781,55 @@ fn render_answer_inputs(
 
     match &item.body {
         QuestionBody::Options { options } => {
-            let current = sheet.answers[idx].clone().unwrap_or_default();
             let multiple = item.qtype == "multiple";
-            let mut selected: Vec<String> = if multiple {
-                current.chars().map(|c| c.to_string()).collect()
-            } else {
-                Vec::new()
-            };
+            let mut current = sheet.answers[idx].clone().unwrap_or_default();
             for opt in options {
                 let on = if multiple {
-                    selected.iter().any(|k| k == &opt.key)
+                    current.contains(&opt.key)
                 } else {
                     current == opt.key
                 };
-                // 题支里也会有 `代码` / **加粗**：按行内 Markdown 渲染，
-                // 否则学生看到的是原样的反引号（客户反馈）。
-                let mut spans = vec![crate::markdown::Span::Text(format!("{}. ", opt.key))];
-                spans.extend(crate::markdown::parse_spans(&opt.text));
-                let job = build_job(ui, &spans, 15.0, avail_w(ui) - 24.0, false);
-                if ui
-                    .add_enabled(editable, egui::SelectableLabel::new(on, job))
-                    .clicked()
-                {
-                    if multiple {
-                        if let Some(pos) = selected.iter().position(|k| k == &opt.key) {
-                            selected.remove(pos);
-                        } else {
-                            selected.push(opt.key.clone());
-                        }
-                        selected.sort();
-                        let joined = selected.concat();
-                        let value = if joined.is_empty() {
-                            None
-                        } else {
-                            Some(joined)
-                        };
-                        if sheet.set_answer(idx, value, now_unix) {
-                            changed = true;
-                        }
-                    } else if sheet.set_answer(idx, Some(opt.key.clone()), now_unix) {
+
+                // 题支可能是多行、带 ``` 代码块：按块渲染，整块可点。
+                let blocks = crate::markdown::parse_cached(&opt.text);
+                let bg_idx = ui.painter().add(egui::Shape::Noop);
+                let inner = ui
+                    .scope(|ui| {
+                        ui.horizontal_top(|ui| {
+                            ui.label(egui::RichText::new(format!("{}.", opt.key)).strong());
+                            ui.vertical(|ui| {
+                                render_blocks(ui, blocks.as_ref(), true);
+                            });
+                        });
+                    })
+                    .response;
+
+                let rect = inner.rect.expand2(egui::vec2(2.0, 2.0));
+                let fill = if on {
+                    ui.visuals().selection.bg_fill.linear_multiply(0.35)
+                } else if inner.hovered() {
+                    ui.visuals().widgets.hovered.bg_fill
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                ui.painter()
+                    .set(bg_idx, egui::Shape::rect_filled(rect, 4.0, fill));
+
+                let sense = if editable {
+                    egui::Sense::click()
+                } else {
+                    egui::Sense::hover()
+                };
+                let resp = ui.interact(
+                    rect,
+                    ui.make_persistent_id(("option", idx, opt.key.as_str())),
+                    sense,
+                );
+                if resp.clicked() && editable {
+                    let value = toggle_key(&current, &opt.key, multiple);
+                    if sheet.set_answer(idx, value.clone(), now_unix) {
                         changed = true;
+                        current = value.unwrap_or_default();
                     }
                 }
             }
@@ -887,9 +916,18 @@ fn avail_w(ui: &egui::Ui) -> f32 {
 }
 
 fn render_stem(ui: &mut egui::Ui, stem: &str) {
+    let blocks = crate::markdown::parse_cached(stem);
+    render_blocks(ui, blocks.as_ref(), false);
+}
+
+/// 渲染一组已解析的块（题干与选项共用）。
+///
+/// `compact` = 选项里的渲染：代码块**不套横向滚动区**（滚动区会吃掉整块点击），
+/// 长行自动折行。
+fn render_blocks(ui: &mut egui::Ui, blocks: &[crate::markdown::Block], compact: bool) {
     use crate::markdown::Block;
 
-    for block in crate::markdown::parse_cached(stem).iter() {
+    for block in blocks.iter() {
         match block {
             Block::Paragraph(spans) => {
                 let w = avail_w(ui);
@@ -943,7 +981,13 @@ fn render_stem(ui: &mut egui::Ui, stem: &str) {
                         render_spans(ui, spans, 14.5, w);
                     });
             }
-            Block::Code { lines, .. } => render_mono_block(ui, lines, false),
+            Block::Code { lines, .. } => {
+                if compact {
+                    render_mono_block_wrapped(ui, lines);
+                } else {
+                    render_mono_block(ui, lines, false);
+                }
+            }
             Block::Table {
                 header,
                 rows,
@@ -1209,6 +1253,18 @@ fn fit_image(size: egui::Vec2, max_w: f32, max_h: f32) -> egui::Vec2 {
     }
     let k = (max_w / size.x).min(max_h / size.y).min(1.0);
     egui::vec2(size.x * k, size.y * k)
+}
+
+/// 等宽代码块（折行版）：选项里用，避免 ScrollArea 抢走整块点击。
+fn render_mono_block_wrapped(ui: &mut egui::Ui, lines: &[String]) {
+    egui::Frame::none()
+        .fill(ui.visuals().extreme_bg_color)
+        .inner_margin(egui::Margin::same(8.0))
+        .show(ui, |ui| {
+            for line in lines {
+                ui.label(egui::RichText::new(line).monospace().size(13.0));
+            }
+        });
 }
 
 /// 等宽代码块：底色 + 横向滚动（长行不能被裁掉）。
@@ -1822,6 +1878,35 @@ mod markdown_render_tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     render_stem(ui, stem);
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn toggle_key_single_replaces() {
+        assert_eq!(super::toggle_key("A", "C", false), Some("C".to_string()));
+        assert_eq!(super::toggle_key("", "B", false), Some("B".to_string()));
+    }
+
+    #[test]
+    fn toggle_key_multi_toggles_and_sorts() {
+        assert_eq!(super::toggle_key("A", "C", true), Some("AC".to_string()));
+        assert_eq!(super::toggle_key("AC", "A", true), Some("C".to_string()));
+        assert_eq!(super::toggle_key("C", "A", true), Some("AC".to_string()));
+        assert_eq!(super::toggle_key("A", "A", true), None);
+    }
+
+    #[test]
+    fn option_with_fenced_code_block_renders() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let blocks = crate::markdown::parse_cached(
+                        "程序如下：\n```c\nint x = 1;\n```\n输出是？",
+                    );
+                    super::render_blocks(ui, blocks.as_ref(), true);
                 });
             });
         });
