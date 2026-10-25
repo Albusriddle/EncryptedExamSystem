@@ -886,9 +886,42 @@ fn render_answer_inputs(
                 changed = true;
             }
         }
-        QuestionBody::Text => {}
+        QuestionBody::Text => {
+            // 问答题：多行文本作答（纯展示题不给输入框）。
+            if item.qtype == "essay" {
+                let mut text = sheet.answers[idx].clone().unwrap_or_default();
+                let resp = ui.add_enabled(
+                    editable,
+                    egui::TextEdit::multiline(&mut text)
+                        .desired_rows(6)
+                        .desired_width(ui.available_width())
+                        .hint_text("请在此作答；本题由老师人工评阅"),
+                );
+                if resp.changed() && sheet.set_answer(idx, essay_value(&text), now_unix) {
+                    changed = true;
+                }
+                ui.label(
+                    egui::RichText::new(format!("{} 字", text.chars().count()))
+                        .size(12.0)
+                        .color(egui::Color32::GRAY),
+                );
+            }
+        }
     }
     changed
+}
+
+/// 问答题答案上限：防止单题把答题卡撑爆。
+const ESSAY_MAX_CHARS: usize = 5000;
+
+/// 把多行文本规整成答题卡值：空白视为未作答，超长按字符截断。
+fn essay_value(text: &str) -> Option<String> {
+    let capped: String = text.chars().take(ESSAY_MAX_CHARS).collect();
+    if capped.trim().is_empty() {
+        None
+    } else {
+        Some(capped)
+    }
 }
 
 /// 空位序号：0→①，1→② …（超过 10 个空时退化为 ①+数字）
@@ -1823,6 +1856,37 @@ mod tests {
     fn answer_sheet_name_tolerates_short_fingerprint() {
         let name = answer_sheet_file_name(2, 1, "abc");
         assert_eq!(name, "answers-2-1-abc.eea");
+    }
+
+    #[test]
+    fn essay_value_trims_blank_and_caps_length() {
+        assert_eq!(essay_value("   \n\t "), None);
+        assert_eq!(essay_value("我的回答"), Some("我的回答".to_string()));
+
+        let long = "字".repeat(ESSAY_MAX_CHARS + 10);
+        let v = essay_value(&long).expect("非空");
+        assert_eq!(v.chars().count(), ESSAY_MAX_CHARS);
+    }
+
+    #[test]
+    fn essay_stores_multiline_text_in_sheet() {
+        let mut sheet = common::answer_sheet::AnswerSheet {
+            version: 1,
+            student_id: 1,
+            session_id: 1,
+            paper_fingerprint: "0".repeat(32),
+            qids: vec!["e1".into()],
+            answers: vec![None],
+            updated_unix: 0,
+            submitted: false,
+            submitted_unix: None,
+        };
+        assert!(sheet.set_answer(0, essay_value("第一行\n第二行"), 100));
+        assert_eq!(sheet.answers[0].as_deref(), Some("第一行\n第二行"));
+        assert!(
+            !sheet.set_answer(0, essay_value("第一行\n第二行"), 101),
+            "同值不应重复写"
+        );
     }
 }
 
