@@ -18,8 +18,6 @@ LAST_PROJECT = "last_project"
 AUTOLOAD = "autoload"
 #: 老师指定的工程保存目录（空 = 程序目录 projects/）
 PROJECT_DIR = "project_dir"
-#: 上次提示过"工程文件含答案，别随包分发"的工程路径（不是布尔值）
-WARNED_EESPROJ = "warned_eesproj"
 
 
 def settings_path() -> Path:
