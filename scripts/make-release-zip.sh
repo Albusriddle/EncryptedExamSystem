@@ -78,6 +78,12 @@ for src_name, new_id, title, out_name in [
     )
     print(f"     {out_name}: exam_id={new_id}, {len(data['questions'])} 题")
 PYGEN
+# 图片题示例：放到根 示例题库/，与手册里的路径一致
+if [ -f "$ROOT/examples/image-question.json" ]; then
+  cp "$ROOT/examples/image-question.json" "$STAGE/示例题库/图片题示例.json"
+  echo "  ✓ 示例题库/图片题示例.json"
+fi
+
 echo "  ✓ 示例题库/（exam_id 与文件名一致）"
 
 # 4. 手册
