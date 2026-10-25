@@ -44,6 +44,7 @@ from app.core.grading import (
     summarize,
 )
 from app.core.state import ProjectState
+from app.core.subproc import no_window_kwargs
 from app.ui.tab_build import builder_exe
 
 COLUMNS = ["文件", "学号", "场次", "题数", "已答", "未答", "交卷时间", "状态", "说明"]
@@ -90,6 +91,7 @@ def run_tool(cmd: list[str], env: dict[str, str]) -> tuple[str, str, int]:
         errors="replace",
         env=env,
         timeout=120,
+        **no_window_kwargs(),
     )
     return cp.stdout or "", cp.stderr or "", cp.returncode
 

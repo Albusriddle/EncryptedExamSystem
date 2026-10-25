@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 from app.core.banks_io import write_temp_banks
 from app.core.buildcmd import build_command, build_env
 from app.core.state import ProjectState
+from app.core.subproc import no_window_kwargs
 
 
 def is_frozen() -> bool:
@@ -167,6 +168,44 @@ def builder_exe() -> Path:
     return root / "target" / "release" / name
 
 
+def parse_keygen_output(text: str) -> str:
+    """校验 keygen 输出必须是 64 位十六进制。"""
+    key = (text or "").strip()
+    if len(key) != 64 or any(c not in "0123456789abcdefABCDEF" for c in key):
+        raise ValueError(f"exam-builder 返回的内容不是 64 位十六进制：\n{key[:100]}")
+    return key
+
+
+class KeygenWorker(QThread):
+    """后台生成主密钥：避免 subprocess 阻塞 GUI（客户反馈"像卡死"）。"""
+
+    done = Signal(str)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            cp = subprocess.run(
+                [str(builder_exe()), "keygen"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                **no_window_kwargs(),
+            )
+        except Exception as e:  # noqa: BLE001 - 展示给用户
+            self.failed.emit(str(e))
+            return
+        if cp.returncode != 0:
+            detail = (cp.stderr or cp.stdout or f"退出码 {cp.returncode}").strip()
+            self.failed.emit(detail[:300] or f"退出码 {cp.returncode}")
+            return
+        try:
+            self.done.emit(parse_keygen_output(cp.stdout))
+        except ValueError as e:
+            self.failed.emit(str(e))
+
+
 class BuildWorker(QThread):
     log = Signal(str)
     done = Signal(bool, str)  # (成功, 结果说明)
@@ -212,6 +251,7 @@ class BuildWorker(QThread):
                 errors="replace",
                 env=env,
                 cwd=str(self.manifest_path.parent),
+                **no_window_kwargs(),
             )
         except OSError as e:
             self.done.emit(False, f"无法启动打包程序：{e}")
@@ -272,10 +312,16 @@ class BuildTab(QWidget):
         self.edit_master.setPlaceholderText("64 位十六进制主密钥")
         row = QHBoxLayout()
         row.addWidget(self.edit_master, 1)
-        btn_gen = QPushButton("生成")
-        btn_gen.setToolTip("调用 exam-builder keygen 生成一个随机主密钥")
-        btn_gen.clicked.connect(self.gen_master)
-        row.addWidget(btn_gen)
+        self.btn_gen = QPushButton("生成")
+        self.btn_gen.setToolTip("调用 exam-builder keygen 生成一个随机主密钥")
+        self.btn_gen.clicked.connect(self.gen_master)
+        row.addWidget(self.btn_gen)
+        self.gen_progress = QProgressBar()
+        self.gen_progress.setRange(0, 0)  # 不确定进度：显示"正在跑"
+        self.gen_progress.setFixedWidth(96)
+        self.gen_progress.setVisible(False)
+        self.gen_progress.setTextVisible(False)
+        row.addWidget(self.gen_progress)
         # 复制按钮：主密钥的**唯一**导出方式。
         # 不写进日志——日志会被截图、会留在共享电脑上，而剪贴板由教师自己控制。
         btn_copy = QPushButton("复制主密钥")
@@ -480,28 +526,42 @@ class BuildTab(QWidget):
                 f"{exe}\n\n请先 cargo build --release -p builder",
             )
             return
-        try:
-            out = subprocess.run(
-                [str(exe), "keygen"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",  # 同 builder.py：Windows 默认 GBK 会解坏 UTF-8
-                errors="replace",
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
-            QMessageBox.critical(self, "生成失败", str(e))
+        if getattr(self, "_keygen", None) is not None and self._keygen.isRunning():
             return
-        key = out.stdout.strip()
-        # keygen 只输出 64 位 hex；若混入其他文本说明版本不对，直接提示
-        if len(key) != 64 or any(c not in "0123456789abcdefABCDEF" for c in key):
-            QMessageBox.critical(
-                self, "生成失败", f"exam-builder 返回的内容不是 64 位十六进制：\n{key[:100]}"
-            )
-            return
+        self.btn_gen.setEnabled(False)
+        self.btn_gen.setText("生成中…")
+        self.gen_progress.setVisible(True)
+        self.copy_hint.setStyleSheet("color:#9a6a00")
+        self.copy_hint.setText("正在生成主密钥…（通常 1–2 秒）")
+        self._keygen = KeygenWorker(self)
+        self._keygen.done.connect(self._on_keygen_done)
+        self._keygen.failed.connect(self._on_keygen_failed)
+        self._keygen.start()
+
+    def _on_keygen_done(self, key: str) -> None:
+        self._reset_keygen_ui()
         self.edit_master.setText(key)
+        self.copy_hint.setStyleSheet("color:#2e7d32")
+        self.copy_hint.setText("✔ 已生成主密钥。请立刻点【复制主密钥】保存到密码管理器。")
+
+    def _on_keygen_failed(self, message: str) -> None:
+        self._reset_keygen_ui()
+        QMessageBox.critical(self, "生成失败", message)
+
+    def _reset_keygen_ui(self) -> None:
+        self.btn_gen.setEnabled(True)
+        self.btn_gen.setText("生成")
+        self.gen_progress.setVisible(False)
 
     def refresh_preview(self) -> None:
+        """节流：validate() 含精确难度 DP，大题库时别在每个事件里跑。"""
+        if not hasattr(self, "_preview_timer"):
+            self._preview_timer = QTimer(self)
+            self._preview_timer.setSingleShot(True)
+            self._preview_timer.timeout.connect(self._refresh_preview_now)
+        self._preview_timer.start(250)
+
+    def _refresh_preview_now(self) -> None:
         total = sum(len(s.students) for s in self.state.sessions)
         problems = self.state.validate()
         if problems:
