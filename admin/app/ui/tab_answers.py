@@ -14,10 +14,12 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -30,9 +32,24 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.grading import TYPE_LABELS, Policy, grade_sheet, summarize
+from app.core.state import ProjectState
 from app.ui.tab_build import builder_exe
 
 COLUMNS = ["文件", "学号", "场次", "题数", "已答", "未答", "交卷时间", "状态", "说明"]
+
+GRADE_COLUMNS = [
+    "学号",
+    "场次",
+    "题号",
+    "题型",
+    "状态",
+    "学生作答",
+    "标准答案",
+    "得分",
+    "满分",
+    "人工调整",
+]
 
 
 def collect_eea(paths: list[Path]) -> list[Path]:
@@ -114,13 +131,16 @@ class VerifyWorker(QThread):
 
 
 class AnswersTab(QWidget):
-    """答题卡列表 + 校验 + 导出。"""
+    """答题卡列表 + 校验 + 自动判分 + 导出。"""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, state: ProjectState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.state = state
         self.files: list[Path] = []
         self.results: dict[str, dict] = {}
         self.worker: VerifyWorker | None = None
+        #: 判分明细（ItemResult），跨学生展平
+        self.grade_rows: list = []
 
         lay = QVBoxLayout(self)
         self.setAcceptDrops(True)
@@ -188,6 +208,72 @@ class AnswersTab(QWidget):
 
         self.status = QLabel("尚未校验")
         lay.addWidget(self.status)
+
+        # ---------------------------------------------------------------- 判分
+        box = QGroupBox("自动判分")
+        bl = QVBoxLayout(box)
+
+        type_row = QHBoxLayout()
+        type_row.addWidget(QLabel("自动判分题型："))
+        self.chk_types: dict[str, QCheckBox] = {}
+        for key, label in (
+            ("single", "单选题"),
+            ("multiple", "多选题"),
+            ("fill", "填空题"),
+            ("fix", "改错题"),
+        ):
+            cb = QCheckBox(label)
+            cb.setChecked(key in ("single", "multiple"))
+            self.chk_types[key] = cb
+            type_row.addWidget(cb)
+        type_row.addStretch(1)
+        bl.addLayout(type_row)
+
+        rule_row = QHBoxLayout()
+        self.chk_case = QCheckBox("忽略大小写")
+        self.chk_case.setChecked(True)
+        self.chk_space = QCheckBox("忽略空白字符")
+        self.chk_space.setChecked(True)
+        self.chk_partial = QCheckBox("填空题按空给分")
+        self.chk_partial.setToolTip("默认整题全对才给分；勾上后按答对的空数比例给分")
+        rule_row.addWidget(QLabel("匹配规则："))
+        rule_row.addWidget(self.chk_case)
+        rule_row.addWidget(self.chk_space)
+        rule_row.addWidget(self.chk_partial)
+        rule_row.addStretch(1)
+        bl.addLayout(rule_row)
+
+        gbtn = QHBoxLayout()
+        self.btn_precheck = QPushButton("预检")
+        self.btn_precheck.clicked.connect(self._precheck)
+        self.btn_grade = QPushButton("生成成绩")
+        self.btn_grade.clicked.connect(self._grade)
+        self.btn_grade_csv = QPushButton("导出判分结果…")
+        self.btn_grade_csv.clicked.connect(self._export_grading)
+        self.btn_grade_csv.setEnabled(False)
+        gbtn.addWidget(self.btn_precheck)
+        gbtn.addWidget(self.btn_grade)
+        gbtn.addWidget(self.btn_grade_csv)
+        gbtn.addStretch(1)
+        bl.addLayout(gbtn)
+
+        self.grade_table = QTableWidget(0, len(GRADE_COLUMNS))
+        self.grade_table.setHorizontalHeaderLabels(GRADE_COLUMNS)
+        self.grade_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.SelectedClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+        )
+        self.grade_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        gh = self.grade_table.horizontalHeader()
+        gh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        gh.setStretchLastSection(True)
+        self.grade_table.itemChanged.connect(self._on_score_edited)
+        bl.addWidget(self.grade_table, 1)
+
+        self.grade_summary = QLabel("尚未判分")
+        bl.addWidget(self.grade_summary)
+        lay.addWidget(box, 1)
 
         # 结果只对"当时那把主密钥 + 那个包"有效；改了输入还留着"通过"等于给错误背书
         self.master.textChanged.connect(self._invalidate)
@@ -403,3 +489,244 @@ class AnswersTab(QWidget):
             writer.writeheader()
             writer.writerows(rows)
         QMessageBox.information(self, "完成", f"已导出 {len(rows)} 行到\n{path}")
+
+    # ---------------------------------------------------------------- 判分
+
+    def _policy(self) -> Policy:
+        enabled = frozenset(k for k, cb in self.chk_types.items() if cb.isChecked())
+        return Policy(
+            enabled=enabled,
+            ignore_case=self.chk_case.isChecked(),
+            ignore_space=self.chk_space.isChecked(),
+            blank_partial=self.chk_partial.isChecked(),
+        )
+
+    def _bank_by_qid(self) -> dict:
+        out = {}
+        for bank in self.state.banks.values():
+            for q in bank.questions:
+                out[q.id] = q
+        return out
+
+    def _verified_sheets(self) -> list[dict]:
+        sheets = []
+        for path in self.files:
+            result = self.results.get(str(path)) or {}
+            if result.get("ok"):
+                sheets.append(result.get("sheet") or {})
+        return sheets
+
+    def _precheck(self) -> None:
+        """判分前先把"数据不全"的情况列出来，避免判到一半才发现。"""
+        sheets = self._verified_sheets()
+        if not sheets:
+            QMessageBox.information(self, "提示", "请先完成校验。")
+            return
+        bank = self._bank_by_qid()
+        if not bank:
+            QMessageBox.warning(self, "题库为空", "当前工程没有题库，无法判分。请先打开原工程。")
+            return
+
+        missing_qids: set[str] = set()
+        missing_answer: set[str] = set()
+        unsubmitted = 0
+        for sheet in sheets:
+            if not sheet.get("submitted"):
+                unsubmitted += 1
+            for qid in sheet.get("qids") or []:
+                q = bank.get(str(qid))
+                if q is None:
+                    missing_qids.add(str(qid))
+                elif q.answer in (None, {}, []):
+                    missing_answer.add(str(qid))
+
+        lines = [
+            f"答题卡：{len(sheets)} 张",
+            f"题库题目：{len(bank)} 道",
+        ]
+        if unsubmitted:
+            lines.append(f"⚠ 未交卷：{unsubmitted} 张（仍可判分，汇总里会标出）")
+        if missing_qids:
+            lines.append(f"✗ 题库里找不到的题号：{len(missing_qids)} 个（换错工程了？）")
+        if missing_answer:
+            lines.append(f"⚠ 没有标准答案的题：{len(missing_answer)} 道（会标成未知）")
+        if not missing_qids and not missing_answer:
+            lines.append("✓ 数据齐全，可以判分")
+        QMessageBox.information(self, "判分预检", "\n".join(lines))
+
+    def _grade(self) -> None:
+        sheets = self._verified_sheets()
+        if not sheets:
+            QMessageBox.information(self, "提示", "请先完成校验。")
+            return
+        bank = self._bank_by_qid()
+        if not bank:
+            QMessageBox.warning(self, "题库为空", "当前工程没有题库，无法判分。请先打开原工程。")
+            return
+
+        policy = self._policy()
+        self.grade_rows = []
+        for sheet in sheets:
+            self.grade_rows.extend(grade_sheet(bank, sheet, policy))
+
+        self._fill_grade_table()
+        self.btn_grade_csv.setEnabled(bool(self.grade_rows))
+        self.grade_summary.setText(self._summary_text(policy))
+
+    def _fill_grade_table(self) -> None:
+        self.grade_table.blockSignals(True)
+        self.grade_table.setRowCount(0)
+        for r in self.grade_rows:
+            row = self.grade_table.rowCount()
+            self.grade_table.insertRow(row)
+            values = [
+                str(r.student_id),
+                str(r.session_id),
+                str(r.seq),
+                TYPE_LABELS.get(r.qtype, r.qtype or "-"),
+                r.status,
+                r.student,
+                r.expected,
+                str(r.final_score),
+                str(r.max_score),
+                f"{r.score} → {r.manual_score}" if r.adjusted else "",
+            ]
+            for col, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                if col == 7:
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                    item.setToolTip("双击可改分（0 ~ 满分）")
+                else:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.grade_table.setItem(row, col, item)
+        self.grade_table.blockSignals(False)
+
+    def _on_score_edited(self, item: QTableWidgetItem) -> None:
+        if item.column() != 7:
+            return
+        row = item.row()
+        if row >= len(self.grade_rows):
+            return
+        result = self.grade_rows[row]
+        try:
+            value = int(item.text().strip())
+        except ValueError:
+            value = result.final_score
+        value = max(0, min(value, result.max_score))
+        result.manual_score = value if value != result.score else None
+        self.grade_table.blockSignals(True)
+        item.setText(str(result.final_score))
+        adjust = self.grade_table.item(row, 9)
+        if adjust is not None:
+            adjust.setText(f"{result.score} → {result.manual_score}" if result.adjusted else "")
+        self.grade_table.blockSignals(False)
+        self.grade_summary.setText(self._summary_text(self._policy()))
+
+    def _summary_text(self, policy: Policy) -> str:
+        if not self.grade_rows:
+            return "尚未判分"
+        s = summarize(self.grade_rows)
+        return (
+            f"已判 {s['judged']} 题，得分 {s['score']} / {s['max_score']}；"
+            f"未判 {s['unjudged']} 题。口径：{policy.describe()}"
+        )
+
+    def _export_grading(self) -> None:
+        if not self.grade_rows:
+            QMessageBox.information(self, "提示", "请先生成成绩。")
+            return
+        out_dir = QFileDialog.getExistingDirectory(self, "选择导出目录")
+        if not out_dir:
+            return
+        policy = self._policy()
+        base = Path(out_dir)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        judged = [r for r in self.grade_rows if r.status not in ("unjudged", "unknown")]
+        unjudged = [r for r in self.grade_rows if r.status in ("unjudged", "unknown")]
+
+        def write(name: str, header: list[str], rows: list[list]) -> None:
+            path = base / name
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                f.write(f"# 判分口径：{policy.describe()}；生成时间：{stamp}\n")
+                writer = csv.writer(f)
+                writer.writerow(header)
+                writer.writerows(rows)
+
+        detail_header = [
+            "学号",
+            "场次",
+            "题号",
+            "题目ID",
+            "题型",
+            "状态",
+            "学生作答",
+            "标准答案",
+            "得分",
+            "满分",
+            "人工调整",
+        ]
+        detail_rows = [
+            [
+                r.student_id,
+                r.session_id,
+                r.seq,
+                r.qid,
+                r.qtype,
+                r.status,
+                r.student,
+                r.expected,
+                r.final_score,
+                r.max_score,
+                f"{r.score} → {r.manual_score}" if r.adjusted else "",
+            ]
+            for r in judged
+        ]
+
+        groups: dict[tuple[int, int], list] = {}
+        for r in judged:
+            groups.setdefault((r.student_id, r.session_id), []).append(r)
+        summary_header = ["学号", "场次", "已判题数", "得分", "满分", "得分率"]
+        summary_rows = []
+        for (sid, sidx), rows in sorted(groups.items()):
+            score = sum(x.final_score for x in rows)
+            total = sum(x.max_score for x in rows)
+            rate = f"{score / total:.1%}" if total else "-"
+            summary_rows.append([sid, sidx, len(rows), score, total, rate])
+
+        unjudged_header = ["学号", "场次", "题号", "题目ID", "题型", "学生作答", "满分", "状态"]
+        unjudged_rows = [
+            [r.student_id, r.session_id, r.seq, r.qid, r.qtype, r.student, r.max_score, r.status]
+            for r in unjudged
+        ]
+
+        all_rows = [row + ["已判"] for row in detail_rows]
+        all_rows += [
+            [
+                r.student_id,
+                r.session_id,
+                r.seq,
+                r.qid,
+                r.qtype,
+                r.status,
+                r.student,
+                r.expected,
+                r.final_score,
+                r.max_score,
+                "",
+                "未判",
+            ]
+            for r in unjudged
+        ]
+
+        write("已判分-明细.csv", detail_header, detail_rows)
+        write("已判分-汇总.csv", summary_header, summary_rows)
+        write("未判分.csv", unjudged_header, unjudged_rows)
+        write("全量.csv", detail_header + ["判分状态"], all_rows)
+
+        QMessageBox.information(
+            self,
+            "导出完成",
+            f"已写入 4 个文件到：\n{out_dir}\n\n"
+            f"已判分明细 {len(detail_rows)} 行；未判分 {len(unjudged_rows)} 行。",
+        )

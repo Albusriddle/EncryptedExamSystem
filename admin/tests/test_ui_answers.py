@@ -10,7 +10,8 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from app.ui.tab_answers import AnswersTab  # noqa: E402
+from app.core.state import ProjectState  # noqa: E402
+from app.ui.tab_answers import AnswersTab, collect_eea  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -32,7 +33,7 @@ def _sheet(**over):
 
 
 def test_verified_row_is_filled(qapp) -> None:
-    tab = AnswersTab()
+    tab = AnswersTab(ProjectState())
     try:
         f = Path("answers-2021001-1.eea")
         tab._append([f])
@@ -48,7 +49,7 @@ def test_verified_row_is_filled(qapp) -> None:
 
 
 def test_failed_row_shows_reason(qapp) -> None:
-    tab = AnswersTab()
+    tab = AnswersTab(ProjectState())
     try:
         f = Path("bad.eea")
         tab._append([f])
@@ -60,7 +61,7 @@ def test_failed_row_shows_reason(qapp) -> None:
 
 
 def test_summary_counts(qapp) -> None:
-    tab = AnswersTab()
+    tab = AnswersTab(ProjectState())
     try:
         a, b = Path("a.eea"), Path("b.eea")
         tab._append([a, b])
@@ -79,7 +80,7 @@ def test_same_filename_in_different_dirs_does_not_collide(qapp, tmp_path) -> Non
     a.parent.mkdir()
     b.parent.mkdir()
 
-    tab = AnswersTab()
+    tab = AnswersTab(ProjectState())
     try:
         tab._append([a, b])
         tab._on_one(str(a), {"ok": True, "sheet": _sheet(student_id=111)})
@@ -92,7 +93,7 @@ def test_same_filename_in_different_dirs_does_not_collide(qapp, tmp_path) -> Non
 
 
 def test_append_clears_previous_results(qapp) -> None:
-    tab = AnswersTab()
+    tab = AnswersTab(ProjectState())
     try:
         a, b = Path("a.eea"), Path("b.eea")
         tab._append([a])
@@ -147,7 +148,7 @@ def test_verify_worker_reports_builder_error_in_chinese(tmp_path) -> None:
 
 def test_binding_status_is_explicit(qapp) -> None:
     """没给包时必须显示"未校验绑定"，不能只说"通过"。"""
-    tab = AnswersTab()
+    tab = AnswersTab(ProjectState())
     try:
         a, b = Path("a.eea"), Path("b.eea")
         tab._append([a, b])
@@ -160,7 +161,7 @@ def test_binding_status_is_explicit(qapp) -> None:
 
 
 def test_failure_row_shows_dash_not_zero(qapp) -> None:
-    tab = AnswersTab()
+    tab = AnswersTab(ProjectState())
     try:
         f = Path("bad.eea")
         tab._append([f])
@@ -172,7 +173,7 @@ def test_failure_row_shows_dash_not_zero(qapp) -> None:
 
 
 def test_results_invalidated_when_master_changes(qapp) -> None:
-    tab = AnswersTab()
+    tab = AnswersTab(ProjectState())
     try:
         f = Path("a.eea")
         tab._append([f])
@@ -186,7 +187,6 @@ def test_results_invalidated_when_master_changes(qapp) -> None:
 
 
 def test_collect_eea_expands_directory(tmp_path) -> None:
-    from app.ui.tab_answers import collect_eea
 
     d = tmp_path / "收上来的"
     d.mkdir()
@@ -222,7 +222,7 @@ def test_list_is_frozen_while_verifying(qapp, monkeypatch) -> None:
     import app.ui.tab_answers as mod
 
     monkeypatch.setattr(mod, "VerifyWorker", _FakeRunningWorker)
-    tab = AnswersTab()
+    tab = AnswersTab(ProjectState())
     try:
         f = Path("a.eea")
         tab._append([f])
@@ -244,7 +244,7 @@ def test_start_is_not_reentrant(qapp, monkeypatch) -> None:
     import app.ui.tab_answers as mod
 
     monkeypatch.setattr(mod, "VerifyWorker", _FakeRunningWorker)
-    tab = AnswersTab()
+    tab = AnswersTab(ProjectState())
     try:
         tab._append([Path("a.eea")])
         tab.master.setText("11" * 32)
@@ -261,7 +261,7 @@ def test_master_and_package_frozen_while_verifying(qapp, monkeypatch) -> None:
     import app.ui.tab_answers as mod
 
     monkeypatch.setattr(mod, "VerifyWorker", _FakeRunningWorker)
-    tab = AnswersTab()
+    tab = AnswersTab(ProjectState())
     try:
         tab._append([Path("a.eea")])
         tab.master.setText("11" * 32)
