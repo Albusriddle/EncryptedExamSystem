@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -680,7 +682,16 @@ class AnswersTab(QWidget):
         try:
             value = int(raw)
         except ValueError:
-            value = result.final_score
+            # 非法输入：恢复原显示，绝不把 "abc" 当成 0 分
+            self.grade_table.blockSignals(True)
+            item.setText(
+                ""
+                if result.status in ("unjudged", "unknown") and result.manual_score is None
+                else str(result.final_score)
+            )
+            self.grade_table.blockSignals(False)
+            QToolTip.showText(QCursor.pos(), "请输入 0–满分之间的整数")
+            return
         value = max(0, min(value, result.max_score))
         if result.status in ("unjudged", "unknown"):
             # 未判题没有"自动分"可言：0 分也是老师明确给的，必须记下来
