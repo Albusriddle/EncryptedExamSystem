@@ -221,20 +221,33 @@ pub fn feasible_average(diffs: &[u8], k: usize, lo: u8, hi: u8) -> bool {
     let words = hi_sum / 64 + 1;
     let mut dp = vec![vec![0u64; words]; k + 1];
     dp[0][0] = 1;
+
+    // 按字移位：每次 `dp[j] |= dp[j-1] << d` 是 O(words)，
+    // 比逐位遍历 hi_sum 快约 64 倍（构建期大题库不会卡住）。
     for &d in diffs {
         let d = d as usize;
         if d > hi_sum {
             continue;
         }
+        let word_shift = d / 64;
+        let bit_shift = d % 64;
         for j in (1..=k).rev() {
-            for sum in (d..=hi_sum).rev() {
-                let prev = sum - d;
-                if dp[j - 1][prev / 64] >> (prev % 64) & 1 == 1 {
-                    dp[j][sum / 64] |= 1 << (sum % 64);
+            let (before, after) = dp.split_at_mut(j);
+            let prev = &before[j - 1];
+            let cur = &mut after[0];
+            for w in (0..words).rev() {
+                let mut v = 0u64;
+                if w >= word_shift {
+                    v |= prev[w - word_shift] << bit_shift;
+                    if bit_shift > 0 && w > word_shift {
+                        v |= prev[w - word_shift - 1] >> (64 - bit_shift);
+                    }
                 }
+                cur[w] |= v;
             }
         }
     }
+
     (lo_sum..=hi_sum).any(|sum| dp[k][sum / 64] >> (sum % 64) & 1 == 1)
 }
 

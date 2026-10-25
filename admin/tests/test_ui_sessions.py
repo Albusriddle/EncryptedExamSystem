@@ -650,7 +650,14 @@ def test_range_hint_shows_reachable_range(qapp, state_with_banks) -> None:
         row = next(r for r in tab.checks if r.exam_id == "diff2")
         row.pick.setValue(2)
         assert "可达 1.5–3.5" in row.hint.text(), row.hint.text()
-        demo = next(r for r in tab.checks if r.exam_id == "demo-math")
-        assert "未标难度" in demo.hint.text()
+        assert "可达" in next(r for r in tab.checks if r.exam_id == "demo-math").hint.text()
+        st.banks["nolabel"] = ExamBank(
+            exam_id="nolabel",
+            title="未标库",
+            pick=1,
+            questions=[Question(id="n1", type="single", stem="s", answer="A")],
+        )
+        tab.refresh_choices()
+        assert "未标难度" in next(r for r in tab.checks if r.exam_id == "nolabel").hint.text()
     finally:
         tab.deleteLater()

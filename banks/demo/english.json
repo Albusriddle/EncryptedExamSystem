@@ -3,9 +3,59 @@
   "title": "演示题库 · 英语",
   "pick": 2,
   "questions": [
-    { "id": "e001", "type": "single", "stem": "\"apple\" 的中文是?", "options": ["香蕉", "苹果", "橘子", "梨"], "answer": "B", "score": 2 },
-    { "id": "e002", "type": "single", "stem": "过去式：go → ?", "options": ["goed", "went", "gone", "going"], "answer": "B", "score": 2 },
-    { "id": "e003", "type": "single", "stem": "复数：child → ?", "options": ["childs", "children", "childes", "child"], "answer": "B", "score": 2 },
-    { "id": "e004", "type": "judge",  "stem": "\"I is\" 是正确语法。", "options": ["对", "错"], "answer": "B", "score": 1 }
+    {
+      "id": "e001",
+      "type": "single",
+      "stem": "\"apple\" 的中文是?",
+      "options": [
+        "香蕉",
+        "苹果",
+        "橘子",
+        "梨"
+      ],
+      "answer": "B",
+      "score": 2,
+      "difficulty": 1
+    },
+    {
+      "id": "e002",
+      "type": "single",
+      "stem": "过去式：go → ?",
+      "options": [
+        "goed",
+        "went",
+        "gone",
+        "going"
+      ],
+      "answer": "B",
+      "score": 2,
+      "difficulty": 2
+    },
+    {
+      "id": "e003",
+      "type": "single",
+      "stem": "复数：child → ?",
+      "options": [
+        "childs",
+        "children",
+        "childes",
+        "child"
+      ],
+      "answer": "B",
+      "score": 2,
+      "difficulty": 2
+    },
+    {
+      "id": "e004",
+      "type": "judge",
+      "stem": "\"I is\" 是正确语法。",
+      "options": [
+        "对",
+        "错"
+      ],
+      "answer": "B",
+      "score": 1,
+      "difficulty": 3
+    }
   ]
 }
