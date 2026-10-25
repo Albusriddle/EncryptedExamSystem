@@ -17,6 +17,12 @@ from app.branding import branding  # noqa: E402
 from app.ui.main_window import MainWindow  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def isolate_settings(tmp_path, monkeypatch):
+    """隔离本机设置：否则开发机上的 last_project 会让 MainWindow 自动打开真实工程。"""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+
+
 @pytest.fixture(scope="module")
 def qapp():
     from PySide6.QtWidgets import QApplication

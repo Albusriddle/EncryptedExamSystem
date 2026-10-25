@@ -42,7 +42,7 @@ from app.version import app_version, watermark
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, autoload: bool = True) -> None:
         super().__init__()
         self.state = ProjectState()
         self.project_path: Path | None = None
@@ -58,7 +58,8 @@ class MainWindow(QMainWindow):
         self._build_tabs()
         self._build_statusbar()
         self._refresh_status()
-        self._autoload_last_project()
+        if autoload:
+            self._autoload_last_project()
 
     # ---------------------------------------------------------------- 构建
 
