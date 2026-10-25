@@ -221,8 +221,9 @@ class MainWindow(QMainWindow):
         self._dirty = False
         self._refresh_status()
 
-        if not st.value(WARNED_EESPROJ, False, type=bool):
-            st.setValue(WARNED_EESPROJ, True)
+        # 按**工程路径**记忆：换电脑/换项目还会再提醒一次（防止误分发）
+        if st.value(WARNED_EESPROJ, "", type=str) != str(proj):
+            st.setValue(WARNED_EESPROJ, str(proj))
             QMessageBox.information(
                 self,
                 "工程已自动保存",
