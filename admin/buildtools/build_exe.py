@@ -231,6 +231,18 @@ def main() -> int:
         return 1
     print(f"✓ 已附带许可证文件：{', '.join(copied)}")
 
+    tutorial = ROOT / "docs" / "图片使用教程.md"
+    if tutorial.exists():
+        shutil.copy2(tutorial, rel / "图片使用教程.md")
+        print("✓ 已附带图片使用教程.md")
+
+    example = ROOT / "examples" / "image-question.json"
+    if example.exists():
+        demo = rel / "示例题库"
+        demo.mkdir(exist_ok=True)
+        shutil.copy2(example, demo / "图片题示例.json")
+        print("✓ 已附带 示例题库/图片题示例.json")
+
     manual = ROOT / "docs" / "教师使用手册.md"
     if manual.exists():
         shutil.copy2(manual, rel / "使用说明.md")

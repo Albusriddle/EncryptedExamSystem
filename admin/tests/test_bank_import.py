@@ -571,3 +571,15 @@ def test_model_rejects_27_options() -> None:
             stem="s",
             body={"kind": "options", "options": [{"key": k, "text": "x"} for k in keys]},
         )
+
+
+def test_example_image_bank_is_valid() -> None:
+    """docs/图片使用教程.md 里的示例题库必须能直接导入。"""
+    from pathlib import Path
+
+    from app.core.bank_import import load_bank_from_path
+
+    root = Path(__file__).resolve().parents[2]
+    bank = load_bank_from_path(root / "examples" / "image-question.json")
+    assert len(bank.questions) == 1
+    assert "data:image/png;base64," in bank.questions[0].stem

@@ -1,0 +1,22 @@
+{
+  "exam_id": "image-demo",
+  "title": "图片题示例",
+  "pick": 1,
+  "questions": [
+    {
+      "id": "img-1",
+      "type": "single",
+      "stem": "观察下面的图片：\n\n![示例图](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAT0lEQVR42u3PQQkAAAgEsItz/fMYxgi+hcEKLNO+FgEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQGBywLzk8EPlvGqjQAAAABJRU5ErkJggg==)\n\n图中方块是什么颜色？",
+      "options": [
+        "红色",
+        "绿色",
+        "蓝色"
+      ],
+      "answer": {
+        "kind": "single",
+        "answer": "A"
+      },
+      "score": 2
+    }
+  ]
+}
