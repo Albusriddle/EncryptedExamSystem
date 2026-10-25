@@ -93,3 +93,40 @@ def test_manual_score_overrides_total() -> None:
     assert results[0].final_score == 0
     results[0].manual_score = 1
     assert summarize(results)["score"] == 1
+
+
+def test_judge_is_graded_like_single_choice() -> None:
+    q = _q("judge", {"kind": "single", "answer": "A"}, score=1)
+    assert grade_question(q, "A", P())[:2] == (1, "correct")
+    assert grade_question(q, "a", P())[:2] == (1, "correct")
+    assert grade_question(q, "B", P())[:2] == (0, "wrong")
+
+
+def test_essay_is_unjudged_but_keeps_max_score() -> None:
+    q = _q("essay", {"kind": "text", "answer": None}, score=10)
+    from app.core.grading import grade_sheet
+
+    results = grade_sheet(
+        {"e1": q},
+        {"student_id": 1, "session_id": 1, "qids": ["e1"], "answers": ["这是我的回答"]},
+        P(),
+    )
+    r = results[0]
+    assert r.status == "unjudged" and r.max_score == 10
+    assert r.student == "这是我的回答"
+
+
+def test_manually_scored_essay_counts_in_summary() -> None:
+    from app.core.grading import grade_sheet, is_graded, summarize
+
+    q = _q("essay", {"kind": "text", "answer": None}, score=10)
+    results = grade_sheet(
+        {"e1": q},
+        {"student_id": 1, "session_id": 1, "qids": ["e1"], "answers": ["回答"]},
+        P(),
+    )
+    assert not is_graded(results[0])
+    results[0].manual_score = 7
+    assert is_graded(results[0])
+    s = summarize(results)
+    assert s["score"] == 7 and s["judged"] == 1 and s["unjudged"] == 0

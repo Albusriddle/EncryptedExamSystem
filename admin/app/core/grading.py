@@ -15,17 +15,19 @@ from typing import Any
 
 from app.core.models import Question
 
-#: 默认只判选择题（填空/改错常需要人工复核）
-DEFAULT_TYPES = frozenset({"single", "multiple"})
+#: 默认判选择/判断题（填空/改错常需要人工复核）
+DEFAULT_TYPES = frozenset({"single", "multiple", "judge"})
 
-#: 所有支持自动判分的题型
-SUPPORTED_TYPES = ("single", "multiple", "fill", "fix")
+#: 所有支持自动判分的题型（essay 只能人工判）
+SUPPORTED_TYPES = ("single", "multiple", "judge", "fill", "fix")
 
 TYPE_LABELS = {
     "single": "单选题",
     "multiple": "多选题",
+    "judge": "判断题",
     "fill": "填空题",
     "fix": "改错题",
+    "essay": "问答题",
 }
 
 
@@ -60,6 +62,8 @@ class ItemResult:
     score: int
     max_score: int
     status: str  # correct / wrong / blank / unjudged / unknown
+    #: 题干（导出"未判分"时给老师看）
+    stem: str = ""
     #: 人工改分后的分数；None 表示未改
     manual_score: int | None = None
     #: 最近一次人工改分的时间（导出留痕）
@@ -143,7 +147,11 @@ def grade_question(q: Question, raw: str | None, policy: Policy) -> tuple[int, s
 
     blank = raw is None or (isinstance(raw, str) and raw.strip() == "")
 
-    if qtype in ("single", "multiple"):
+    if qtype == "essay":
+        # 问答题只能人工判：答案原样保留，交给老师打分
+        return 0, "unjudged", "" if raw is None else str(raw), ""
+
+    if qtype in ("single", "multiple", "judge"):
         expected = _choice_expected(q)
         student = "" if raw is None else str(raw)
         if blank:
@@ -246,14 +254,20 @@ def grade_sheet(
                 score=score,
                 max_score=q.score,
                 status=status,
+                stem=q.stem,
             )
         )
     return results
 
 
+def is_graded(r: ItemResult) -> bool:
+    """是否已有分数：自动判过的，或人工改过分的（问答题就靠后半句）。"""
+    return r.status not in ("unjudged", "unknown") or r.manual_score is not None
+
+
 def summarize(results: list[ItemResult]) -> dict[str, int]:
-    judged = [r for r in results if r.status not in ("unjudged", "unknown")]
-    unjudged = [r for r in results if r.status in ("unjudged", "unknown")]
+    judged = [r for r in results if is_graded(r)]
+    unjudged = [r for r in results if not is_graded(r)]
     return {
         "judged": len(judged),
         "unjudged": len(unjudged),
