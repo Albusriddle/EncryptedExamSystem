@@ -28,6 +28,9 @@ def qapp():
 
 @pytest.fixture()
 def local_appdata(monkeypatch):
+    import shutil
+
+    shutil.rmtree(WORK, ignore_errors=True)  # 上一轮留下的 .eesproj 会让断言误判
     WORK.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("LOCALAPPDATA", str(WORK))
     yield WORK
@@ -50,8 +53,10 @@ def test_autosave_and_autoload_roundtrip(qapp, local_appdata, monkeypatch) -> No
         out.write_bytes(b"x")
         win._on_built(str(out))
 
-        proj = out.with_suffix(".eesproj")
-        assert proj.is_file(), "打包后应在同目录生成 .eesproj"
+        # 绝不能写在考试包旁边（那是发给学生的目录）
+        assert not out.with_suffix(".eesproj").exists(), "不得把工程写进分发目录"
+        proj = WORK / "ExamSystem" / "projects" / "包.eesproj"
+        assert proj.is_file(), "应存到教师端专属 projects 目录"
         assert settings().value(LAST_PROJECT, "", type=str) == str(proj)
 
         # 再开一个主窗口：应自动打开刚才的工程

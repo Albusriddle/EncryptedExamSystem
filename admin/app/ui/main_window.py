@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 from app.branding import branding
 from app.core.models import Manifest
 from app.core.state import ProjectState
-from app.ui.app_settings import AUTOLOAD, LAST_PROJECT, WARNED_EESPROJ, settings
+from app.ui.app_settings import AUTOLOAD, LAST_PROJECT, WARNED_EESPROJ, projects_dir, settings
 from app.ui.tab_answers import AnswersTab
 from app.ui.tab_banks import BanksTab
 from app.ui.tab_build import BuildTab
@@ -202,13 +202,26 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- 工程自动保存/打开
 
     def _on_built(self, out: str) -> None:
-        """打包成功后把工程存到包同目录（`<包名>.eesproj`）。
+        """打包成功后自动保存工程。
 
-        工程里有**标准答案与判分材料**，所以文件名用自定义扩展名，
-        并在第一次提示"切勿随考试包分发"。
+        **绝不写在考试包输出目录**：那是要发给学生的目录，工程里有标准答案。
+        优先覆盖教师自己的工程文件；否则存到 `%LOCALAPPDATA%/ExamSystem/projects/`。
         """
         prod = Path(out)
-        proj = prod.with_suffix(".eesproj")
+        if self.project_path is not None:
+            proj = self.project_path
+        else:
+            proj = projects_dir() / f"{prod.stem}.eesproj"
+
+        legacy = prod.with_suffix(".eesproj")
+        if legacy.exists() and legacy != proj:
+            QMessageBox.warning(
+                self,
+                "发现旧版工程文件",
+                f"考试包目录里有一个旧版工程文件：\n{legacy}\n\n"
+                "它包含标准答案，**不要随考试包发给学生**。\n建议手动删除。",
+            )
+
         try:
             self.state.save(proj)
         except Exception as e:  # noqa: BLE001 - 展示给用户

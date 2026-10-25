@@ -24,6 +24,16 @@ def settings_path() -> Path:
     return Path(base) / "ExamSystem" / "settings.ini"
 
 
+def projects_dir() -> Path:
+    """教师端专属的工程目录（**不放在考试包输出目录**）。
+
+    工程文件含标准答案与判分材料；放在考试包旁边极易随分发泄漏。
+    """
+    d = settings_path().parent / "projects"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def settings() -> QSettings:
     settings_path().parent.mkdir(parents=True, exist_ok=True)
     return QSettings(str(settings_path()), QSettings.Format.IniFormat)
