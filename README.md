@@ -50,11 +50,13 @@
 已答蓝色 / 未答灰色 / 当前题绿色描边）
 
 **已实现**：学生作答（四种题型）、交卷与到点自动冻结、答题卡加密落盘（`.eea`）、
-教师端批量解密校验（管理端「收卷判分」页 / `exam-builder verify-answer-sheet`）、
-作答明细导出 CSV。
+教师端批量解密校验（管理端「收卷判分」页 / `exam-builder verify-answer-sheet`）。
 
-**未实现**：自动判分与成绩统计（`judge{entry,harness,tests}` 已随题库保留，
-判分器尚未实现）。
+**已实现**：自动判分（单选/多选/填空/改错，按题型勾选；双击可改分）、
+已判分/未判分四份 CSV 导出、打包后自动保存工程并在下次启动时自动打开。
+
+**仍未实现**：代码题（`judge{entry,harness,tests}`）的自动判分——编译运行学生代码
+有安全与公平风险，仍按 judge 材料人工判；判分只按题型勾选，暂不支持逐题开关。
 
 > 答题卡的安全性边界：密钥由 `K_manifest` 派生，而它嵌在学生端 exe 里，
 > 因此加密只能**防误改、防明文**，不能防蓄意篡改。真正的防作弊仍需现场监考
@@ -77,7 +79,10 @@ admin/
 banks/demo/       # 演示题库（真题库不入库）
 schemas/          # 题库/清单的 JSON Schema（编辑器补全用，由 pydantic 生成）
 docs/题库JSON规范.md  # 题库格式规范与可直接导入的样例
-docs/             # 教师手册、架构方案、发布说明
+examples/         # 可直接导入的示例题库（含图片题）
+licenses/         # LGPL/GPL 全文（PySide6 合规）
+tools/            # 辅助脚本（embed-image.py 等）
+docs/             # 教师手册、图片教程、架构方案、发布说明
 scripts/          # verify-embed.sh / preflight-release.sh / make-release-zip.sh
 .github/workflows # CI 与 Release
 ```
