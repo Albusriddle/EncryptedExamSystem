@@ -69,25 +69,35 @@ def find_artifact(name: str, root: Path | None = None) -> Path | None:
 BUILDER = find_artifact(f"exam-builder{EXE}")
 
 
-def copy_legal_files(dest: Path) -> list[str]:
+def copy_legal_files(dest: Path, root: Path | None = None) -> list[str]:
     """把许可证与第三方声明复制进发布目录。
 
     合规要求：
     - Apache-2.0 §4(a)：再分发必须附许可副本；
     - PySide6/Qt 是 LGPL-3.0：必须附 LGPL/GPL 全文与第三方声明。
+
+    **缺任何一个都必须失败**：早期版本是"有就拷、没有就跳过"，结果
+    LICENSE 被误删时构建照常成功、日志照常打勾，发布包静默少一份许可。
     """
+    base = root or ROOT
+    required = [
+        (base / "LICENSE", "LICENSE"),
+        (base / "THIRD-PARTY-NOTICES.md", "THIRD-PARTY-NOTICES.md"),
+    ]
+    missing = [str(src) for src, _ in required if not src.is_file()]
+    lic_dir = base / "licenses"
+    for name in ("LGPL-3.0.txt", "GPL-3.0.txt"):
+        if not (lic_dir / name).is_file():
+            missing.append(str(lic_dir / name))
+    if missing:
+        raise FileNotFoundError("缺少许可证文件：" + "、".join(missing))
+
     copied: list[str] = []
-    for src, name in [
-        (ROOT / "LICENSE", "LICENSE"),
-        (ROOT / "THIRD-PARTY-NOTICES.md", "THIRD-PARTY-NOTICES.md"),
-    ]:
-        if src.exists():
-            shutil.copy2(src, dest / name)
-            copied.append(name)
-    lic_dir = ROOT / "licenses"
-    if lic_dir.is_dir():
-        shutil.copytree(lic_dir, dest / "licenses", dirs_exist_ok=True)
-        copied.append("licenses/")
+    for src, name in required:
+        shutil.copy2(src, dest / name)
+        copied.append(name)
+    shutil.copytree(lic_dir, dest / "licenses", dirs_exist_ok=True)
+    copied.append("licenses/")
     return copied
 
 
@@ -214,7 +224,11 @@ def main() -> int:
         shutil.copy2(src, rel / f"stub-template{EXE}")
         print(f"✓ 已附带学生端模板 {rel.name}/stub-template{EXE}")
 
-    copied = copy_legal_files(rel)
+    try:
+        copied = copy_legal_files(rel)
+    except FileNotFoundError as e:
+        print(f"✗ {e}")
+        return 1
     print(f"✓ 已附带许可证文件：{', '.join(copied)}")
 
     manual = ROOT / "docs" / "教师使用手册.md"

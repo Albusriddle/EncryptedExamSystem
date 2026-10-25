@@ -33,3 +33,13 @@ def test_copy_legal_files_puts_them_in_release_dir() -> None:
     assert set(copied) == {"LICENSE", "THIRD-PARTY-NOTICES.md", "licenses/"}, copied
     assert (dest / "LICENSE").is_file()
     assert (dest / "licenses" / "LGPL-3.0.txt").is_file()
+
+
+def test_missing_license_makes_build_fail(tmp_path) -> None:
+    """缺 LICENSE 时必须报错，不能"跳过也算成功"。"""
+    import pytest
+
+    empty = tmp_path / "empty-root"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError, match="缺少许可证文件"):
+        _module().copy_legal_files(tmp_path / "out", root=empty)

@@ -32,12 +32,12 @@
 以下 crate 以 MIT 和/或 Apache-2.0 授权，随二进制静态链接：
 
 `egui` / `eframe` / `epaint`（MIT OR Apache-2.0）、`image`（MIT OR Apache-2.0）、
-`base64`（MIT OR Apache-2.0）、`blake3`（CC0-1.0 OR Apache-2.0）、
+`base64`（MIT OR Apache-2.0）、`blake3`（CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception）、
 `serde` / `serde_json`（MIT OR Apache-2.0）、`argon2`（MIT OR Apache-2.0）、
 `aes-gcm`（Apache-2.0 OR MIT）、`hkdf` / `sha2` / `hmac`（MIT OR Apache-2.0）、
 `rand` / `rand_chacha`（MIT OR Apache-2.0）、`clap`（MIT OR Apache-2.0）、
 `anyhow` / `thiserror`（MIT OR Apache-2.0）、`hex` / `zeroize`（MIT OR Apache-2.0）、
-`winit` / `glutin`（Apache-2.0）、`ab_glyph`（MIT OR Apache-2.0）。
+`winit` / `glutin`（Apache-2.0）、`ab_glyph`（Apache-2.0）。
 
 完整依赖树与版本见 `Cargo.lock`；各 crate 的许可原文在其发布页可查。
 
