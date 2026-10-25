@@ -21,6 +21,9 @@ DEFAULT_TYPES = frozenset({"single", "multiple", "judge"})
 #: 所有支持自动判分的题型（essay 只能人工判）
 SUPPORTED_TYPES = ("single", "multiple", "judge", "fill", "fix")
 
+#: 成绩表里题型的固定顺序（含 essay）
+TYPE_ORDER = ("single", "multiple", "judge", "fill", "fix", "essay")
+
 TYPE_LABELS = {
     "single": "单选题",
     "multiple": "多选题",
@@ -273,4 +276,56 @@ def summarize(results: list[ItemResult]) -> dict[str, int]:
         "unjudged": len(unjudged),
         "score": sum(r.final_score for r in judged),
         "max_score": sum(r.max_score for r in judged),
+        # 整卷口径：未判题也算满分，避免"0 / 0"式的误导
+        "all_max": sum(r.max_score for r in results),
+        "unjudged_max": sum(r.max_score for r in unjudged),
     }
+
+
+@dataclass
+class TypeScore:
+    qtype: str
+    score: int = 0
+    max_score: int = 0
+
+
+@dataclass
+class StudentScoreRow:
+    student_id: int
+    session_id: int
+    by_type: dict[str, TypeScore]
+    total_score: int = 0
+    total_max: int = 0
+    judged: int = 0
+    unjudged: int = 0
+    adjusted: int = 0
+
+
+def score_table(results: list[ItemResult]) -> list[StudentScoreRow]:
+    """按 (学号, 场次) 汇总每种题型的得分/满分，按学号升序返回。
+
+    满分按**整卷**统计（含未判题）；得分只累计已判/已手打分的题。
+    """
+    groups: dict[tuple[int, int], StudentScoreRow] = {}
+    for r in results:
+        key = (r.student_id, r.session_id)
+        row = groups.get(key)
+        if row is None:
+            row = groups[key] = StudentScoreRow(r.student_id, r.session_id, {})
+
+        t = row.by_type.get(r.qtype)
+        if t is None:
+            t = row.by_type[r.qtype] = TypeScore(r.qtype)
+        t.max_score += r.max_score
+        row.total_max += r.max_score
+
+        if is_graded(r):
+            t.score += r.final_score
+            row.total_score += r.final_score
+            row.judged += 1
+        else:
+            row.unjudged += 1
+        if r.adjusted:
+            row.adjusted += 1
+
+    return [groups[k] for k in sorted(groups)]

@@ -130,3 +130,46 @@ def test_manually_scored_essay_counts_in_summary() -> None:
     assert is_graded(results[0])
     s = summarize(results)
     assert s["score"] == 7 and s["judged"] == 1 and s["unjudged"] == 0
+
+
+def test_score_table_sorts_by_student_and_groups_types() -> None:
+    from app.core.grading import grade_sheet, score_table
+
+    bank = {
+        "s": _q("single", {"kind": "single", "answer": "A"}, score=2),
+        "m": _q("multiple", {"kind": "multi", "answer": ["A", "C"]}, score=3),
+        "e": _q("essay", {"kind": "text", "answer": None}, score=10),
+    }
+    sheet_b = {
+        "student_id": 2,
+        "session_id": 1,
+        "qids": ["s", "m", "e"],
+        "answers": ["A", "AC", "b"],
+    }
+    sheet_a = {
+        "student_id": 1,
+        "session_id": 1,
+        "qids": ["s", "m", "e"],
+        "answers": ["B", "AC", "a"],
+    }
+    rows = score_table(grade_sheet(bank, sheet_b, P()) + grade_sheet(bank, sheet_a, P()))
+
+    assert [r.student_id for r in rows] == [1, 2], "必须按学号升序"
+    first = rows[0]
+    assert first.by_type["single"].score == 0
+    assert first.by_type["multiple"].score == 3
+    assert first.by_type["essay"].max_score == 10, "未判题也要计入满分"
+    assert first.total_max == 15 and first.total_score == 3
+    assert first.unjudged == 1 and first.judged == 2
+
+
+def test_summarize_reports_whole_paper_max() -> None:
+    from app.core.grading import grade_sheet, summarize
+
+    bank = {"e": _q("essay", {"kind": "text", "answer": None}, score=10)}
+    results = grade_sheet(
+        bank, {"student_id": 1, "session_id": 1, "qids": ["e"], "answers": ["x"]}, P()
+    )
+    s = summarize(results)
+    assert s["score"] == 0 and s["max_score"] == 0
+    assert s["all_max"] == 10 and s["unjudged_max"] == 10
