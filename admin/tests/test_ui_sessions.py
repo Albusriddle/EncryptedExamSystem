@@ -308,7 +308,7 @@ def test_copy_verifies_clipboard_readback(qapp, state_with_banks, monkeypatch) -
     assert "复制失败" in tab.copy_hint.text()
 
 
-def test_master_auto_cleared_after_timeout(qapp, state_with_banks) -> None:
+def test_master_auto_cleared_after_timeout(qapp, state_with_banks, monkeypatch) -> None:
     """复制 5 分钟后自动清空，避免密钥长期留在界面上。"""
     from app.ui import tab_build
 
@@ -318,6 +318,14 @@ def test_master_auto_cleared_after_timeout(qapp, state_with_banks) -> None:
     tab.copy_master()
     assert tab.edit_master.text() == key
 
+    # 剪贴板是全局状态，无头环境下也不可靠：用一个"永远还是这把密钥"的假剪贴板
+    from PySide6.QtGui import QGuiApplication
+
+    class _Clip:
+        def text(self) -> str:
+            return key
+
+    monkeypatch.setattr(QGuiApplication, "clipboard", staticmethod(lambda: _Clip()))
     tab._clear_master_if_unchanged(key)
 
     assert tab.edit_master.text() == ""

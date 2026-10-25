@@ -637,9 +637,17 @@ class AnswersTab(QWidget):
                 self._status_text(r),
                 r.student,
                 r.expected,
-                str(r.final_score),
+                ""
+                if r.status in ("unjudged", "unknown") and r.manual_score is None
+                else str(r.final_score),
                 str(r.max_score),
-                f"{r.score} → {r.manual_score}" if r.adjusted else "",
+                (
+                    ""
+                    if r.manual_score is None
+                    else f"人工 {r.manual_score}"
+                    if r.status in ("unjudged", "unknown")
+                    else f"{r.score} → {r.manual_score}"
+                ),
             ]
             for col, text in enumerate(values):
                 item = QTableWidgetItem(text)
@@ -658,20 +666,64 @@ class AnswersTab(QWidget):
         if row >= len(self.grade_rows):
             return
         result = self.grade_rows[row]
+        raw = item.text().strip()
+        if raw == "":
+            # 清空 = 撤销人工评分（未判题回到"待人工判分"）
+            result.manual_score = None
+            result.adjusted_at = ""
+            self.grade_table.blockSignals(True)
+            item.setText("")
+            self.grade_table.blockSignals(False)
+            self._refresh_score_row(row)
+            self.grade_summary.setText(self._summary_text(self._policy()))
+            return
         try:
-            value = int(item.text().strip())
+            value = int(raw)
         except ValueError:
             value = result.final_score
         value = max(0, min(value, result.max_score))
-        result.manual_score = value if value != result.score else None
-        result.adjusted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if result.adjusted else ""
+        if result.status in ("unjudged", "unknown"):
+            # 未判题没有"自动分"可言：0 分也是老师明确给的，必须记下来
+            result.manual_score = value
+        else:
+            result.manual_score = value if value != result.score else None
+        result.adjusted_at = (
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S") if result.manual_score is not None else ""
+        )
         self.grade_table.blockSignals(True)
-        item.setText(str(result.final_score))
+        item.setText(
+            ""
+            if result.status in ("unjudged", "unknown") and result.manual_score is None
+            else str(result.final_score)
+        )
         adjust = self.grade_table.item(row, 9)
         if adjust is not None:
-            adjust.setText(f"{result.score} → {result.manual_score}" if result.adjusted else "")
+            if result.manual_score is None:
+                label = ""
+            elif result.status in ("unjudged", "unknown"):
+                label = f"人工 {result.manual_score}"  # 未判题没有"原分"
+            else:
+                label = f"{result.score} → {result.manual_score}"
+            adjust.setText(label)
         self.grade_table.blockSignals(False)
         self.grade_summary.setText(self._summary_text(self._policy()))
+
+    def _refresh_score_row(self, row: int) -> None:
+        r = self.grade_rows[row]
+        self.grade_table.blockSignals(True)
+        status = self.grade_table.item(row, 4)
+        if status is not None:
+            status.setText(self._status_text(r))
+        adjust = self.grade_table.item(row, 9)
+        if adjust is not None:
+            if r.manual_score is None:
+                label = ""
+            elif r.status in ("unjudged", "unknown"):
+                label = f"人工 {r.manual_score}"
+            else:
+                label = f"{r.score} → {r.manual_score}"
+            adjust.setText(label)
+        self.grade_table.blockSignals(False)
 
     @staticmethod
     def _status_text(r) -> str:
@@ -751,7 +803,13 @@ class AnswersTab(QWidget):
                 r.expected,
                 r.final_score,
                 r.max_score,
-                f"{r.score} → {r.manual_score}" if r.adjusted else "",
+                (
+                    ""
+                    if r.manual_score is None
+                    else f"人工 {r.manual_score}"
+                    if r.status in ("unjudged", "unknown")
+                    else f"{r.score} → {r.manual_score}"
+                ),
                 r.adjusted_at,
             ]
             for r in judged

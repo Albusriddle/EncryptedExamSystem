@@ -173,3 +173,17 @@ def test_summarize_reports_whole_paper_max() -> None:
     s = summarize(results)
     assert s["score"] == 0 and s["max_score"] == 0
     assert s["all_max"] == 10 and s["unjudged_max"] == 10
+
+
+def test_score_table_counts_manual_zero() -> None:
+    from app.core.grading import grade_sheet, score_table
+
+    bank = {"e": _q("essay", {"kind": "text", "answer": None}, score=10)}
+    results = grade_sheet(
+        bank, {"student_id": 1, "session_id": 1, "qids": ["e"], "answers": ["x"]}, P()
+    )
+    results[0].manual_score = 0
+    rows = score_table(results)
+    assert rows[0].judged == 1 and rows[0].unjudged == 0
+    assert rows[0].adjusted == 1, "人工给的 0 分也算人工调整"
+    assert rows[0].total_score == 0 and rows[0].total_max == 10

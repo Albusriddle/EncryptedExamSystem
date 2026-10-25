@@ -207,3 +207,26 @@ def test_score_table_is_sorted_and_grouped_by_type(tab, monkeypatch) -> None:
     # q3 是填空题但默认不判 → 未判题数 1，状态"含未判"
     assert data[0][header.index("未判题数")] == "1"
     assert data[0][header.index("成绩状态")] == "含未判"
+
+
+def test_zero_score_on_unjudged_question_is_recorded(tab, monkeypatch) -> None:
+    """未判题打 0 分也必须生效（曾经被当成"没改"而丢弃）。"""
+    from app.core.models import Question
+
+    tab.state.banks["m"].questions.append(
+        Question(id="q0", type="essay", stem="一点没写对", answer=None, score=10)
+    )
+    tab.results[str(tab.files[0])]["sheet"]["qids"].append("q0")
+    tab.results[str(tab.files[0])]["sheet"]["answers"].append("答非所问")
+
+    tab._grade()
+    idx = next(i for i, r in enumerate(tab.grade_rows) if r.qid == "q0")
+    tab.grade_table.item(idx, 7).setText("0")
+
+    row = tab.grade_rows[idx]
+    assert row.manual_score == 0, "0 分是有效的人工评分"
+    assert tab._status_text(row) == "人工判分"
+    assert "人工 0" in tab.grade_table.item(idx, 9).text()
+    from app.core.grading import is_graded
+
+    assert is_graded(row), "人工给的 0 分应计入已判"

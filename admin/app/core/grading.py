@@ -80,6 +80,11 @@ class ItemResult:
     def adjusted(self) -> bool:
         return self.manual_score is not None and self.manual_score != self.score
 
+    @property
+    def manual(self) -> bool:
+        """老师是否手动给过分（含未判题的 0 分）。"""
+        return self.manual_score is not None
+
 
 def _norm(text: str, policy: Policy) -> str:
     t = (text or "").strip()
@@ -325,7 +330,7 @@ def score_table(results: list[ItemResult]) -> list[StudentScoreRow]:
             row.judged += 1
         else:
             row.unjudged += 1
-        if r.adjusted:
+        if r.manual:
             row.adjusted += 1
 
     return [groups[k] for k in sorted(groups)]
