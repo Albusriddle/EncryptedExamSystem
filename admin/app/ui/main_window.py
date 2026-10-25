@@ -170,7 +170,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "打开工程",
-            str(projects_dir()),
+            str(projects_dir(create=False)),  # 只打开对话框，不创建目录
             "工程 (*.eesproj *.json);;全部文件 (*)",
         )
         if not path:
@@ -193,7 +193,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"已打开 {path}", 5000)
 
     def save_project(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
+        path, selected = QFileDialog.getSaveFileName(
             self,
             "保存工程",
             self.project_path.name if self.project_path else "project.eesproj",
@@ -202,7 +202,8 @@ class MainWindow(QMainWindow):
         if not path:
             return
         if not Path(path).suffix:
-            path += ".eesproj"
+            # 按老师选的过滤器补扩展名；默认（工程）补 .eesproj
+            path += ".json" if "JSON" in (selected or "") else ".eesproj"
         try:
             self.state.save(Path(path))
         except Exception as e:  # noqa: BLE001

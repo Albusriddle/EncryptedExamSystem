@@ -35,7 +35,7 @@ def teacher_dir() -> Path | None:
     return None
 
 
-def projects_dir() -> Path:
+def projects_dir(create: bool = True) -> Path:
     """自动保存的工程目录。
 
     优先**教师端程序目录**下的 `projects/`（老师看得见、好备份）；
@@ -45,6 +45,8 @@ def projects_dir() -> Path:
     base = teacher_dir()
     if base is not None:
         d = base / "projects"
+        if not create:
+            return d if d.exists() else base
         try:
             d.mkdir(parents=True, exist_ok=True)
             probe = d / ".write-test"
@@ -54,8 +56,10 @@ def projects_dir() -> Path:
         except OSError:
             pass
     d = settings_path().parent / "projects"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    return d if d.exists() else settings_path().parent
 
 
 def settings() -> QSettings:
