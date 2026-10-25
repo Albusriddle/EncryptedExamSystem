@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from PySide6.QtGui import QAction
@@ -211,7 +212,10 @@ class MainWindow(QMainWindow):
         if self.project_path is not None:
             proj = self.project_path
         else:
-            proj = projects_dir() / f"{prod.stem}.eesproj"
+            # 包名相同但目录不同的两个包不能共用一个工程文件（会互相覆盖）：
+            # 取输出路径的短哈希做后缀。
+            digest = hashlib.blake2s(str(prod.resolve()).encode("utf-8"), digest_size=2).hexdigest()
+            proj = projects_dir() / f"{prod.stem}-{digest}.eesproj"
 
         legacy = prod.with_suffix(".eesproj")
         if legacy.exists() and legacy != proj:
