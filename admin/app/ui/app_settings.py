@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSettings
@@ -24,11 +25,34 @@ def settings_path() -> Path:
     return Path(base) / "ExamSystem" / "settings.ini"
 
 
-def projects_dir() -> Path:
-    """教师端专属的工程目录（**不放在考试包输出目录**）。
+def teacher_dir() -> Path | None:
+    """教师端程序所在目录（打包后）；源码运行返回 None。
 
-    工程文件含标准答案与判分材料；放在考试包旁边极易随分发泄漏。
+    源码运行时返回 None 是为了不往仓库里写工程文件——测试与开发都走 appdata。
     """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return None
+
+
+def projects_dir() -> Path:
+    """自动保存的工程目录。
+
+    优先**教师端程序目录**下的 `projects/`（老师看得见、好备份）；
+    程序目录只读（Program Files / 只读 U 盘）时回退 `%LOCALAPPDATA%`。
+    **绝不放在考试包输出目录**——那里是要发给学生的。
+    """
+    base = teacher_dir()
+    if base is not None:
+        d = base / "projects"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            probe = d / ".write-test"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink()
+            return d
+        except OSError:
+            pass
     d = settings_path().parent / "projects"
     d.mkdir(parents=True, exist_ok=True)
     return d

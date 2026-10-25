@@ -133,3 +133,20 @@ def test_same_content_builds_share_project_file(qapp, local_appdata, monkeypatch
         assert len(files) == 1, f"同内容不应产生多份工程：{files}"
     finally:
         win.deleteLater()
+
+
+def test_projects_dir_uses_program_dir_when_frozen(monkeypatch, tmp_path) -> None:
+    """打包后工程应存在 ExamAdmin.exe 同级的 projects/，而不是 appdata。"""
+    import sys
+
+    from app.ui import app_settings
+
+    fake_exe = tmp_path / "ExamAdmin" / "ExamAdmin.exe"
+    fake_exe.parent.mkdir(parents=True)
+    fake_exe.write_bytes(b"x")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(fake_exe))
+
+    got = app_settings.projects_dir()
+    assert got == fake_exe.parent / "projects"
+    assert got.is_dir()
