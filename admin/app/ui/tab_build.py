@@ -244,6 +244,9 @@ def _redact(text: str, secret: str) -> str:
 
 
 class BuildTab(QWidget):
+    #: 打包成功（参数为输出文件路径）——主窗口据此自动保存工程
+    built = Signal(str)
+
     def __init__(self, state: ProjectState) -> None:
         super().__init__()
         self.state = state
@@ -659,6 +662,7 @@ class BuildTab(QWidget):
 
         out = Path(info)
         self._append(f"✔ 成功：{out}")
+        self.built.emit(str(out))
         try:
             size = out.stat().st_size
             digest = hashlib.sha256(out.read_bytes()).hexdigest()

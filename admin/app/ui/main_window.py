@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from app.branding import branding
 from app.core.models import Manifest
 from app.core.state import ProjectState
+from app.ui.app_settings import AUTOLOAD, LAST_PROJECT, WARNED_EESPROJ, settings
 from app.ui.tab_answers import AnswersTab
 from app.ui.tab_banks import BanksTab
 from app.ui.tab_build import BuildTab
@@ -57,6 +58,7 @@ class MainWindow(QMainWindow):
         self._build_tabs()
         self._build_statusbar()
         self._refresh_status()
+        self._autoload_last_project()
 
     # ---------------------------------------------------------------- 构建
 
@@ -104,7 +106,7 @@ class MainWindow(QMainWindow):
         self.students_tab = StudentsTab(self.state)
         self.sessions_tab = SessionsTab(self.state)
         self.build_tab = BuildTab(self.state)
-        self.answers_tab = AnswersTab()
+        self.answers_tab = AnswersTab(self.state)
 
         # 任何 Tab 改了数据都刷新状态栏与其他 Tab 的联动视图
         for tab in (self.banks_tab, self.students_tab, self.sessions_tab):
@@ -114,6 +116,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.students_tab, "学生")
         self.tabs.addTab(self.sessions_tab, "场次")
         self.tabs.addTab(self.build_tab, "打包")
+        self.build_tab.built.connect(self._on_built)
         self.tabs.addTab(self.answers_tab, "收卷判分")
 
         self.setCentralWidget(self.tabs)
@@ -191,8 +194,73 @@ class MainWindow(QMainWindow):
             return
         self.project_path = Path(path)
         self._dirty = False
+        settings().setValue(LAST_PROJECT, str(path))
         self._refresh_status()
         self.statusBar().showMessage(f"已保存 {path}", 5000)
+
+    # ---------------------------------------------------------------- 工程自动保存/打开
+
+    def _on_built(self, out: str) -> None:
+        """打包成功后把工程存到包同目录（`<包名>.eesproj`）。
+
+        工程里有**标准答案与判分材料**，所以文件名用自定义扩展名，
+        并在第一次提示"切勿随考试包分发"。
+        """
+        prod = Path(out)
+        proj = prod.with_suffix(".eesproj")
+        try:
+            self.state.save(proj)
+        except Exception as e:  # noqa: BLE001 - 展示给用户
+            QMessageBox.warning(self, "工程自动保存失败", f"{proj}\n\n{e}")
+            return
+
+        st = settings()
+        st.setValue(LAST_PROJECT, str(proj))
+        st.setValue(AUTOLOAD, True)
+        self.project_path = proj
+        self._dirty = False
+        self._refresh_status()
+
+        if not st.value(WARNED_EESPROJ, False, type=bool):
+            st.setValue(WARNED_EESPROJ, True)
+            QMessageBox.information(
+                self,
+                "工程已自动保存",
+                f"工程已保存到：\n{proj}\n\n"
+                "⚠ 该文件含标准答案与判分材料，**切勿随考试包一起分发**。\n"
+                "下次启动会自动打开它。",
+            )
+        else:
+            self.statusBar().showMessage(f"工程已自动保存：{proj}", 8000)
+
+    def _autoload_last_project(self) -> None:
+        """启动时自动打开上次的工程（可在设置里关掉）。"""
+        st = settings()
+        if not st.value(AUTOLOAD, True, type=bool):
+            return
+        raw = st.value(LAST_PROJECT, "", type=str)
+        if not raw:
+            return
+        path = Path(raw)
+        if not path.is_file():
+            self.statusBar().showMessage("上次的工程文件已不存在，已新建空白工程", 8000)
+            return
+        try:
+            self.state = ProjectState.load(path)
+        except Exception as e:  # noqa: BLE001 - 自动打开失败不能拦住启动
+            self.statusBar().showMessage(f"上次的工程无法打开（{e}），已新建空白工程", 10000)
+            return
+        self.project_path = path
+        self._dirty = False
+        self._reload_tabs()
+        missing = set(self.state.bank_paths) - set(self.state.banks)
+        if missing:
+            QMessageBox.warning(
+                self,
+                "题库缺失",
+                "以下题库的源文件无法读取，请重新导入：\n\n" + "\n".join(sorted(missing)),
+            )
+        self.statusBar().showMessage(f"已打开上次工程：{path}", 8000)
 
     def check_config(self) -> None:
         problems = self.state.validate()
