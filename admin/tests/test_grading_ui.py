@@ -135,11 +135,12 @@ def test_export_writes_four_csvs(tab, monkeypatch) -> None:
     tab._export_grading()
 
     names = {p.name for p in out.glob("*.csv")}
-    assert len(names) == 4, names
+    assert len(names) == 5, names
     assert any(n.startswith("已判分-明细-") for n in names)
     assert any(n.startswith("已判分-汇总-") for n in names)
     assert any(n.startswith("未判分-") for n in names)
     assert any(n.startswith("全量-") for n in names)
+    assert any(n.startswith("考生成绩表-") for n in names), "应导出按学号的成绩表"
     assert (out / "说明.txt").is_file(), "口径说明应单独成文件"
 
     detail = next(out.glob("已判分-明细-*.csv"))
@@ -183,3 +184,26 @@ def test_essay_manual_score_moves_to_judged_export(tab, monkeypatch) -> None:
     unjudged = next(out.glob("未判分-*.csv")).read_text(encoding="utf-8-sig")
     assert "q9" not in unjudged
     assert "题干摘要" in unjudged.splitlines()[0]
+
+
+def test_score_table_is_sorted_and_grouped_by_type(tab, monkeypatch) -> None:
+    """考生成绩表：按学号排序、按题型分项、未判计入满分。"""
+    import csv as _csv
+
+    tab._grade()
+    out = WORK / "out-score"
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(out)))
+    tab._export_grading()
+
+    path = next(out.glob("考生成绩表-*.csv"))
+    rows = list(_csv.reader(path.read_text(encoding="utf-8-sig").splitlines()))
+    header, data = rows[0], rows[1:]
+    assert header[:3] == ["学号", "班级", "场次"]
+    assert "单选题得分" in header and "单选题满分" in header
+    assert "总得分" in header and "成绩状态" in header
+    assert [int(r[0]) for r in data] == sorted(int(r[0]) for r in data)
+    # q3 是填空题但默认不判 → 未判题数 1，状态"含未判"
+    assert data[0][header.index("未判题数")] == "1"
+    assert data[0][header.index("成绩状态")] == "含未判"

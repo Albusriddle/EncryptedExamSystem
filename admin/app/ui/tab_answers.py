@@ -32,7 +32,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.grading import TYPE_LABELS, Policy, grade_sheet, is_graded, summarize
+from app.core.grading import (
+    TYPE_LABELS,
+    TYPE_ORDER,
+    Policy,
+    grade_sheet,
+    is_graded,
+    score_table,
+    summarize,
+)
 from app.core.state import ProjectState
 from app.ui.tab_build import builder_exe
 
@@ -532,7 +540,12 @@ class AnswersTab(QWidget):
 
     @staticmethod
     def _answer_missing(q) -> bool:
-        """题库里"没有可用标准答案"的题（含 {"kind":"blanks","answer":[]}）。"""
+        """题库里"没有可用标准答案"的题（含 {"kind":"blanks","answer":[]}）。
+
+        问答题是人工判分，answer 为空是正常状态，不能算"缺答案"。
+        """
+        if q.qtype == "essay":
+            return False
         if q.answer in (None, {}, []):
             return True
         if isinstance(q.answer, dict):
@@ -678,9 +691,15 @@ class AnswersTab(QWidget):
             if res.get("ok") and res.get("binding") is False:
                 unbound += 1
         tail = f"；⚠ {unbound} 张卡与所选包不匹配" if unbound else ""
+        if s["unjudged"]:
+            return (
+                f"已判 {s['judged']} 题，得分 {s['score']} / {s['max_score']}；"
+                f"未判 {s['unjudged']} 题（{s['unjudged_max']} 分待判，全卷 {s['all_max']} 分）"
+                f"{tail}。口径：{policy.describe()}"
+            )
         return (
-            f"已判 {s['judged']} 题，得分 {s['score']} / {s['max_score']}；"
-            f"未判 {s['unjudged']} 题{tail}。口径：{policy.describe()}"
+            f"已判 {s['judged']} 题，得分 {s['score']} / {s['max_score']}{tail}。"
+            f"口径：{policy.describe()}"
         )
 
     def _export_grading(self) -> None:
@@ -799,11 +818,50 @@ class AnswersTab(QWidget):
             "summary": f"已判分-汇总-{tag}.csv",
             "unjudged": f"未判分-{tag}.csv",
             "all": f"全量-{tag}.csv",
+            "scores": f"考生成绩表-{tag}.csv",
         }
         write(names["detail"], detail_header, detail_rows)
         write(names["summary"], summary_header, summary_rows)
         write(names["unjudged"], unjudged_header, unjudged_rows)
         write(names["all"], detail_header + ["判分状态"], all_rows)
+
+        # 考生成绩表：按学号排序、按题型分项（整卷口径）
+        score_rows = score_table(self.grade_rows)
+        types = [t for t in TYPE_ORDER if any(t in r.by_type for r in score_rows)]
+        score_header = ["学号", "班级", "场次"]
+        for t in types:
+            score_header += [f"{TYPE_LABELS[t]}得分", f"{TYPE_LABELS[t]}满分"]
+        score_header += [
+            "总得分",
+            "总满分",
+            "得分率",
+            "已判题数",
+            "未判题数",
+            "人工调整题数",
+            "成绩状态",
+        ]
+
+        def classes_of(sid: int) -> str:
+            return "、".join(c.name for c in self.state.classes if sid in c.students)
+
+        score_data = []
+        for r in score_rows:
+            line: list = [r.student_id, classes_of(r.student_id), r.session_id]
+            for t in types:
+                ts = r.by_type.get(t)
+                line += [ts.score if ts else 0, ts.max_score if ts else 0]
+            rate = f"{r.total_score / r.total_max:.1%}" if r.total_max else "-"
+            line += [
+                r.total_score,
+                r.total_max,
+                rate,
+                r.judged,
+                r.unjudged,
+                r.adjusted,
+                "完整" if r.unjudged == 0 else "含未判",
+            ]
+            score_data.append(line)
+        write(f"考生成绩表-{tag}.csv", score_header, score_data)
 
         (base / "说明.txt").write_text(
             "保密考试系统 判分结果\n\n"
@@ -811,13 +869,16 @@ class AnswersTab(QWidget):
             f"判分口径：{policy.describe()}\n"
             f"已判题：{len(detail_rows)} 行；未判题：{len(unjudged_rows)} 行\n\n"
             "文件：\n"
-            f"  {names['detail']}\n  {names['summary']}\n  {names['unjudged']}\n  {names['all']}\n",
+            f"  {names['detail']}\n  {names['summary']}\n  {names['unjudged']}\n"
+            f"  {names['all']}\n  {names['scores']}\n"
+            "\n考生成绩表：按学号排序；满分按整卷统计（含未判题），"
+            '未判题不计分，状态列会标"含未判"。\n',
             encoding="utf-8-sig",
         )
 
         QMessageBox.information(
             self,
             "导出完成",
-            f"已写入 4 个 CSV + 说明.txt 到：\n{out_dir}\n\n"
+            f"已写入 5 个 CSV + 说明.txt 到：\n{out_dir}\n\n"
             f"已判分明细 {len(detail_rows)} 行；未判分 {len(unjudged_rows)} 行。",
         )
