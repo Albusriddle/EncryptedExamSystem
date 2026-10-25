@@ -157,6 +157,11 @@ pub struct SessionExam {
     /// 覆盖题库自带的 pick；为空则沿用题库内 pick。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pick: Option<u32>,
+    /// 平均难度区间（1..255）。两者要么都为 None（不限制），要么都设置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub difficulty_min: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub difficulty_max: Option<u8>,
 }
 
 /// 一个考试场次。

@@ -267,12 +267,12 @@ fn check_binding(
         })?;
     let data = container::decrypt_data(&unlocked.session_secret, &salt, &unlocked.data_ct)
         .context("解密题库失败")?;
-    let paper = picker::generate_paper(
+    let paper = picker::generate_paper_ranged(
         sheet.student_id,
         unlocked.session_id,
         &salt,
         &data.banks,
-        |exam_id, fallback| data.pick_for(exam_id, fallback),
+        |exam_id, fallback| (data.pick_for(exam_id, fallback), data.range_for(exam_id)),
     )
     .context("重新生成试卷失败")?;
 

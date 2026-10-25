@@ -163,6 +163,15 @@ pub enum PickError {
         pick: u32,
         pool: usize,
     },
+    #[error("题库 {exam_id} 有 {count} 道题没有有效难度（1–255），无法按平均难度抽题")]
+    DifficultyMissing { exam_id: String, count: usize },
+    #[error("题库 {exam_id} 抽 {pick} 题无法满足平均难度 {lo}–{hi}")]
+    NoFeasibleDifficulty {
+        exam_id: String,
+        pick: u32,
+        lo: u8,
+        hi: u8,
+    },
 }
 
 /// 从题库中确定性抽取 `pick` 道题，返回题目 id。
@@ -173,6 +182,7 @@ fn pick_from_bank(
     bank: &ExamBank,
     pick: u32,
     rng: &mut ChaCha8Rng,
+    range: Option<(u8, u8)>,
 ) -> Result<Vec<PaperItem>, PickError> {
     let pool_len = bank.questions.len();
     let n = pick as usize;
@@ -185,10 +195,198 @@ fn pick_from_bank(
     }
     let mut pool: Vec<usize> = (0..pool_len).collect();
     fisher_yates_shuffle(&mut pool, rng);
-    Ok(pool[..n]
+
+    let chosen = match range {
+        None => pool[..n].to_vec(),
+        Some((lo, hi)) => choose_with_range(bank, n, &pool, lo, hi)?,
+    };
+    Ok(chosen
         .iter()
         .map(|&i| PaperItem::from(&bank.questions[i]))
         .collect())
+}
+
+/// 在洗牌后的池子里挑 `n` 道，使平均难度落在 `[lo, hi]`。
+///
+/// 用 0/1 背包位集 DP：`dp[j]` 是"用 j 道题能达到的难度和"位集，
+/// 再按 parent 表回溯出具体题目。判定是精确的（只要存在就一定能找到），
+/// 组合过多时退化为"按难度排序的滑窗"（见 `window_fallback`）。
+fn choose_with_range(
+    bank: &ExamBank,
+    n: usize,
+    order: &[usize],
+    lo: u8,
+    hi: u8,
+) -> Result<Vec<usize>, PickError> {
+    let missing = bank
+        .questions
+        .iter()
+        .filter(|q| q.difficulty.is_none_or(|d| d == 0))
+        .count();
+    if missing > 0 {
+        return Err(PickError::DifficultyMissing {
+            exam_id: bank.exam_id.clone(),
+            count: missing,
+        });
+    }
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    // 全选：平均值固定，只能看是否落在区间
+    if n == order.len() {
+        let sum: usize = order
+            .iter()
+            .map(|&i| bank.questions[i].difficulty.unwrap() as usize)
+            .sum();
+        let mean = sum as f32 / n as f32;
+        if mean + 1e-6 < lo as f32 || mean - 1e-6 > hi as f32 {
+            return Err(PickError::NoFeasibleDifficulty {
+                exam_id: bank.exam_id.clone(),
+                pick: n as u32,
+                lo,
+                hi,
+            });
+        }
+        return Ok(order.to_vec());
+    }
+
+    let diffs: Vec<u8> = order
+        .iter()
+        .map(|&i| bank.questions[i].difficulty.unwrap())
+        .collect();
+    let lo_sum = (n as f32 * lo as f32).ceil() as usize;
+    let hi_sum = ((n as f32 * hi as f32).floor() as usize).min(n * 255);
+    if lo_sum > hi_sum {
+        return Err(PickError::NoFeasibleDifficulty {
+            exam_id: bank.exam_id.clone(),
+            pick: n as u32,
+            lo,
+            hi,
+        });
+    }
+
+    // 内存保护：parent 表 (n+1) × (hi_sum+1) 个 u16
+    let cells = (n + 1).saturating_mul(hi_sum + 1);
+    if cells > 3_000_000 {
+        return window_fallback(bank, n, order, &diffs, (lo, hi), (lo_sum, hi_sum));
+    }
+
+    let words = hi_sum / 64 + 1;
+    let mut dp = vec![vec![0u64; words]; n + 1];
+    let mut parent = vec![vec![u16::MAX; hi_sum + 1]; n + 1];
+    dp[0][0] = 1;
+
+    for (pos, &d) in diffs.iter().enumerate() {
+        let d = d as usize;
+        if d > hi_sum {
+            continue;
+        }
+        let upper = n.min(pos + 1);
+        for j in (1..=upper).rev() {
+            for s in (d..=hi_sum).rev() {
+                let prev = s - d;
+                if dp[j - 1][prev / 64] >> (prev % 64) & 1 == 1
+                    && dp[j][s / 64] >> (s % 64) & 1 == 0
+                {
+                    dp[j][s / 64] |= 1 << (s % 64);
+                    parent[j][s] = pos as u16;
+                }
+            }
+        }
+    }
+
+    // 选一个"最接近无约束均值"的可达和
+    let unconstrained: usize = diffs.iter().take(n).map(|&d| d as usize).sum();
+    let mut best: Option<(usize, usize)> = None;
+    for s in lo_sum..=hi_sum {
+        if dp[n][s / 64] >> (s % 64) & 1 == 1 {
+            let dist = (s as i64 - unconstrained as i64).unsigned_abs() as usize;
+            if best.is_none_or(|(bd, _)| dist < bd) {
+                best = Some((dist, s));
+            }
+        }
+    }
+    let Some((_, mut sum)) = best else {
+        return Err(PickError::NoFeasibleDifficulty {
+            exam_id: bank.exam_id.clone(),
+            pick: n as u32,
+            lo,
+            hi,
+        });
+    };
+
+    let mut chosen = Vec::with_capacity(n);
+    let mut j = n;
+    while j > 0 {
+        let pos = parent[j][sum] as usize;
+        if pos == u16::MAX as usize {
+            return Err(PickError::NoFeasibleDifficulty {
+                exam_id: bank.exam_id.clone(),
+                pick: n as u32,
+                lo,
+                hi,
+            });
+        }
+        let idx = order[pos];
+        chosen.push(idx);
+        sum -= diffs[pos] as usize;
+        j -= 1;
+    }
+    chosen.reverse();
+    Ok(chosen)
+}
+
+/// 组合规模过大时的退化方案：按难度排序后滑动窗口，取均值最接近区间的窗口。
+fn window_fallback(
+    bank: &ExamBank,
+    n: usize,
+    order: &[usize],
+    diffs: &[u8],
+    range: (u8, u8),
+    sums: (usize, usize),
+) -> Result<Vec<usize>, PickError> {
+    let (lo, hi) = range;
+    let (lo_sum, hi_sum) = sums;
+    let mut sorted: Vec<usize> = (0..order.len()).collect();
+    sorted.sort_by_key(|&i| (diffs[i], i));
+    let mut best: Option<(usize, usize, usize)> = None; // (distance, start, sum)
+    for start in 0..=order.len().saturating_sub(n) {
+        let sum: usize = sorted[start..start + n]
+            .iter()
+            .map(|&i| diffs[i] as usize)
+            .sum();
+        let inside = sum >= lo_sum && sum <= hi_sum;
+        let dist = if inside {
+            0
+        } else if sum < lo_sum {
+            lo_sum - sum
+        } else {
+            sum - hi_sum
+        };
+        if best.is_none_or(|(bd, _, _)| dist < bd) {
+            best = Some((dist, start, sum));
+            if dist == 0 {
+                break;
+            }
+        }
+    }
+    let Some((dist, start, _)) = best else {
+        return Err(PickError::NoFeasibleDifficulty {
+            exam_id: bank.exam_id.clone(),
+            pick: n as u32,
+            lo,
+            hi,
+        });
+    };
+    if dist != 0 {
+        return Err(PickError::NoFeasibleDifficulty {
+            exam_id: bank.exam_id.clone(),
+            pick: n as u32,
+            lo,
+            hi,
+        });
+    }
+    Ok(sorted[start..start + n].iter().map(|&i| order[i]).collect())
 }
 
 /// 生成一份完整试卷。
@@ -205,11 +403,27 @@ pub fn generate_paper<F>(
 where
     F: Fn(&str, u32) -> u32,
 {
+    generate_paper_ranged(student_id, session_id, salt, banks, |exam_id, fallback| {
+        (pick_for(exam_id, fallback), None)
+    })
+}
+
+/// 带"平均难度区间"的抽题。`pick_for` 返回 (抽题数, 可选区间)。
+pub fn generate_paper_ranged<F>(
+    student_id: u64,
+    session_id: u32,
+    salt: &[u8],
+    banks: &[ExamBank],
+    pick_for: F,
+) -> Result<Paper, PickError>
+where
+    F: Fn(&str, u32) -> (u32, Option<(u8, u8)>),
+{
     let mut rng = make_rng(student_id, session_id, salt);
     let mut sections = Vec::with_capacity(banks.len());
     for b in banks {
-        let pick = pick_for(&b.exam_id, b.pick);
-        let ids = pick_from_bank(b, pick, &mut rng)?;
+        let (pick, range) = pick_for(&b.exam_id, b.pick);
+        let ids = pick_from_bank(b, pick, &mut rng, range)?;
         sections.push(PaperSection {
             exam_id: b.exam_id.clone(),
             title: b.title.clone(),
@@ -528,4 +742,62 @@ mod tests {
     /// 取值条件：student=2021001, session=1, salt="golden-salt",
     /// banks=[math(50 题, pick 10), english(40 题, pick 8)]，使用题库自带 pick。
     const GOLDEN_FP: &str = "6e429e5e0cf9d03a4ec340c949a6c6e7bbeb0de3043da70e27b0674a2861f971";
+
+    fn bank_with_difficulty(diffs: &[u8]) -> ExamBank {
+        let mut b = demo_bank("m", diffs.len(), diffs.len() as u32);
+        for (q, d) in b.questions.iter_mut().zip(diffs) {
+            q.difficulty = Some(*d);
+        }
+        b
+    }
+
+    #[test]
+    fn ranged_pick_respects_average_and_is_deterministic() {
+        let diffs: Vec<u8> = (1..=10).collect();
+        let bank = bank_with_difficulty(&diffs);
+        let salt = b"salt";
+
+        for student in [1001_u64, 1002, 1003] {
+            let paper =
+                generate_paper_ranged(student, 1, salt, std::slice::from_ref(&bank), |_, _| {
+                    (4, Some((4, 6)))
+                })
+                .expect("应能抽到满足区间的题");
+            let sum: f32 = paper.sections[0]
+                .items
+                .iter()
+                .map(|i| {
+                    let q = bank.questions.iter().find(|q| q.id == i.id).unwrap();
+                    q.difficulty.unwrap() as f32
+                })
+                .sum();
+            let mean = sum / 4.0;
+            assert!((4.0..=6.0).contains(&mean), "平均难度 {mean} 不在 4–6");
+
+            let again =
+                generate_paper_ranged(student, 1, salt, std::slice::from_ref(&bank), |_, _| {
+                    (4, Some((4, 6)))
+                })
+                .unwrap();
+            assert_eq!(
+                paper.fingerprint(),
+                again.fingerprint(),
+                "同学生必须同一份卷"
+            );
+        }
+    }
+
+    #[test]
+    fn ranged_pick_rejects_missing_difficulty() {
+        let bank = demo_bank("m", 5, 2); // difficulty 全是 None
+        let err = generate_paper_ranged(1, 1, b"s", &[bank], |_, _| (2, Some((2, 3)))).unwrap_err();
+        assert!(matches!(err, PickError::DifficultyMissing { .. }));
+    }
+
+    #[test]
+    fn ranged_pick_rejects_infeasible_range() {
+        let bank = bank_with_difficulty(&[1, 1, 1, 1]);
+        let err = generate_paper_ranged(1, 1, b"s", &[bank], |_, _| (2, Some((4, 5)))).unwrap_err();
+        assert!(matches!(err, PickError::NoFeasibleDifficulty { .. }));
+    }
 }

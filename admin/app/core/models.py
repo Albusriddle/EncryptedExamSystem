@@ -193,6 +193,22 @@ class SessionExam(BaseModel):
     file: str
     # 上限对齐 Rust 的 u32；下限为 0（空卷允许）
     pick: int | None = Field(default=None, ge=0, le=2**32 - 1)
+    #: 平均难度区间（1..255）；两者要么都为空（不限制），要么都设置。
+    #: 0/None 的题视为"未标注难度"，设置区间时不允许出现。
+    difficulty_min: int | None = Field(default=None, ge=1, le=255)
+    difficulty_max: int | None = Field(default=None, ge=1, le=255)
+
+    @model_validator(mode="after")
+    def _check_range(self) -> SessionExam:
+        if (self.difficulty_min is None) != (self.difficulty_max is None):
+            raise ValueError("平均难度必须同时设置最小值和最大值")
+        if (
+            self.difficulty_min is not None
+            and self.difficulty_max is not None
+            and self.difficulty_min > self.difficulty_max
+        ):
+            raise ValueError("平均难度最小值不能大于最大值")
+        return self
 
 
 class Session(BaseModel):

@@ -82,6 +82,34 @@
           ],
           "default": null,
           "title": "Pick"
+        },
+        "difficulty_min": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Difficulty Min"
+        },
+        "difficulty_max": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Difficulty Max"
         }
       },
       "required": [

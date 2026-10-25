@@ -85,7 +85,7 @@ def test_path_style_file_reference_checks_the_box(qapp, state_with_banks) -> Non
     tab = SessionsTab(state_with_banks)
     tab._load_into_form(state_with_banks.sessions[0])
 
-    checked = [eid for cb, _, eid in tab.checks if cb.isChecked()]
+    checked = [r.exam_id for r in tab.checks if r.cb.isChecked()]
     assert checked == [exam_id], f"应只勾上 {exam_id}，实际 {checked}"
 
 

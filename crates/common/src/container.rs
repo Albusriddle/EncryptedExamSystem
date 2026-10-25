@@ -172,12 +172,20 @@ pub struct PayloadData {
     /// 题库元信息，解锁前不可见。
     #[serde(default)]
     pub bank_index: Vec<BankIndex>,
+    /// exam_id -> 平均难度区间（1..255），仅场次设置了才有。
+    #[serde(default)]
+    pub ranges: BTreeMap<String, (u8, u8)>,
 }
 
 impl PayloadData {
     /// 按 exam_id 取实际抽题数，缺失时回退。
     pub fn pick_for(&self, exam_id: &str, fallback: u32) -> u32 {
         self.picks.get(exam_id).copied().unwrap_or(fallback)
+    }
+
+    /// 按 exam_id 取平均难度区间；未设置返回 None。
+    pub fn range_for(&self, exam_id: &str) -> Option<(u8, u8)> {
+        self.ranges.get(exam_id).copied()
     }
 }
 
@@ -237,6 +245,58 @@ pub fn build_payload(
         // 早期实现用全局 exam_id→pick 映射并取 max，导致场次 1 设 2 题
         // 会被场次 2 的 5 题污染（实测：清单要求 2 题，实际抽了 5 题）。
         let picks = resolve_session_picks(&clean_banks, s)?;
+        let mut ranges: BTreeMap<String, (u8, u8)> = BTreeMap::new();
+        for e in &s.exams {
+            if let (Some(lo), Some(hi)) = (e.difficulty_min, e.difficulty_max) {
+                let bank = match_bank(&e.file, &clean_banks).ok_or_else(|| {
+                    ContainerError::Format(format!(
+                        "场次 {} 引用的题库 {} 匹配不到（请检查清单的 file 与题库 exam_id）",
+                        s.session_id, e.file
+                    ))
+                })?;
+                if lo > hi {
+                    return Err(ContainerError::Format(format!(
+                        "场次 {} 的题库 {} 平均难度区间 {lo}–{hi} 不合法（最小值大于最大值）",
+                        s.session_id, bank.exam_id
+                    )));
+                }
+                let missing = bank
+                    .questions
+                    .iter()
+                    .filter(|q| q.difficulty.is_none_or(|d| d == 0))
+                    .count();
+                if missing > 0 {
+                    return Err(ContainerError::Format(format!(
+                        "场次 {} 的题库 {} 有 {missing} 道题未标注难度（1–255），无法按平均难度抽题",
+                        s.session_id, bank.exam_id
+                    )));
+                }
+                let k = picks.get(&bank.exam_id).copied().unwrap_or(bank.pick) as usize;
+                let mut ds: Vec<u16> = bank
+                    .questions
+                    .iter()
+                    .map(|q| q.difficulty.unwrap() as u16)
+                    .collect();
+                ds.sort_unstable();
+                if k == 0 || k > ds.len() {
+                    return Err(ContainerError::Format(format!(
+                        "场次 {} 的题库 {} 抽题数 {k} 超出题量 {}",
+                        s.session_id,
+                        bank.exam_id,
+                        ds.len()
+                    )));
+                }
+                let min_mean = ds[..k].iter().map(|&d| d as f32).sum::<f32>() / k as f32;
+                let max_mean = ds[ds.len() - k..].iter().map(|&d| d as f32).sum::<f32>() / k as f32;
+                if hi as f32 + 0.001 < min_mean || lo as f32 - 0.001 > max_mean {
+                    return Err(ContainerError::Format(format!(
+                        "场次 {} 的题库 {} 抽 {k} 题的可达平均难度为 {min_mean:.2}–{max_mean:.2}，                         无法满足设置的 {lo}–{hi}",
+                        s.session_id, bank.exam_id
+                    )));
+                }
+                ranges.insert(bank.exam_id.clone(), (lo, hi));
+            }
+        }
 
         // 本场引用的题库（按清单顺序）
         let mut session_banks = Vec::new();
@@ -270,6 +330,7 @@ pub fn build_payload(
             banks: session_banks,
             picks,
             bank_index: session_index,
+            ranges,
         };
         let data_plain = serde_json::to_vec(&data)?;
         let data_ct = crypto::encrypt(&bank_key, &data_plain, b"session-data")?;
@@ -924,6 +985,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: Some(2),
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         let err = validate_sessions_silent(&[sess.clone()]).unwrap_err();
@@ -982,6 +1045,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         }
     }
@@ -1166,6 +1231,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         let s2 = Session {
@@ -1176,6 +1243,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "english.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         let payload = build_payload(&master(), &banks, &[s1, s2], SALT, kdf(), true).unwrap();
@@ -1202,6 +1271,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: Some(17),
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         let payload = build_payload(&master(), &banks, &[s], SALT, kdf(), true).unwrap();
@@ -1222,6 +1293,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: Some(99),
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         assert!(build_payload(&master(), &banks, &[s], SALT, kdf(), true).is_err());
@@ -1238,6 +1311,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "nope.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         assert!(build_payload(&master(), &banks, &[s], SALT, kdf(), true).is_err());
@@ -1254,6 +1329,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         assert!(build_payload(&master(), &banks, &[s], SALT, kdf(), true).is_err());
@@ -1363,10 +1440,14 @@ mod tests {
                 SessionExam {
                     file: "demo/math.json".into(),
                     pick: Some(2),
+                    difficulty_min: None,
+                    difficulty_max: None,
                 },
                 SessionExam {
                     file: "demo/math.json".into(),
                     pick: Some(3),
+                    difficulty_min: None,
+                    difficulty_max: None,
                 },
             ],
         };
@@ -1390,10 +1471,14 @@ mod tests {
                 SessionExam {
                     file: "math.json".into(),
                     pick: None,
+                    difficulty_min: None,
+                    difficulty_max: None,
                 },
                 SessionExam {
                     file: "english.json".into(),
                     pick: None,
+                    difficulty_min: None,
+                    difficulty_max: None,
                 },
             ],
         };
@@ -1425,6 +1510,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         let a = mk(
@@ -1465,6 +1552,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: Some(2),
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         let s2 = Session {
@@ -1475,6 +1564,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: Some(5),
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         let payload = build_payload(&master(), &banks, &[s1, s2], salt, kdf(), true).unwrap();
@@ -1507,6 +1598,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         let a = mk(1, "2026-12-20T09:00:00+08:00", "2026-12-20T11:00:00+08:00");
@@ -1529,6 +1622,8 @@ mod tests {
             exams: vec![crate::model::SessionExam {
                 file: "math.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         let err = validate_sessions(&[s]).unwrap_err();
@@ -1549,6 +1644,8 @@ mod tests {
             exams: vec![crate::model::SessionExam {
                 file: "math.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         assert!(validate_sessions(&[s]).is_ok(), "12 位学号应当被接受");
@@ -1564,6 +1661,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         assert!(validate_sessions(&[s]).is_err(), "时间倒挂必须报错");
@@ -1579,6 +1678,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         assert!(validate_sessions(&[s]).is_err(), "重复学号必须报错");
@@ -1594,6 +1695,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         assert!(validate_sessions(&[mk(1), mk(1)]).is_err());
@@ -1622,6 +1725,8 @@ mod tests {
             exams: vec![SessionExam {
                 file: "math.json".into(),
                 pick: None,
+                difficulty_min: None,
+                difficulty_max: None,
             }],
         };
         assert!(validate_sessions(&[s]).is_err());

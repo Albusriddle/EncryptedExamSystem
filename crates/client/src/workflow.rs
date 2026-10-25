@@ -117,12 +117,12 @@ pub fn unlock(student_id: u64, opts: &UnlockOpts) -> Result<Unlocked> {
         .context("解密题库失败")?;
 
     // 6. 确定性抽题。
-    let paper = picker::generate_paper(
+    let paper = picker::generate_paper_ranged(
         student_id,
         unlocked.session_id,
         &salt,
         &data.banks,
-        |exam_id, fallback| data.pick_for(exam_id, fallback),
+        |exam_id, fallback| (data.pick_for(exam_id, fallback), data.range_for(exam_id)),
     )
     .context("抽题失败")?;
 

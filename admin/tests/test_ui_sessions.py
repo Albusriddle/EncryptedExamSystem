@@ -78,7 +78,8 @@ def test_new_session_then_save_produces_valid_session(qapp, state_with_banks) ->
     tab.new_session()
 
     # 勾选一门科目
-    cb, pick, _exam_id = tab.checks[0]
+    row0 = tab.checks[0]
+    cb, pick = row0.cb, row0.pick
     cb.setChecked(True)
     pick.setValue(2)
     tab.save_session()
@@ -96,7 +97,7 @@ def test_save_without_selection_creates_instead_of_refusing(
     # 真实场景：刚打开程序，一个场次都没有，教师直接填表单点保存
     tab = SessionsTab(state_with_banks)
     assert tab._current is None
-    tab.checks[0][0].setChecked(True)
+    tab.checks[0].cb.setChecked(True)
     tab.save_session()
 
     titles = [t for _, t, _ in mute_dialogs]
@@ -135,15 +136,16 @@ def test_checks_survive_save(qapp, state_with_banks, mute_dialogs) -> None:
     _wire_like_main_window(tab)
     tab.new_session()
 
-    cb, pick, exam_id = tab.checks[0]
+    row0 = tab.checks[0]
+    cb, pick, exam_id = row0.cb, row0.pick, row0.exam_id
     cb.setChecked(True)
     pick.setValue(2)
     tab.save_session()
 
     assert len(state_with_banks.sessions[0].exams) == 1, "模型应有科目"
-    same = next(c for c, _, eid in tab.checks if eid == exam_id)
+    same = next(r.cb for r in tab.checks if r.exam_id == exam_id)
     assert same.isChecked(), "保存后科目勾选被清空（界面与数据不一致）"
-    same_pick = next(p for _, p, eid in tab.checks if eid == exam_id)
+    same_pick = next(r.pick for r in tab.checks if r.exam_id == exam_id)
     assert int(same_pick.value()) == 2, "保存后抽题数丢失"
 
 
@@ -152,14 +154,15 @@ def test_checks_restored_when_reselecting_session(qapp, state_with_banks, mute_d
     tab = SessionsTab(state_with_banks)
     _wire_like_main_window(tab)
     tab.new_session()
-    cb, pick, exam_id = tab.checks[0]
+    row0 = tab.checks[0]
+    cb, exam_id = row0.cb, row0.exam_id
     cb.setChecked(True)
     tab.save_session()
 
     # 模拟用户重新点列表里的该场次
     tab._on_select(tab.list.item(0), None)
 
-    same = next(c for c, _, eid in tab.checks if eid == exam_id)
+    same = next(r.cb for r in tab.checks if r.exam_id == exam_id)
     assert same.isChecked(), "重新选中场次后勾选未恢复"
 
 
@@ -168,11 +171,12 @@ def test_unchecked_subject_stays_unchecked_after_save(qapp, state_with_banks, mu
     tab = SessionsTab(state_with_banks)
     _wire_like_main_window(tab)
     tab.new_session()
-    checked_id = tab.checks[0][2]
-    tab.checks[0][0].setChecked(True)
+    checked_id = tab.checks[0].exam_id
+    tab.checks[0].cb.setChecked(True)
     tab.save_session()
 
-    for cb, _, eid in tab.checks:
+    for r in tab.checks:
+        cb, eid = r.cb, r.exam_id
         if eid != checked_id:
             assert not cb.isChecked(), f"{eid} 不应被勾上"
 
@@ -403,8 +407,8 @@ def test_pick_spinbox_is_wide_enough(qapp, state_with_banks) -> None:
     editor = SessionsTab(state_with_banks)
     try:
         editor.refresh_choices()
-        cbs = [c for c, _p, eid in editor.checks if eid == "big"]
-        picks = [p for _c, p, eid in editor.checks if eid == "big"]
+        cbs = [r.cb for r in editor.checks if r.exam_id == "big"]
+        picks = [r.pick for r in editor.checks if r.exam_id == "big"]
         assert cbs and picks
         pick = picks[0]
         assert isinstance(pick, QSpinBox)
@@ -529,5 +533,69 @@ def test_loading_all_students_session_uses_current_list(qapp, state_with_banks) 
         tab.edit_roster.setText("9 8")  # 模拟表单里留着上一场的名单
         tab._load_into_form(s)
         assert tab.edit_roster.text().split() == ["1", "2"]
+    finally:
+        tab.deleteLater()
+
+
+def test_session_saves_difficulty_range(qapp, state_with_banks) -> None:
+    """场次里为题库设置平均难度区间，保存后写进 SessionExam。"""
+    from app.core.models import ExamBank, Question
+
+    st = state_with_banks
+    bank = ExamBank(
+        exam_id="diff",
+        title="难度库",
+        pick=2,
+        questions=[
+            Question(id=f"d{i}", type="single", stem="s", answer="A", difficulty=i)
+            for i in range(1, 7)
+        ],
+    )
+    st.banks["diff"] = bank
+    st.bank_paths["diff"] = "diff.json"
+
+    tab = SessionsTab(st)
+    try:
+        tab.refresh_choices()
+        row = next(r for r in tab.checks if r.exam_id == "diff")
+        row.cb.setChecked(True)
+        row.pick.setValue(3)
+        row.limit.setChecked(True)
+        row.dmin.setValue(2)
+        row.dmax.setValue(4)
+        tab.new_session()
+        # new_session 会重建表单，重新设置一遍
+        row = next(r for r in tab.checks if r.exam_id == "diff")
+        row.cb.setChecked(True)
+        row.pick.setValue(3)
+        row.limit.setChecked(True)
+        row.dmin.setValue(2)
+        row.dmax.setValue(4)
+        tab.save_session()
+        saved = st.sessions[-1]
+        exam = next(e for e in saved.exams if e.file.startswith("diff"))
+        assert exam.difficulty_min == 2 and exam.difficulty_max == 4
+        assert exam.pick == 3
+    finally:
+        tab.deleteLater()
+
+
+def test_difficulty_range_blocks_unlabelled_bank(qapp, state_with_banks, monkeypatch) -> None:
+    """题库没标注难度时，设置区间必须被拦下（示例题库就是 None）。"""
+    st = state_with_banks
+    tab = SessionsTab(st)
+    try:
+        tab.new_session()
+        row = next(r for r in tab.checks if r.exam_id == "demo-math")
+        row.cb.setChecked(True)
+        row.limit.setChecked(True)
+        row.dmin.setValue(2)
+        row.dmax.setValue(3)
+        monkeypatch.setattr(
+            "app.ui.tab_sessions.QMessageBox.critical", staticmethod(lambda *a, **k: None)
+        )
+        before = len(st.sessions)
+        tab.save_session()
+        assert len(st.sessions) == before, "未标注难度时不应保存成功"
     finally:
         tab.deleteLater()

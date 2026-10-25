@@ -9,6 +9,8 @@ Rust 端 `check_student_overlap` 会拒绝"同一学生同时在两个重叠场�
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import QDateTime, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -32,9 +34,23 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.difficulty import check_difficulty_range
 from app.core.models import Session, SessionExam
 from app.core.state import ProjectState, match_bank_exam_id
 from app.core.timeparse import local_to_rfc3339, parse_rfc3339
+
+
+@dataclass
+class BankRow:
+    """场次里一行题库：勾选、抽题数、平均难度区间（可选）。"""
+
+    cb: QCheckBox
+    pick: QSpinBox
+    limit: QCheckBox
+    dmin: QSpinBox
+    dmax: QSpinBox
+    exam_id: str
+
 
 # 重叠场次的配色
 COLOR_OK = QColor(70, 130, 180)
@@ -217,7 +233,7 @@ class SessionsTab(QWidget):
         # 科目
         subj_box = QGroupBox("考试科目")
         sl = QVBoxLayout(subj_box)
-        self.checks: list[tuple[QCheckBox, QSpinBox, str]] = []
+        self.checks: list[BankRow] = []
         self.combo_holder = QVBoxLayout()
         sl.addLayout(self.combo_holder)
         rl.addWidget(subj_box)
@@ -260,8 +276,15 @@ class SessionsTab(QWidget):
         界面上的勾选全部消失，但数据其实还在模型里。
         """
         # 重建前快照：exam_id -> (是否勾选, 抽题数)
-        prev: dict[str, tuple[bool, int]] = {
-            exam_id: (cb.isChecked(), int(pick.value())) for cb, pick, exam_id in self.checks
+        prev: dict[str, tuple[bool, int, bool, int, int]] = {
+            r.exam_id: (
+                r.cb.isChecked(),
+                int(r.pick.value()),
+                r.limit.isChecked(),
+                int(r.dmin.value()),
+                int(r.dmax.value()),
+            )
+            for r in self.checks
         }
 
         # 清空旧控件
@@ -290,19 +313,41 @@ class SessionsTab(QWidget):
             pick.setValue(min(bank.pick, len(bank.questions)))
             pick.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             pick.setMinimumWidth(pick_width(int(pick.maximum())))
+            limit = QCheckBox("限制平均难度")
+            limit.setToolTip("勾选后，抽出的这 N 题平均难度必须落在下面区间（1–255）")
+            dmin = QSpinBox()
+            dmin.setRange(1, 255)
+            dmin.setValue(1)
+            dmax = QSpinBox()
+            dmax.setRange(1, 255)
+            dmax.setValue(5)
+            for w in (dmin, dmax):
+                w.setEnabled(False)
+                w.setMinimumWidth(56)
+            limit.toggled.connect(dmin.setEnabled)
+            limit.toggled.connect(dmax.setEnabled)
+
             hl.addWidget(cb)
             hl.addWidget(QLabel("抽题数"))
             hl.addWidget(pick)
+            hl.addSpacing(8)
+            hl.addWidget(limit)
+            hl.addWidget(dmin)
+            hl.addWidget(QLabel("–"))
+            hl.addWidget(dmax)
             hl.addStretch(1)
             self.combo_holder.addWidget(row)
-            self.checks.append((cb, pick, exam_id))
+            self.checks.append(BankRow(cb, pick, limit, dmin, dmax, exam_id))
 
         # 恢复快照；新增的题库没有快照，保持默认（未勾选）。
-        for cb, pick, exam_id in self.checks:
-            if exam_id in prev:
-                checked, n = prev[exam_id]
-                cb.setChecked(checked)
-                pick.setValue(min(n, int(pick.maximum())))
+        for r in self.checks:
+            if r.exam_id in prev:
+                checked, n, limited, lo, hi = prev[r.exam_id]
+                r.cb.setChecked(checked)
+                r.pick.setValue(min(n, int(r.pick.maximum())))
+                r.limit.setChecked(limited)
+                r.dmin.setValue(lo)
+                r.dmax.setValue(hi)
 
         self.refresh()
         self._sync_roster()
@@ -392,11 +437,17 @@ class SessionsTab(QWidget):
             key = match_bank_exam_id(e.file, self.state.banks)
             if key is not None:
                 resolved[key] = e
-        for cb, pick, exam_id in self.checks:
-            e = resolved.get(exam_id)
-            cb.setChecked(e is not None)
-            if e is not None and e.pick:
-                pick.setValue(e.pick)
+        for r in self.checks:
+            e = resolved.get(r.exam_id)
+            r.cb.setChecked(e is not None)
+            if e is not None:
+                if e.pick:
+                    r.pick.setValue(e.pick)
+                r.limit.setChecked(e.difficulty_min is not None)
+                if e.difficulty_min is not None:
+                    r.dmin.setValue(e.difficulty_min)
+                if e.difficulty_max is not None:
+                    r.dmax.setValue(e.difficulty_max)
 
     def _sync_roster(self) -> None:
         """学生名单变化后，把「使用全部学生」的显示刷新成最新名单。"""
@@ -534,9 +585,28 @@ class SessionsTab(QWidget):
 
         # 科目
         exams: list[SessionExam] = []
-        for cb, pick, exam_id in self.checks:
-            if cb.isChecked():
-                exams.append(SessionExam(file=f"{exam_id}.json", pick=int(pick.value())))
+        for r in self.checks:
+            if not r.cb.isChecked():
+                continue
+            lo = hi = None
+            if r.limit.isChecked():
+                lo, hi = int(r.dmin.value()), int(r.dmax.value())
+                bank = self.state.banks.get(r.exam_id)
+                if bank is None:
+                    QMessageBox.critical(self, "题库缺失", f"题库 {r.exam_id} 不在当前工程里。")
+                    return
+                problems = check_difficulty_range(bank, int(r.pick.value()), lo, hi)
+                if problems:
+                    QMessageBox.critical(self, "平均难度不可行", "\n".join(problems))
+                    return
+            exams.append(
+                SessionExam(
+                    file=f"{r.exam_id}.json",
+                    pick=int(r.pick.value()),
+                    difficulty_min=lo,
+                    difficulty_max=hi,
+                )
+            )
 
         try:
             s = Session(
