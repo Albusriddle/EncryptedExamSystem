@@ -35,7 +35,14 @@ from PySide6.QtWidgets import (
 from app.branding import branding
 from app.core.models import Manifest
 from app.core.state import ProjectState
-from app.ui.app_settings import AUTOLOAD, LAST_PROJECT, WARNED_EESPROJ, projects_dir, settings
+from app.ui.app_settings import (
+    AUTOLOAD,
+    LAST_PROJECT,
+    PROJECT_DIR,
+    active_projects_dir,
+    projects_dir,
+    settings,
+)
 from app.ui.tab_answers import AnswersTab
 from app.ui.tab_banks import BanksTab
 from app.ui.tab_build import BuildTab
@@ -218,15 +225,34 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- 工程自动保存/打开
 
     def _on_built(self, out: str) -> None:
-        """打包成功后自动保存工程。
+        """打包成功后自动保存工程，并把保存位置明确告诉老师。
 
         **绝不写在考试包输出目录**：那是要发给学生的目录，工程里有标准答案。
-        优先覆盖教师自己的工程文件；否则存到 `%LOCALAPPDATA%/ExamSystem/projects/`。
+        优先覆盖教师自己的工程文件；否则存到老师设置的目录，
+        没设置过就**当场要求选一个**。
         """
         prod = Path(out)
         if self.project_path is not None:
             proj = self.project_path
         else:
+            target = settings().value(PROJECT_DIR, "", type=str)
+            if not target:
+                target = QFileDialog.getExistingDirectory(
+                    self,
+                    "请选择工程保存位置（首次打包需要设置一次）",
+                    str(projects_dir(create=False)),
+                )
+                if not target:
+                    self.build_tab.log_line("⚠ 未设置工程保存位置，本次没有保存工程")
+                    QMessageBox.information(
+                        self,
+                        "未保存工程",
+                        "还没有设置工程保存位置，本次没有自动保存工程。\n\n"
+                        "随时可以在「打包」页的「工程保存位置」里设置。",
+                    )
+                    return
+                settings().setValue(PROJECT_DIR, target)
+
             # 用**工程内容**做短哈希：这样移动/改名考试包仍复用同一个工程文件，
             # 而内容不同的两个同名包不会互相覆盖。
             payload = json.dumps(
@@ -239,7 +265,14 @@ class MainWindow(QMainWindow):
                 sort_keys=True,
             )
             digest = hashlib.blake2s(payload.encode("utf-8"), digest_size=3).hexdigest()
-            proj = projects_dir() / f"{prod.stem}-{digest}.eesproj"
+            proj = Path(target) / f"{prod.stem}-{digest}.eesproj"
+
+        try:
+            proj.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.build_tab.log_line(f"✗ 工程目录不可写：{proj.parent}（{e}）")
+            QMessageBox.warning(self, "工程自动保存失败", f"目录不可写：{proj.parent}\n\n{e}")
+            return
 
         legacy = prod.with_suffix(".eesproj")
         if legacy.exists() and legacy != proj:
@@ -253,6 +286,7 @@ class MainWindow(QMainWindow):
         try:
             self.state.save(proj)
         except Exception as e:  # noqa: BLE001 - 展示给用户
+            self.build_tab.log_line(f"✗ 工程保存失败：{proj}（{e}）")
             QMessageBox.warning(self, "工程自动保存失败", f"{proj}\n\n{e}")
             return
 
@@ -263,18 +297,22 @@ class MainWindow(QMainWindow):
         self._dirty = False
         self._refresh_status()
 
-        # 按**工程路径**记忆：换电脑/换项目还会再提醒一次（防止误分发）
-        if st.value(WARNED_EESPROJ, "", type=str) != str(proj):
-            st.setValue(WARNED_EESPROJ, str(proj))
-            QMessageBox.information(
-                self,
-                "工程已自动保存",
-                f"工程已保存到：\n{proj}\n\n"
-                "⚠ 该文件含标准答案与判分材料，**切勿随考试包一起分发**。\n"
-                "下次启动会自动打开它。",
-            )
-        else:
-            self.statusBar().showMessage(f"工程已自动保存：{proj}", 8000)
+        # 每次都写日志 + 弹窗：老师必须知道工程存到哪了
+        self.build_tab.log_line(f"✔ 工程已保存：{proj}")
+        self.statusBar().showMessage(f"工程已自动保存：{proj}", 10000)
+
+        box = QMessageBox(self)
+        box.setWindowTitle("工程已保存")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(f"工程已保存到：\n{proj}")
+        box.setInformativeText("⚠ 该文件含标准答案与判分材料，切勿随考试包分发。")
+        open_btn = box.addButton("打开目录", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("确定", QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            from PySide6.QtGui import QDesktopServices
+
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(proj.parent)))
 
     def _autoload_last_project(self) -> None:
         """启动时自动打开上次的工程（可在设置里关掉）。"""
@@ -312,7 +350,7 @@ class MainWindow(QMainWindow):
     def open_projects_dir(self) -> None:
         from PySide6.QtGui import QDesktopServices
 
-        d = projects_dir()
+        d = active_projects_dir()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
 
     def check_config(self) -> None:

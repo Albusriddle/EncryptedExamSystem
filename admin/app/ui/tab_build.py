@@ -309,6 +309,23 @@ class BuildTab(QWidget):
         row3.addWidget(btn_out)
         form.addRow("输出包", row3)
 
+        from app.ui.app_settings import PROJECT_DIR, project_dir_display, settings
+
+        self.edit_projdir = QLineEdit()
+        self.edit_projdir.setReadOnly(True)
+        self.edit_projdir.setText(str(project_dir_display()))
+        self.edit_projdir.setToolTip("打包成功后工程自动保存到这里（含标准答案，勿分发）")
+        row_pd = QHBoxLayout()
+        row_pd.addWidget(self.edit_projdir, 1)
+        btn_pd = QPushButton("更改…")
+        btn_pd.clicked.connect(lambda: self._pick_project_dir(PROJECT_DIR, settings))
+        row_pd.addWidget(btn_pd)
+        btn_pd_reset = QPushButton("默认")
+        btn_pd_reset.setToolTip("恢复为程序目录下的 projects\\")
+        btn_pd_reset.clicked.connect(lambda: self._reset_project_dir(PROJECT_DIR, settings))
+        row_pd.addWidget(btn_pd_reset)
+        form.addRow("工程保存位置", row_pd)
+
         self.edit_keyfile = QLineEdit()
         self.edit_keyfile.setPlaceholderText("留空则不导出 K_manifest")
         row4 = QHBoxLayout()
@@ -634,6 +651,25 @@ class BuildTab(QWidget):
             self._cancelled = True
             self.worker.cancel()
             self._append("… 已请求取消")
+
+    def log_line(self, line: str) -> None:
+        """供主窗口写入打包日志（如"工程已保存"）。"""
+        self._append(line)
+
+    def _pick_project_dir(self, key: str, settings) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        d = QFileDialog.getExistingDirectory(self, "选择工程保存位置", self.edit_projdir.text())
+        if not d:
+            return
+        settings().setValue(key, d)
+        self.edit_projdir.setText(d)
+
+    def _reset_project_dir(self, key: str, settings) -> None:
+        settings().remove(key)
+        from app.ui.app_settings import project_dir_display
+
+        self.edit_projdir.setText(str(project_dir_display()))
 
     def _append(self, line: str) -> None:
         self.log_view.appendPlainText(line)

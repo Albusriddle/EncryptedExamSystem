@@ -16,6 +16,8 @@ from PySide6.QtCore import QSettings
 LAST_PROJECT = "last_project"
 #: 启动时是否自动打开上次工程
 AUTOLOAD = "autoload"
+#: 老师指定的工程保存目录（空 = 程序目录 projects/）
+PROJECT_DIR = "project_dir"
 #: 上次提示过"工程文件含答案，别随包分发"的工程路径（不是布尔值）
 WARNED_EESPROJ = "warned_eesproj"
 
@@ -65,3 +67,22 @@ def projects_dir(create: bool = True) -> Path:
 def settings() -> QSettings:
     settings_path().parent.mkdir(parents=True, exist_ok=True)
     return QSettings(str(settings_path()), QSettings.Format.IniFormat)
+
+
+def project_dir_display() -> Path:
+    """只用于界面显示：不创建目录。"""
+    raw = settings().value(PROJECT_DIR, "", type=str)
+    return Path(raw) if raw else projects_dir(create=False)
+
+
+def active_projects_dir() -> Path:
+    """老师设置过就用设置，否则用默认（程序目录 projects/ 或 appdata 回退）。"""
+    raw = settings().value(PROJECT_DIR, "", type=str)
+    if raw:
+        p = Path(raw)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+        except OSError:
+            return projects_dir()
+    return projects_dir()

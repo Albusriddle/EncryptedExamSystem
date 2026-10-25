@@ -42,9 +42,11 @@ def test_autosave_and_autoload_roundtrip(qapp, local_appdata, monkeypatch) -> No
 
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0, raising=False)
 
     st = settings()
     st.setValue(AUTOLOAD, True)
+    st.setValue("project_dir", str(WORK / "projdir"))  # 首次打包要求先设置
     st.sync()
 
     win = MainWindow()
@@ -55,9 +57,9 @@ def test_autosave_and_autoload_roundtrip(qapp, local_appdata, monkeypatch) -> No
 
         # 绝不能写在考试包旁边（那是发给学生的目录）
         assert not out.with_suffix(".eesproj").exists(), "不得把工程写进分发目录"
-        projects = WORK / "ExamSystem" / "projects"
+        projects = WORK / "projdir"
         found = list(projects.glob("包-*.eesproj"))
-        assert found, "应存到教师端专属 projects 目录（带短哈希后缀）"
+        assert found, "应存到老师设置的工程目录（带短哈希后缀）"
         proj = found[0]
         assert settings().value(LAST_PROJECT, "", type=str) == str(proj)
 
@@ -114,7 +116,9 @@ def test_same_content_builds_share_project_file(qapp, local_appdata, monkeypatch
 
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0, raising=False)
     settings().setValue("autoload", False)
+    settings().setValue("project_dir", str(WORK / "projdir"))
 
     win = MainWindow()
     try:
@@ -129,7 +133,7 @@ def test_same_content_builds_share_project_file(qapp, local_appdata, monkeypatch
         win.project_path = None  # 模拟没有手动保存过工程
         win._on_built(str(out2))
 
-        files = list((WORK / "ExamSystem" / "projects").glob("期末-*.eesproj"))
+        files = list((WORK / "projdir").glob("期末-*.eesproj"))
         assert len(files) == 1, f"同内容不应产生多份工程：{files}"
     finally:
         win.deleteLater()
