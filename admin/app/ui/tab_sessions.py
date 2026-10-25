@@ -207,6 +207,11 @@ class SessionsTab(QWidget):
         self.lbl_roster_info.setStyleSheet("color: #888;")
         form.addRow("", self.lbl_roster_info)
 
+        hint = QLabel("本场名单是保存时的快照；学生名单变更后请重新保存本场次。")
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        hint.setWordWrap(True)
+        form.addRow("", hint)
+
         rl.addWidget(form_box)
 
         # 科目
@@ -300,6 +305,7 @@ class SessionsTab(QWidget):
                 pick.setValue(min(n, int(pick.maximum())))
 
         self.refresh()
+        self._sync_roster()
 
     def refresh(self) -> None:
         # 列表
@@ -369,6 +375,8 @@ class SessionsTab(QWidget):
 
         if set(s.students) == set(self.state.students) and self.state.students:
             self.combo_roster.setCurrentIndex(self.combo_roster.findData("all"))
+            # 索引可能本来就是 all（不会触发信号），必须显式重填当前全局名单
+            self.edit_roster.setText(" ".join(str(x) for x in self.state.students))
         else:
             self.combo_roster.setCurrentIndex(self.combo_roster.findData("custom"))
             self.edit_roster.setText(" ".join(str(x) for x in s.students))
@@ -389,6 +397,12 @@ class SessionsTab(QWidget):
             cb.setChecked(e is not None)
             if e is not None and e.pick:
                 pick.setValue(e.pick)
+
+    def _sync_roster(self) -> None:
+        """学生名单变化后，把「使用全部学生」的显示刷新成最新名单。"""
+        if self.combo_roster.currentData() == "all":
+            self.edit_roster.setText(" ".join(str(x) for x in self.state.students))
+            self._update_roster_info()
 
     def _on_roster_mode(self) -> None:
         mode = self.combo_roster.currentData()
@@ -417,7 +431,9 @@ class SessionsTab(QWidget):
             self.edit_roster.setText(" ".join(str(x) for x in merged))
         self._roster_mode = mode
         self.edit_roster.setEnabled(mode == "custom")
-        if mode == "all" and not self.edit_roster.text():
+        if mode == "all":
+            # 必须**无条件**重填：文本框里可能还留着上一场的旧名单，
+            # 只在为空时填会显示过期名单（客户实测：加完学生这里不变）。
             self.edit_roster.setText(" ".join(str(x) for x in self.state.students))
         self._update_roster_info()
 

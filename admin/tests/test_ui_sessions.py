@@ -484,3 +484,42 @@ def test_empty_class_selection_keeps_roster(qapp, state_with_banks, monkeypatch)
         assert tab.combo_roster.currentData() != "by_class", "应回到之前的模式"
     finally:
         tab.deleteLater()
+
+
+def test_all_students_refreshes_after_student_added(qapp, state_with_banks) -> None:
+    """加完学生再回到场次页，「使用全部学生」必须显示最新名单（客户实测 bug）。"""
+    st = state_with_banks
+    st.set_students([1, 2])
+    tab = SessionsTab(st)
+    try:
+        tab.combo_roster.setCurrentIndex(tab.combo_roster.findData("all"))
+        assert tab.edit_roster.text().split() == ["1", "2"]
+
+        st.set_students([1, 2, 3])  # 学生页加了人
+        tab.refresh_choices()  # 主窗口 _on_changed 会调它
+
+        assert tab.edit_roster.text().split() == ["1", "2", "3"], "名单必须刷新成最新"
+    finally:
+        tab.deleteLater()
+
+
+def test_loading_all_students_session_uses_current_list(qapp, state_with_banks) -> None:
+    """打开「全部学生」的场次时，必须显式重填，不能留着上一场的自定义名单。"""
+    from app.core.models import Session, SessionExam
+
+    st = state_with_banks
+    st.set_students([1, 2])
+    s = Session(
+        session_id=1,
+        start="2026-12-20T09:00:00+08:00",
+        end="2026-12-20T11:00:00+08:00",
+        students=[1, 2],
+        exams=[SessionExam(file="math.json", pick=1)],
+    )
+    tab = SessionsTab(st)
+    try:
+        tab.edit_roster.setText("9 8")  # 模拟表单里留着上一场的名单
+        tab._load_into_form(s)
+        assert tab.edit_roster.text().split() == ["1", "2"]
+    finally:
+        tab.deleteLater()
