@@ -201,6 +201,10 @@ class AnswersTab(QWidget):
         self.btn_verify = QPushButton("开始校验")
         self.btn_verify.clicked.connect(self._start)
         btns.addWidget(self.btn_verify)
+        self.btn_absent = QPushButton("缺考名单…")
+        self.btn_absent.setEnabled(False)
+        self.btn_absent.clicked.connect(self._show_attendance)
+        btns.addWidget(self.btn_absent)
         self.btn_csv = QPushButton("导出原始作答 CSV")
         self.btn_csv.setToolTip("只导出学生原始作答，不含分数；判分请用下方「导出判分结果…」")
         self.btn_csv.clicked.connect(self._export_csv)
@@ -330,6 +334,7 @@ class AnswersTab(QWidget):
             return
         self.results.clear()
         self.btn_csv.setEnabled(False)
+        self.btn_absent.setEnabled(False)
         self._refill()
         self.status.setText("输入已变更，请重新校验")
 
@@ -376,6 +381,7 @@ class AnswersTab(QWidget):
         self._reset_grading()
         self._refill()
         self.btn_csv.setEnabled(False)
+        self.btn_absent.setEnabled(False)
         self.status.setText("尚未校验")
 
     def _refill(self) -> None:
@@ -400,6 +406,7 @@ class AnswersTab(QWidget):
         if self._busy():
             return
         self._reset_grading()
+        self.btn_absent.setEnabled(False)
         if not self.files:
             QMessageBox.information(self, "提示", "请先添加答题卡文件。")
             return
@@ -473,6 +480,25 @@ class AnswersTab(QWidget):
         ok = sum(1 for r in self.results.values() if r.get("ok"))
         self.status.setText(f"校验完成：{ok} 通过 / {len(self.results) - ok} 失败")
         self.btn_csv.setEnabled(ok > 0)
+        self.btn_absent.setEnabled(bool(self.results))
+
+    def _show_attendance(self) -> None:
+        from app.ui.attendance_dialog import AttendanceDialog
+
+        records = []
+        for path in self.files:
+            r = self.results.get(str(path)) or {}
+            records.append(
+                {
+                    "file": path.name,
+                    "ok": bool(r.get("ok")),
+                    "binding": r.get("binding"),
+                    "sheet": r.get("sheet"),
+                    "message": r.get("message", ""),
+                }
+            )
+        dlg = AttendanceDialog(self, self.state.sessions, records, self.state.classes)
+        dlg.exec()
 
     # ---------------------------------------------------------------- 导出
 

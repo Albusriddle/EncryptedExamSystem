@@ -275,3 +275,41 @@ def test_master_and_package_frozen_while_verifying(qapp, monkeypatch) -> None:
     finally:
         tab.worker = None
         tab.deleteLater()
+
+
+def test_attendance_button_enabled_after_verify(qapp) -> None:
+    tab = AnswersTab(ProjectState())
+    try:
+        assert not tab.btn_absent.isEnabled()
+        tab.results = {"x": {"ok": True}}
+        tab._on_all()
+        assert tab.btn_absent.isEnabled()
+    finally:
+        tab.deleteLater()
+
+
+def test_attendance_dialog_lists_missing(qapp) -> None:
+    from app.core.models import Session, SessionExam
+    from app.ui.attendance_dialog import AttendanceDialog
+
+    sess = Session(
+        session_id=1,
+        start="2026-12-20T09:00:00+08:00",
+        end="2026-12-20T11:00:00+08:00",
+        students=[1, 2],
+        exams=[SessionExam(file="m.json", pick=1)],
+    )
+    recs = [
+        {
+            "file": "a.eea",
+            "ok": True,
+            "binding": None,
+            "sheet": {"student_id": 1, "session_id": 1, "submitted": True},
+        }
+    ]
+    dlg = AttendanceDialog(None, [sess], recs, [])
+    try:
+        assert dlg.table.rowCount() == 2
+        assert "缺考 1" in dlg.summary.text()
+    finally:
+        dlg.deleteLater()
