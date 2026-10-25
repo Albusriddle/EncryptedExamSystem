@@ -628,3 +628,29 @@ def test_difficulty_controls_reset_when_session_has_no_range(qapp, state_with_ba
         assert (row.dmin.value(), row.dmax.value()) == (1, 5)
     finally:
         tab.deleteLater()
+
+
+def test_range_hint_shows_reachable_range(qapp, state_with_banks) -> None:
+    """每个题库行显示"可达 X–Y"，老师不用猜。"""
+    from app.core.models import ExamBank, Question
+
+    st = state_with_banks
+    st.banks["diff2"] = ExamBank(
+        exam_id="diff2",
+        title="难度库",
+        pick=2,
+        questions=[
+            Question(id=f"q{i}", type="single", stem="s", answer="A", difficulty=d)
+            for i, d in enumerate([1, 2, 3, 4], start=1)
+        ],
+    )
+    tab = SessionsTab(st)
+    try:
+        tab.refresh_choices()
+        row = next(r for r in tab.checks if r.exam_id == "diff2")
+        row.pick.setValue(2)
+        assert "可达 1.5–3.5" in row.hint.text(), row.hint.text()
+        demo = next(r for r in tab.checks if r.exam_id == "demo-math")
+        assert "未标难度" in demo.hint.text()
+    finally:
+        tab.deleteLater()

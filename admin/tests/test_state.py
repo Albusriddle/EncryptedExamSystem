@@ -318,3 +318,32 @@ def test_broken_class_gives_readable_error(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="第 1 个班级"):
         ProjectState.load(p)
+
+
+def test_validate_reports_difficulty_problems() -> None:
+    """「检查配置」必须提前发现难度区间问题，而不是等打包才报。"""
+    from app.core.models import ExamBank, Question, Session, SessionExam
+
+    st = ProjectState()
+    st.banks["m"] = ExamBank(
+        exam_id="m",
+        title="数学",
+        pick=1,
+        questions=[
+            Question(id="a", type="single", stem="s", answer="A", difficulty=1),
+            Question(id="b", type="single", stem="s", answer="A", difficulty=3),
+        ],
+    )
+    st.bank_paths["m"] = "m.json"
+    st.students = [1]
+    st.sessions.append(
+        Session(
+            session_id=1,
+            start="2026-12-20T09:00:00+08:00",
+            end="2026-12-20T11:00:00+08:00",
+            students=[1],
+            exams=[SessionExam(file="m.json", pick=1, difficulty_min=2, difficulty_max=2)],
+        )
+    )
+    problems = st.validate()
+    assert any("可达平均难度" in p for p in problems), problems

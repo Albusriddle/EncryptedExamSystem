@@ -416,7 +416,42 @@ fn window_fallback(
             hi,
         });
     };
-    if dist != 0 {
+    let mut chosen: Vec<usize> = sorted[start..start + n].to_vec();
+    let mut total: usize = chosen.iter().map(|&i| diffs[i] as usize).sum();
+
+    // 贪心修补：从最接近的连续窗口出发，逐步换入更大/更小的题，
+    // 每次只移动一格，尽量走到区间内（比直接报"不可行"更稳）。
+    if total < lo_sum {
+        let mut outside = start + n..sorted.len();
+        while total < lo_sum {
+            let Some(big) = outside.next() else { break };
+            let mut pos = 0usize;
+            for (idx, &i) in chosen.iter().enumerate() {
+                if diffs[i] < diffs[chosen[pos]] {
+                    pos = idx;
+                }
+            }
+            let small = chosen[pos];
+            total = total - diffs[small] as usize + diffs[big] as usize;
+            chosen[pos] = big;
+        }
+    } else if total > hi_sum {
+        let mut outside = (0..start).rev();
+        while total > hi_sum {
+            let Some(small) = outside.next() else { break };
+            let mut pos = 0usize;
+            for (idx, &i) in chosen.iter().enumerate() {
+                if diffs[i] > diffs[chosen[pos]] {
+                    pos = idx;
+                }
+            }
+            let big = chosen[pos];
+            total = total - diffs[big] as usize + diffs[small] as usize;
+            chosen[pos] = small;
+        }
+    }
+
+    if total < lo_sum || total > hi_sum {
         return Err(PickError::NoFeasibleDifficulty {
             exam_id: bank.exam_id.clone(),
             pick: n as u32,
@@ -424,7 +459,8 @@ fn window_fallback(
             hi,
         });
     }
-    Ok(sorted[start..start + n].iter().map(|&i| order[i]).collect())
+    let _ = dist;
+    Ok(chosen.iter().map(|&i| order[i]).collect())
 }
 
 /// 生成一份完整试卷。

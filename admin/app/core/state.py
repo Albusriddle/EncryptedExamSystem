@@ -281,6 +281,27 @@ class ProjectState:
             if not s.students:
                 problems.append(f"场次 {s.session_id} 的学号名单为空")
 
+        # 难度区间：与保存/打包共用同一套校验，避免"检查配置通过、打包失败"
+        from app.core.difficulty import check_difficulty_range
+
+        for s in self.sessions:
+            for e in s.exams:
+                if e.difficulty_min is None:
+                    continue
+                key = match_bank_exam_id(e.file, self.banks)
+                bank = self.banks.get(key) if key else None
+                if bank is None:
+                    continue
+                problems.extend(
+                    f"场次 {s.session_id}: {msg}"
+                    for msg in check_difficulty_range(
+                        bank,
+                        e.pick or bank.pick,
+                        e.difficulty_min,
+                        e.difficulty_max or e.difficulty_min,
+                    )
+                )
+
         # 场次引用的题库必须存在（三层匹配，与 Rust 端一致）
         for s in self.sessions:
             for e in s.exams:

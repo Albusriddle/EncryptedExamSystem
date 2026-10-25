@@ -49,6 +49,7 @@ class BankRow:
     limit: QCheckBox
     dmin: QSpinBox
     dmax: QSpinBox
+    hint: QLabel
     exam_id: str
 
 
@@ -331,13 +332,19 @@ class SessionsTab(QWidget):
             hl.addWidget(QLabel("抽题数"))
             hl.addWidget(pick)
             hl.addSpacing(8)
+            hint = QLabel("")
+            hint.setStyleSheet("color: #888; font-size: 11px;")
             hl.addWidget(limit)
             hl.addWidget(dmin)
             hl.addWidget(QLabel("–"))
             hl.addWidget(dmax)
+            hl.addWidget(hint)
             hl.addStretch(1)
             self.combo_holder.addWidget(row)
-            self.checks.append(BankRow(cb, pick, limit, dmin, dmax, exam_id))
+            br = BankRow(cb, pick, limit, dmin, dmax, hint, exam_id)
+            self.checks.append(br)
+            pick.valueChanged.connect(lambda _v, r=br: self._update_range_hint(r))
+            self._update_range_hint(br)
 
         # 恢复快照；新增的题库没有快照，保持默认（未勾选）。
         for r in self.checks:
@@ -351,6 +358,27 @@ class SessionsTab(QWidget):
 
         self.refresh()
         self._sync_roster()
+
+    def _update_range_hint(self, r: BankRow) -> None:
+        """显示"该库抽 N 题的可达平均分范围"，并提示未标注难度的题数。"""
+        bank = self.state.banks.get(r.exam_id)
+        if bank is None:
+            r.hint.setText("")
+            return
+        missing = sum(1 for q in bank.questions if not q.difficulty)
+        if missing:
+            r.hint.setText(f"⚠ {missing} 题未标难度")
+            r.hint.setStyleSheet("color: #c04040; font-size: 11px;")
+            return
+        diffs = sorted(int(q.difficulty) for q in bank.questions if q.difficulty)
+        k = int(r.pick.value())
+        if not diffs or k < 1 or k > len(diffs):
+            r.hint.setText("")
+            return
+        lo = sum(diffs[:k]) / k
+        hi = sum(diffs[-k:]) / k
+        r.hint.setText(f"可达 {lo:.1f}–{hi:.1f}")
+        r.hint.setStyleSheet("color: #888; font-size: 11px;")
 
     def refresh(self) -> None:
         # 列表
