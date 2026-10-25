@@ -195,8 +195,10 @@ pub fn parse(input: &str) -> Vec<Block> {
                         i += 1;
                     }
                     _ if lines[i].starts_with("  ") && !items.is_empty() => {
+                        // 续行也要走行内解析，否则续行里的 `code` / **加粗** 会原样显示
                         if let Some(last) = items.last_mut() {
-                            last.push(Span::Text(format!("\n{}", t)));
+                            last.push(Span::Text("\n".to_owned()));
+                            last.extend(parse_spans(t));
                         }
                         i += 1;
                     }
@@ -637,5 +639,33 @@ mod parse_edge_tests {
         assert_eq!(b.len(), 2, "应为 列表 + 表格：{b:?}");
         assert!(matches!(b[0], Block::List { .. }));
         assert!(matches!(b[1], Block::Table { .. }));
+    }
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+
+    #[test]
+    fn list_continuation_parses_inline_formatting() {
+        let blocks = parse("- 第一行\n  **重点** 与 `code`");
+        match &blocks[0] {
+            Block::List { items, .. } => {
+                let spans = &items[0];
+                assert!(
+                    spans
+                        .iter()
+                        .any(|s| matches!(s, Span::Bold(t) if t == "重点")),
+                    "续行里的加粗要被解析：{spans:?}"
+                );
+                assert!(
+                    spans
+                        .iter()
+                        .any(|s| matches!(s, Span::Code(t) if t == "code")),
+                    "续行里的行内代码要被解析：{spans:?}"
+                );
+            }
+            other => panic!("应为列表：{other:?}"),
+        }
     }
 }

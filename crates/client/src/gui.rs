@@ -1098,18 +1098,48 @@ fn render_table(
 ///
 /// 行内代码是等宽字体，比比例字体宽；统一按比例字体量会让代码列偏窄、代码被折行。
 fn measure_spans(ui: &egui::Ui, spans: &[crate::markdown::Span]) -> f32 {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    // 每帧对每个单元格重新排版太贵（40×8 的表就是 320 次/帧）。
+    // 按 (文字, 是否等宽) 缓存；上限定 1024 条，避免题库特别大时无限增长。
+    thread_local! {
+        static WIDTHS: RefCell<HashMap<(String, bool), f32>> = RefCell::new(HashMap::new());
+    }
+    const LIMIT: usize = 1024;
+
     let mut width = 0.0;
     for span in spans {
-        let (text, font) = match span {
-            crate::markdown::Span::Text(t) => (t.as_str(), egui::FontId::proportional(14.0)),
-            crate::markdown::Span::Bold(t) => (t.as_str(), egui::FontId::proportional(14.0)),
-            crate::markdown::Span::Code(t) => (t.as_str(), egui::FontId::monospace(13.3)),
+        let (text, is_code) = match span {
+            crate::markdown::Span::Text(t) => (t.as_str(), false),
+            crate::markdown::Span::Bold(t) => (t.as_str(), false),
+            crate::markdown::Span::Code(t) => (t.as_str(), true),
         };
-        width += ui.fonts(|f| {
-            f.layout_no_wrap(text.to_owned(), font, egui::Color32::WHITE)
-                .size()
-                .x
-        });
+        let key = (text.to_owned(), is_code);
+        let cached = WIDTHS.with(|c| c.borrow().get(&key).copied());
+        let w = match cached {
+            Some(w) => w,
+            None => {
+                let font = if is_code {
+                    egui::FontId::monospace(13.3)
+                } else {
+                    egui::FontId::proportional(14.0)
+                };
+                let w = ui.fonts(|f| {
+                    f.layout_no_wrap(text.to_owned(), font, egui::Color32::WHITE)
+                        .size()
+                        .x
+                });
+                WIDTHS.with(|c| {
+                    let mut c = c.borrow_mut();
+                    if c.len() < LIMIT {
+                        c.insert(key, w);
+                    }
+                });
+                w
+            }
+        };
+        width += w;
     }
     width
 }
