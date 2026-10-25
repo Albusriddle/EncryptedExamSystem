@@ -167,7 +167,12 @@ class MainWindow(QMainWindow):
     def open_project(self) -> None:
         if not self._confirm_discard():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "打开工程", "", "工程 (*.json)")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "打开工程",
+            str(projects_dir()),
+            "工程 (*.eesproj *.json);;全部文件 (*)",
+        )
         if not path:
             return
         try:
@@ -191,11 +196,13 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "保存工程",
-            self.project_path.name if self.project_path else "project.json",
-            "工程 (*.json)",
+            self.project_path.name if self.project_path else "project.eesproj",
+            "工程 (*.eesproj);;JSON (*.json)",
         )
         if not path:
             return
+        if not Path(path).suffix:
+            path += ".eesproj"
         try:
             self.state.save(Path(path))
         except Exception as e:  # noqa: BLE001
