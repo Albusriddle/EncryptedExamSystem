@@ -62,6 +62,8 @@ class ItemResult:
     status: str  # correct / wrong / blank / unjudged / unknown
     #: 人工改分后的分数；None 表示未改
     manual_score: int | None = None
+    #: 最近一次人工改分的时间（导出留痕）
+    adjusted_at: str = ""
 
     @property
     def final_score(self) -> int:

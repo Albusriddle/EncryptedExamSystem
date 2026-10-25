@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import shutil
 from pathlib import Path
 
 import pytest
@@ -113,13 +114,21 @@ def test_invalid_score_is_clamped(tab) -> None:
 def test_export_writes_four_csvs(tab, monkeypatch) -> None:
     tab._grade()
     out = WORK / "out"
-    out.mkdir(exist_ok=True)
+    # 每次清空：固定目录复用会让上一轮的 CSV 混进断言（真实踩过）
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(out)))
     tab._export_grading()
 
     names = {p.name for p in out.glob("*.csv")}
-    assert names == {"已判分-明细.csv", "已判分-汇总.csv", "未判分.csv", "全量.csv"}
-    text = (out / "已判分-明细.csv").read_text(encoding="utf-8-sig")
-    assert "判分口径" in text.splitlines()[0]
-    rows = list(csv.reader(text.splitlines()[1:]))
+    assert len(names) == 4, names
+    assert any(n.startswith("已判分-明细-") for n in names)
+    assert any(n.startswith("已判分-汇总-") for n in names)
+    assert any(n.startswith("未判分-") for n in names)
+    assert any(n.startswith("全量-") for n in names)
+    assert (out / "说明.txt").is_file(), "口径说明应单独成文件"
+
+    detail = next(out.glob("已判分-明细-*.csv"))
+    rows = list(csv.reader(detail.read_text(encoding="utf-8-sig").splitlines()))
     assert rows[0][0] == "学号"
+    assert "调整时间" in rows[0]

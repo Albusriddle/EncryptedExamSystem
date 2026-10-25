@@ -191,7 +191,8 @@ class AnswersTab(QWidget):
         self.btn_verify = QPushButton("开始校验")
         self.btn_verify.clicked.connect(self._start)
         btns.addWidget(self.btn_verify)
-        self.btn_csv = QPushButton("导出作答明细 CSV")
+        self.btn_csv = QPushButton("导出原始作答 CSV")
+        self.btn_csv.setToolTip("只导出学生原始作答，不含分数；判分请用下方「导出判分结果…」")
         self.btn_csv.clicked.connect(self._export_csv)
         self.btn_csv.setEnabled(False)
         btns.addWidget(self.btn_csv)
@@ -530,6 +531,11 @@ class AnswersTab(QWidget):
         missing_qids: set[str] = set()
         missing_answer: set[str] = set()
         unsubmitted = 0
+        unbound = 0
+        for path in self.files:
+            res = self.results.get(str(path)) or {}
+            if res.get("ok") and res.get("binding") is False:
+                unbound += 1
         for sheet in sheets:
             if not sheet.get("submitted"):
                 unsubmitted += 1
@@ -546,6 +552,11 @@ class AnswersTab(QWidget):
         ]
         if unsubmitted:
             lines.append(f"⚠ 未交卷：{unsubmitted} 张（仍可判分，汇总里会标出）")
+        if unbound:
+            lines.append(
+                f"⚠ 与所选包不匹配：{unbound} 张"
+                "（binding=false，可能来自旧题库/别的包，判分结果需人工复核）"
+            )
         if missing_qids:
             lines.append(f"✗ 题库里找不到的题号：{len(missing_qids)} 个（换错工程了？）")
         if missing_answer:
@@ -614,6 +625,7 @@ class AnswersTab(QWidget):
             value = result.final_score
         value = max(0, min(value, result.max_score))
         result.manual_score = value if value != result.score else None
+        result.adjusted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if result.adjusted else ""
         self.grade_table.blockSignals(True)
         item.setText(str(result.final_score))
         adjust = self.grade_table.item(row, 9)
@@ -626,9 +638,15 @@ class AnswersTab(QWidget):
         if not self.grade_rows:
             return "尚未判分"
         s = summarize(self.grade_rows)
+        unbound = 0
+        for path in self.files:
+            res = self.results.get(str(path)) or {}
+            if res.get("ok") and res.get("binding") is False:
+                unbound += 1
+        tail = f"；⚠ {unbound} 张卡与所选包不匹配" if unbound else ""
         return (
             f"已判 {s['judged']} 题，得分 {s['score']} / {s['max_score']}；"
-            f"未判 {s['unjudged']} 题。口径：{policy.describe()}"
+            f"未判 {s['unjudged']} 题{tail}。口径：{policy.describe()}"
         )
 
     def _export_grading(self) -> None:
@@ -641,6 +659,8 @@ class AnswersTab(QWidget):
         policy = self._policy()
         base = Path(out_dir)
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # 文件名带时间戳：同一目录导出第二场时不会静默覆盖上一场
+        tag = datetime.now().strftime("%Y%m%d-%H%M%S")
 
         judged = [r for r in self.grade_rows if r.status not in ("unjudged", "unknown")]
         unjudged = [r for r in self.grade_rows if r.status in ("unjudged", "unknown")]
@@ -648,7 +668,6 @@ class AnswersTab(QWidget):
         def write(name: str, header: list[str], rows: list[list]) -> None:
             path = base / name
             with open(path, "w", encoding="utf-8-sig", newline="") as f:
-                f.write(f"# 判分口径：{policy.describe()}；生成时间：{stamp}\n")
                 writer = csv.writer(f)
                 writer.writerow(header)
                 writer.writerows(rows)
@@ -665,6 +684,7 @@ class AnswersTab(QWidget):
             "得分",
             "满分",
             "人工调整",
+            "调整时间",
         ]
         detail_rows = [
             [
@@ -679,6 +699,7 @@ class AnswersTab(QWidget):
                 r.final_score,
                 r.max_score,
                 f"{r.score} → {r.manual_score}" if r.adjusted else "",
+                r.adjusted_at,
             ]
             for r in judged
         ]
@@ -719,14 +740,30 @@ class AnswersTab(QWidget):
             for r in unjudged
         ]
 
-        write("已判分-明细.csv", detail_header, detail_rows)
-        write("已判分-汇总.csv", summary_header, summary_rows)
-        write("未判分.csv", unjudged_header, unjudged_rows)
-        write("全量.csv", detail_header + ["判分状态"], all_rows)
+        names = {
+            "detail": f"已判分-明细-{tag}.csv",
+            "summary": f"已判分-汇总-{tag}.csv",
+            "unjudged": f"未判分-{tag}.csv",
+            "all": f"全量-{tag}.csv",
+        }
+        write(names["detail"], detail_header, detail_rows)
+        write(names["summary"], summary_header, summary_rows)
+        write(names["unjudged"], unjudged_header, unjudged_rows)
+        write(names["all"], detail_header + ["判分状态"], all_rows)
+
+        (base / "说明.txt").write_text(
+            "保密考试系统 判分结果\n\n"
+            f"生成时间：{stamp}\n"
+            f"判分口径：{policy.describe()}\n"
+            f"已判题：{len(detail_rows)} 行；未判题：{len(unjudged_rows)} 行\n\n"
+            "文件：\n"
+            f"  {names['detail']}\n  {names['summary']}\n  {names['unjudged']}\n  {names['all']}\n",
+            encoding="utf-8",
+        )
 
         QMessageBox.information(
             self,
             "导出完成",
-            f"已写入 4 个文件到：\n{out_dir}\n\n"
+            f"已写入 4 个 CSV + 说明.txt 到：\n{out_dir}\n\n"
             f"已判分明细 {len(detail_rows)} 行；未判分 {len(unjudged_rows)} 行。",
         )
