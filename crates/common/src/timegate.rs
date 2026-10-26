@@ -289,6 +289,22 @@ fn fetch_body(url: &str, timeout: Duration) -> Result<String, String> {
                 GetLastError()
             ));
         }
+        let mut status: u32 = 0;
+        let mut status_len: u32 = std::mem::size_of::<u32>() as u32;
+        let status_ok = WinHttpQueryHeaders(
+            request,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            std::ptr::null(),
+            (&mut status as *mut u32).cast(),
+            &mut status_len,
+            std::ptr::null_mut(),
+        );
+        if status_ok == 0 {
+            return Err(format!("读取 HTTP 状态码失败（错误码 {}）", GetLastError()));
+        }
+        if !(200..300).contains(&status) {
+            return Err(format!("时间服务 HTTP {status}"));
+        }
         let mut body = Vec::new();
         loop {
             let mut buf = [0u8; 4096];
@@ -317,7 +333,14 @@ fn fetch_body(url: &str, timeout: Duration) -> Result<String, String> {
 #[cfg(not(windows))]
 fn fetch_body(url: &str, timeout: Duration) -> Result<String, String> {
     let out = std::process::Command::new("curl")
-        .args(["-sS", "--max-time", &timeout.as_secs().to_string(), url])
+        .args([
+            "-fsSL",
+            "--max-filesize",
+            "1000000",
+            "--max-time",
+            &timeout.as_secs().to_string(),
+            url,
+        ])
         .output()
         .map_err(|e| format!("启动 curl 失败: {e}"))?;
     if !out.status.success() {
@@ -361,10 +384,15 @@ pub fn verify_signed_token(config: &TimeConfig, body: &str, nonce: &str) -> Resu
     Ok(token.t)
 }
 
+fn make_nonce() -> String {
+    // 16 字节 = 32 位 hex，与协议文档/服务端示例一致。
+    hex::encode(&crate::crypto::random_key()[..16])
+}
+
 /// 获取并验证签名时间令牌。签名覆盖 `"{t}:{nonce}"`。
 pub fn fetch_signed_time(config: &TimeConfig) -> Result<NetworkTime, String> {
     config.validate()?;
-    let nonce = hex::encode(crate::crypto::random_key());
+    let nonce = make_nonce();
     let sep = if config.url.contains('?') { '&' } else { '?' };
     let url = format!("{}{}nonce={}", config.url, sep, nonce);
     let body = fetch_body(&url, Duration::from_secs(3))?;
@@ -1349,6 +1377,19 @@ mod signed_token_tests {
         let mut text = body(&key, 1_760_000_000, nonce);
         text = text.replace("1760000000", "1760000001");
         assert!(verify_signed_token(&config(&key), &text, nonce).is_err());
+    }
+
+    #[test]
+    fn nonce_is_32_hex() {
+        let n = make_nonce();
+        assert_eq!(n.len(), 32);
+        assert!(n.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn rejects_malformed_json() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        assert!(verify_signed_token(&config(&key), "not json", "abc").is_err());
     }
 
     #[test]

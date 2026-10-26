@@ -434,7 +434,10 @@ class BuildTab(QWidget):
         self.spin_time_skew.setRange(30, 3600)
         self.spin_time_skew.setValue(int(self.state.time_max_skew or 300))
         self.spin_time_skew.setSuffix(" 秒")
-        form.addRow("允许时钟偏差", self.spin_time_skew)
+        self.spin_time_skew.setToolTip(
+            "仅用于日志警告：本机时钟可被学生修改，不能作为放行/拒绝依据"
+        )
+        form.addRow("时钟偏差警告阈值", self.spin_time_skew)
         # 改完就同步到 state，保证"保存工程"也会带上时间令牌配置
         self.cb_time_mode.currentIndexChanged.connect(self._sync_time_config)
         self.edit_time_url.textChanged.connect(self._sync_time_config)
