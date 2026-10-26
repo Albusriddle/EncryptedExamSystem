@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -545,13 +546,20 @@ class AnswersTab(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "无法读取收据私钥", str(e))
             return
+        pw, ok = QInputDialog.getText(self, "备份口令", "设置备份口令（至少 8 位，留空=不加密）")
+        if not ok:
+            return
+        pw = pw.strip()
+        if pw and len(pw) < 8:
+            QMessageBox.warning(self, "口令太短", "备份口令至少 8 位。")
+            return
         path, _ = QFileDialog.getSaveFileName(
             self, "备份收据私钥", f"receipt-key-{fingerprint(signer=key)}.pem", "PEM (*.pem)"
         )
         if not path:
             return
         try:
-            export_key(Path(path), key)
+            export_key(Path(path), key, pw or None)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "备份失败", str(e))
             return
@@ -570,18 +578,34 @@ class AnswersTab(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "无法读取收据", str(e))
             return
-        ok, reason = verify_receipt_detailed(data)
-        if not ok and reason == "missing_public_key":
-            try:
-                from app.core.receipt import load_key
+        from app.core.receipt import fingerprint, load_key
 
-                ok, reason = verify_receipt_detailed(data, load_key())
-            except Exception:  # noqa: BLE001
-                pass
+        expected = ""
+        local_key = None
+        try:
+            local_key = load_key()
+            expected = fingerprint(signer=local_key)
+        except FileNotFoundError:
+            pass
+        entered, ok_input = QInputDialog.getText(
+            self,
+            "核对签发人指纹",
+            f"本机收据密钥指纹：{expected or '（无）'}\n"
+            "请输入收据签发人的 16 位指纹（留空=使用本机指纹）：",
+        )
+        if not ok_input:
+            return
+        expected = entered.strip() or expected
+        if not expected:
+            QMessageBox.critical(
+                self, "缺少可信指纹", "没有本机密钥，也没有输入签发人指纹，无法验证。"
+            )
+            return
+        ok, reason = verify_receipt_detailed(data, signer=local_key, expected_fingerprint=expected)
         if not ok:
             QMessageBox.critical(self, "验签失败", f"原因：{reason}")
             return
-        issues = verify_files(data, base_dir=Path(path).parent)
+        issues = verify_files(data, base_dir=Path(path).parent, strict=True)
         if issues:
             QMessageBox.warning(self, "文件已变化", "\n".join(issues[:10]))
             return

@@ -24,11 +24,13 @@ def key_path() -> Path:
     return settings_path().parent / "receipt-key.pem"
 
 
-def load_key(path: Path | None = None) -> Ed25519PrivateKey:
+def load_key(path: Path | None = None, password: str | None = None) -> Ed25519PrivateKey:
     p = path or key_path()
     if not p.is_file():
         raise FileNotFoundError(f"收据私钥不存在：{p}")
-    return serialization.load_pem_private_key(p.read_bytes(), password=None)  # type: ignore[return-value]
+    return serialization.load_pem_private_key(  # type: ignore[return-value]
+        p.read_bytes(), password=password.encode() if password else None
+    )
 
 
 def load_or_create_key(path: Path | None = None) -> Ed25519PrivateKey:
@@ -51,13 +53,22 @@ def load_or_create_key(path: Path | None = None) -> Ed25519PrivateKey:
     return k
 
 
-def export_key(out: Path, signer: Ed25519PrivateKey | None = None) -> Path:
+def export_key(
+    out: Path,
+    signer: Ed25519PrivateKey | None = None,
+    passphrase: str | None = None,
+) -> Path:
     k = signer or load_or_create_key()
+    enc = (
+        serialization.BestAvailableEncryption(passphrase.encode())
+        if passphrase
+        else serialization.NoEncryption()
+    )
     out.write_bytes(
         k.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
+            encryption_algorithm=enc,
         )
     )
     return out
@@ -98,6 +109,8 @@ def build_receipt(
     k = signer or load_or_create_key()
     sheets = []
     for path, sheet in files:
+        if Path(path).suffix.lower() != ".eea":
+            raise ValueError(f"不是答题卡文件：{path}")
         sheets.append(
             {
                 "file": str(path),
@@ -125,7 +138,9 @@ def build_receipt(
 
 
 def verify_receipt_detailed(
-    data: dict[str, Any], signer: Ed25519PrivateKey | None = None
+    data: dict[str, Any],
+    signer: Ed25519PrivateKey | None = None,
+    expected_fingerprint: str | None = None,
 ) -> tuple[bool, str]:
     """返回 (是否通过, 原因)。原因：malformed / missing_public_key / fingerprint_mismatch /
     wrong_key / bad_signature / ok。"""
@@ -143,6 +158,8 @@ def verify_receipt_detailed(
         pub = public_b64(signer)
     else:
         return False, "missing_public_key"
+    if expected_fingerprint and data.get("key_fingerprint") != expected_fingerprint:
+        return False, "untrusted_key"
     if signer is not None and data.get("key_fingerprint"):
         if fingerprint(signer=signer) != data["key_fingerprint"]:
             return False, "wrong_key"
@@ -159,10 +176,14 @@ def verify_receipt(data: dict[str, Any], signer: Ed25519PrivateKey | None = None
     return verify_receipt_detailed(data, signer)[0]
 
 
-def verify_files(data: dict[str, Any], base_dir: Path | None = None) -> list[str]:
+def verify_files(
+    data: dict[str, Any], base_dir: Path | None = None, strict: bool = False
+) -> list[str]:
     """返回问题列表；base_dir 用于回答"文件被移动"的情况。"""
     issues: list[str] = []
+    expected: set[str] = set()
     for s in data.get("sheets", []):
+        expected.add(str(s.get("name") or Path(str(s.get("file", ""))).name))
         p = Path(str(s.get("file", "")))
         if not p.is_file() and base_dir is not None:
             p = Path(base_dir) / str(s.get("name") or p.name)
@@ -172,13 +193,19 @@ def verify_files(data: dict[str, Any], base_dir: Path | None = None) -> list[str
         got = hashlib.sha256(p.read_bytes()).hexdigest()
         if got != s.get("sha256"):
             issues.append(f"哈希不一致（文件被改过）：{p.name}")
+    if strict and base_dir is not None:
+        for extra in sorted(Path(base_dir).glob("*.eea")):
+            if extra.name not in expected:
+                issues.append(f"未签名文件：{extra.name}")
     return issues
 
 
 def verify_package(data: dict[str, Any], package: Path) -> str:
     """返回空串表示包哈希一致；否则返回问题描述。"""
     want = data.get("package_sha256")
-    if not want or not package.is_file():
+    if not want:
         return ""
+    if not package.is_file():
+        return "考试包不存在，无法核对"
     got = hashlib.sha256(package.read_bytes()).hexdigest()
     return "" if got == want else "考试包哈希不一致（包被替换过）"

@@ -86,3 +86,45 @@ def test_receipt_package_hash(tmp_path: Path) -> None:
     assert verify_package(data, pkg) == ""
     pkg.write_bytes(b"other")
     assert "不一致" in verify_package(data, pkg)
+
+
+def test_receipt_trust_anchor(tmp_path: Path) -> None:
+    from app.core.receipt import fingerprint, verify_receipt_detailed
+
+    sheet = tmp_path / "a.eea"
+    sheet.write_bytes(b"sheet")
+    key = Ed25519PrivateKey.generate()
+    data = build_receipt([(sheet, {"student_id": 1, "session_id": 2})], signer=key)
+    ok, reason = verify_receipt_detailed(data, expected_fingerprint="0000000000000000")
+    assert not ok and reason == "untrusted_key"
+    ok, reason = verify_receipt_detailed(data, expected_fingerprint=fingerprint(signer=key))
+    assert ok and reason == "ok"
+
+
+def test_package_missing_is_not_silent(tmp_path: Path) -> None:
+    from app.core.receipt import verify_package
+
+    data = {"package_sha256": "abc"}
+    assert "不存在" in verify_package(data, tmp_path / "missing.exe")
+
+
+def test_strict_files_reports_extra(tmp_path: Path) -> None:
+    from app.core.receipt import verify_files
+
+    sheet = tmp_path / "a.eea"
+    sheet.write_bytes(b"a")
+    key = Ed25519PrivateKey.generate()
+    data = build_receipt([(sheet, {"student_id": 1, "session_id": 2})], signer=key)
+    (tmp_path / "extra.eea").write_bytes(b"extra")
+    issues = verify_files(data, base_dir=tmp_path, strict=True)
+    assert any("未签名文件" in x for x in issues)
+
+
+def test_receipt_rejects_non_eea(tmp_path: Path) -> None:
+    import pytest
+
+    bad = tmp_path / "x.txt"
+    bad.write_text("x", encoding="utf-8")
+    key = Ed25519PrivateKey.generate()
+    with pytest.raises(ValueError):
+        build_receipt([(bad, {"student_id": 1, "session_id": 2})], signer=key)
