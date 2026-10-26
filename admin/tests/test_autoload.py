@@ -33,6 +33,9 @@ def local_appdata(monkeypatch):
     shutil.rmtree(WORK, ignore_errors=True)
     WORK.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("LOCALAPPDATA", str(WORK))
+    from app.ui.app_settings import PROJECT_ENCRYPT, settings
+
+    settings().setValue(PROJECT_ENCRYPT, False)
     yield WORK
 
 
