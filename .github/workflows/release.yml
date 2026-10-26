@@ -94,7 +94,8 @@ jobs:
           # PyInstaller 不会报错，但打出的 exe 一启动就 ModuleNotFoundError。
           # 不装 `-e ./admin`：那需要可用的构建后端，runner 上会失败；
           # 依赖集合与 pyproject 的 dependencies + gui extra 保持一致即可。
-          pip install "pydantic>=2.7" "PySide6>=6.7" pyinstaller
+          pip install "pydantic>=2.7" "PySide6>=6.7" pyinstaller \
+            "argon2-cffi>=25.1" "cryptography>=42"
 
       - name: 打包管理端（文件夹形式）
         shell: bash
