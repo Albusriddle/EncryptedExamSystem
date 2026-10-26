@@ -799,7 +799,7 @@ class BuildTab(QWidget):
             safe_dir, blocked = safe_pin_dir(
                 project_dir_display(), out, settings_path().parent / "projects"
             )
-            emit_pins = safe_dir / f"登录PIN-{stamp}.csv"
+            emit_pins = safe_dir / f"登录PIN-{out.stem}-{stamp}.csv"
             self._pin_path = emit_pins
             if blocked:
                 self._append("⚠ 工程位置在考试包目录内，PIN 表已改存到默认目录")

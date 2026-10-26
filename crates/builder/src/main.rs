@@ -333,10 +333,7 @@ fn export_pins(
         .context("这个包没有 PIN 表（旧包或未启用「每生 PIN 登录」）")?;
     let mut rows: Vec<((u32, u64), String)> = pins.into_iter().collect();
     rows.sort_by_key(|((s, t), _)| (*s, *t));
-    let mut csv = format!(
-        "\u{feff}# package: {}\n场次,学号,PIN\n",
-        package.file_name().unwrap_or_default().to_string_lossy()
-    );
+    let mut csv = String::from("\u{feff}场次,学号,PIN\n");
     for ((sid, stu), pin) in rows {
         csv.push_str(&format!("{sid},{stu},{pin}\n"));
     }
@@ -695,10 +692,7 @@ fn build(req: BuildRequest) -> Result<()> {
         let mut rows: Vec<((u32, u64), String)> =
             map.iter().map(|(k, v)| (*k, v.clone())).collect();
         rows.sort_by_key(|((s, t), _)| (*s, *t));
-        let mut csv = format!(
-            "\u{feff}# package: {}\n场次,学号,PIN\n",
-            out_path.file_name().unwrap_or_default().to_string_lossy()
-        );
+        let mut csv = String::from("\u{feff}场次,学号,PIN\n");
         for ((sid, stu), pin) in rows {
             csv.push_str(&format!("{sid},{stu},{pin}\n"));
         }

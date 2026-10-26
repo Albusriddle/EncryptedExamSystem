@@ -568,7 +568,7 @@ class AnswersTab(QWidget):
         )
 
     def _restore_receipt_key(self) -> None:
-        from app.core.receipt import fingerprint, key_path, load_key
+        from app.core.receipt import export_key, fingerprint, key_path, load_key
 
         src, _ = QFileDialog.getOpenFileName(self, "恢复收据私钥", "", "PEM (*.pem)")
         if not src:
@@ -584,8 +584,8 @@ class AnswersTab(QWidget):
             QMessageBox.critical(self, "恢复失败", f"{src}\n\n{e}")
             return
         try:
-            key_path().parent.mkdir(parents=True, exist_ok=True)
-            Path(key_path()).write_bytes(Path(src).read_bytes())
+            # 统一写回本机可用的未加密 PEM；否则后续 load_key() 没有口令会失败
+            export_key(key_path(), key, None)
         except OSError as e:
             QMessageBox.critical(self, "恢复失败", str(e))
             return
@@ -611,8 +611,9 @@ class AnswersTab(QWidget):
         try:
             local_key = load_key()
             expected = fingerprint(signer=local_key)
-        except FileNotFoundError:
-            pass
+        except Exception:  # noqa: BLE001 - 加密/损坏/丢失都退化为手输指纹
+            local_key = None
+            expected = ""
         entered, ok_input = QInputDialog.getText(
             self,
             "核对签发人指纹",
