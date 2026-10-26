@@ -396,7 +396,7 @@ class BuildTab(QWidget):
         from app.ui.app_settings import PROJECT_ENCRYPT, settings
 
         self.chk_encrypt = QCheckBox("加密保存工程（含标准答案，建议开启）")
-        self.chk_encrypt.setChecked(settings().value(PROJECT_ENCRYPT, False, type=bool))
+        self.chk_encrypt.setChecked(settings().value(PROJECT_ENCRYPT, True, type=bool))
         self.chk_encrypt.toggled.connect(lambda on: settings().setValue(PROJECT_ENCRYPT, bool(on)))
         form.addRow("工程加密", self.chk_encrypt)
 

@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -389,7 +391,14 @@ class ProjectState:
             from app.core import secure
 
             raw = secure.encrypt_project(raw, passphrase)
-        path.write_bytes(raw)
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_bytes(raw)
+            if path.exists():
+                shutil.copy2(path, path.with_name(path.name + ".bak"))
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     @classmethod
     def load(cls, path: Path, passphrase: str | None = None) -> ProjectState:

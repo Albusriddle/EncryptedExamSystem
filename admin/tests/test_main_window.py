@@ -58,6 +58,7 @@ def test_change_marks_dirty_and_save_clears_it(qapp, tmp_path, monkeypatch) -> N
 
         from PySide6.QtWidgets import QFileDialog
 
+        win.build_tab.chk_encrypt.setChecked(False)
         target = tmp_path / "p.json"
         monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
         win.save_project()
@@ -100,5 +101,40 @@ def test_save_project_encrypted_when_checkbox(qapp, tmp_path, monkeypatch) -> No
         win.save_project()
         assert target.read_bytes().startswith(secure.MAGIC_PROJECT)
         assert ProjectState.load(target, "pw-123").students == []
+    finally:
+        win.deleteLater()
+
+
+def test_encrypted_save_forces_eesproj_suffix(qapp, tmp_path, monkeypatch) -> None:
+    from PySide6.QtWidgets import QFileDialog
+
+    win = MainWindow()
+    try:
+        win.build_tab.chk_encrypt.setChecked(True)
+        monkeypatch.setattr(win, "_ask_passphrase", lambda *a, **k: "long-enough-pw")
+        target = tmp_path / "p.json"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), "JSON"))
+        win.save_project()
+        assert (tmp_path / "p.eesproj").is_file()
+        assert not target.exists()
+    finally:
+        win.deleteLater()
+
+
+def test_on_built_respects_encrypt_checkbox(qapp, tmp_path, monkeypatch) -> None:
+    from app.core.state import ProjectState
+    from app.ui.app_settings import PROJECT_DIR, settings
+
+    win = MainWindow()
+    try:
+        settings().setValue(PROJECT_DIR, str(tmp_path))
+        win.build_tab.chk_encrypt.setChecked(False)
+        out = tmp_path / "out" / "包.exe"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"x")
+        win._on_built(str(out))
+        assert win.project_path is not None
+        # 明文工程：不带口令也能读
+        assert ProjectState.load(win.project_path).students == []
     finally:
         win.deleteLater()

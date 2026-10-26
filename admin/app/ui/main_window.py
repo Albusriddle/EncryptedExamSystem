@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.branding import branding
-from app.core.audit import AuditLog
+from app.core.audit import AuditLog, verify_file
 from app.core.models import Manifest
 from app.core.state import ProjectLocked, ProjectState
 from app.ui.app_settings import (
@@ -111,6 +111,11 @@ class MainWindow(QMainWindow):
         act_check.setToolTip("一次性列出所有会阻止打包的问题")
         act_check.triggered.connect(self.check_config)
         bar.addAction(act_check)
+
+        act_audit = QAction("审计日志…", self)
+        act_audit.setToolTip("查看最近一份审计日志并校验哈希链")
+        act_audit.triggered.connect(self.show_audit)
+        bar.addAction(act_audit)
 
         # 水印：紧接在「检查配置」右侧。
         # 用可伸缩的 spacer 把后面的控件推到最右，窗口放大时水印仍在右边。
@@ -262,6 +267,9 @@ class MainWindow(QMainWindow):
             getattr(getattr(self, "build_tab", None), "chk_encrypt", None)
             and self.build_tab.chk_encrypt.isChecked()
         )
+        if want_encrypt and Path(path).suffix.lower() == ".json":
+            # 加密后是二进制，不能伪装成 .json
+            path = str(Path(path).with_suffix(".eesproj"))
         if want_encrypt and self.project_passphrase is None:
             pw = self._ask_passphrase("设置工程口令", confirm=True)
             if pw is None:
@@ -304,6 +312,9 @@ class MainWindow(QMainWindow):
                 return None
             if not pw:
                 QMessageBox.warning(self, title, "口令不能为空。")
+                continue
+            if confirm and len(pw) < 8:
+                QMessageBox.warning(self, title, "口令至少 8 位。")
                 continue
             if confirm:
                 pw2, ok2 = QInputDialog.getText(
@@ -361,14 +372,19 @@ class MainWindow(QMainWindow):
         try:
             state = ProjectState.load(path)
         except ProjectLocked:
-            pw = self._ask_passphrase("工程已加密")
-            if pw is None:
-                return False
-            try:
-                state = ProjectState.load(path, pw)
-            except Exception as e:  # noqa: BLE001
-                QMessageBox.critical(self, "打开失败", f"{path}\n\n{e}")
-                return False
+            for attempt in range(3):
+                title = "工程已加密" if attempt == 0 else "口令错误，请重试"
+                pw = self._ask_passphrase(title)
+                if pw is None:
+                    return False
+                try:
+                    state = ProjectState.load(path, pw)
+                    break
+                except Exception as e:  # noqa: BLE001
+                    if attempt == 2:
+                        QMessageBox.critical(self, "打开失败", f"{path}\n\n{e}")
+                        return False
+                    QMessageBox.warning(self, "口令错误", "口令不正确，请重试（最多 3 次）。")
             self.project_passphrase = pw
             settings().setValue(PROJECT_ENCRYPT, True)
         except Exception as e:  # noqa: BLE001 - 展示给用户，不吞掉
@@ -469,14 +485,16 @@ class MainWindow(QMainWindow):
 
         try:
             enc = getattr(self.build_tab, "chk_encrypt", None)
-            if enc is not None and enc.isChecked():
-                if self.project_passphrase is None:
-                    pw = self._ask_passphrase("设置工程口令", confirm=True)
-                    if pw is None:
-                        self.build_tab.log_line("⚠ 未设置工程口令，本次没有保存工程")
-                        return
-                    self.project_passphrase = pw
-            self.state.save(proj, self.project_passphrase)
+            want_encrypt = bool(enc is not None and enc.isChecked())
+            if want_encrypt and self.project_passphrase is None:
+                pw = self._ask_passphrase("设置工程口令", confirm=True)
+                if pw is None:
+                    self.build_tab.log_line("⚠ 未设置工程口令，本次没有保存工程")
+                    return
+                self.project_passphrase = pw
+            if not want_encrypt:
+                self.project_passphrase = None
+            self.state.save(proj, self.project_passphrase if want_encrypt else None)
         except Exception as e:  # noqa: BLE001 - 展示给用户
             self.build_tab.log_line(f"✗ 工程保存失败：{proj}（{e}）")
             QMessageBox.warning(self, "工程自动保存失败", f"{proj}\n\n{e}")
@@ -510,6 +528,26 @@ class MainWindow(QMainWindow):
             from PySide6.QtGui import QDesktopServices
 
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(proj.parent)))
+
+    def show_audit(self) -> None:
+        files = sorted(self._audit_dir().glob("audit-*.jsonl"))
+        if not files:
+            QMessageBox.information(self, "没有审计日志", "当前工程还没有审计记录。")
+            return
+        path = files[-1]
+        ok = verify_file(path)
+        box = QMessageBox(self)
+        box.setWindowTitle("审计日志")
+        box.setIcon(QMessageBox.Icon.Information if ok else QMessageBox.Icon.Warning)
+        box.setText(f"审计日志：\n{path}")
+        box.setInformativeText("哈希链校验：通过" if ok else "哈希链校验：**断链/被改过**")
+        open_btn = box.addButton("打开目录", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("确定", QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            from PySide6.QtGui import QDesktopServices
+
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
 
     def open_projects_dir(self) -> None:
         from PySide6.QtGui import QDesktopServices

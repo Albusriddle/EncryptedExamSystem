@@ -14,10 +14,14 @@ from argon2.low_level import Type, hash_secret_raw
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-MAGIC_KEY = b"EESKEY01"
-MAGIC_PROJECT = b"EESPROJ2"
+MAGIC_KEY = b"EESKEY02"
+MAGIC_PROJECT = b"EESPROJ3"
+# v0.10.0 旧格式：magic|salt|nonce|ct，KDF 参数固定
+MAGIC_KEY_OLD = b"EESKEY01"
+MAGIC_PROJECT_OLD = b"EESPROJ2"
 SALT_LEN = 16
 NONCE_LEN = 12
+HEADER_LEN = 1 + 2 + 4 + 1  # version + time + memory + parallel
 
 # 与 Rust 端一致的强度；教师机通常不慢，3 次迭代约 0.1–0.3s
 ARGON2_TIME = 3
@@ -41,26 +45,73 @@ def _derive(passphrase: str, salt: bytes) -> bytes:
     )
 
 
+def _derive_with(passphrase: str, salt: bytes, time_cost: int, memory: int, parallel: int) -> bytes:
+    if not passphrase:
+        raise ValueError("口令不能为空")
+    return hash_secret_raw(
+        secret=passphrase.encode("utf-8"),
+        salt=salt,
+        time_cost=time_cost,
+        memory_cost=memory,
+        parallelism=parallel,
+        hash_len=32,
+        type=Type.ID,
+    )
+
+
 def seal(magic: bytes, passphrase: str, plaintext: bytes) -> bytes:
     salt = os.urandom(SALT_LEN)
     nonce = os.urandom(NONCE_LEN)
     key = _derive(passphrase, salt)
-    ct = AESGCM(key).encrypt(nonce, plaintext, magic)
-    return magic + salt + nonce + ct
+    header = (
+        magic
+        + bytes([1])
+        + ARGON2_TIME.to_bytes(2, "big")
+        + ARGON2_MEMORY.to_bytes(4, "big")
+        + bytes([ARGON2_PARALLEL])
+    )
+    ct = AESGCM(key).encrypt(nonce, plaintext, header)
+    return header + salt + nonce + ct
 
 
-def unseal(magic: bytes, passphrase: str, blob: bytes) -> bytes:
-    if not blob.startswith(magic) or len(blob) < len(magic) + SALT_LEN + NONCE_LEN + 16:
+def _unseal_new(magic: bytes, passphrase: str, blob: bytes) -> bytes:
+    if len(blob) < len(magic) + HEADER_LEN + SALT_LEN + NONCE_LEN + 16:
         raise ValueError("文件格式不正确或已损坏")
     off = len(magic)
+    version = blob[off]
+    if version != 1:
+        raise ValueError(f"不支持的加密文件版本：{version}")
+    t = int.from_bytes(blob[off + 1 : off + 3], "big")
+    m = int.from_bytes(blob[off + 3 : off + 7], "big")
+    p = blob[off + 7]
+    off += HEADER_LEN
     salt = blob[off : off + SALT_LEN]
     nonce = blob[off + SALT_LEN : off + SALT_LEN + NONCE_LEN]
     ct = blob[off + SALT_LEN + NONCE_LEN :]
-    key = _derive(passphrase, salt)
+    key = _derive_with(passphrase, salt, t, m, p)
     try:
-        return AESGCM(key).decrypt(nonce, ct, magic)
+        return AESGCM(key).decrypt(nonce, ct, magic + blob[len(magic) : off])
     except InvalidTag as e:
         raise ValueError("口令错误或文件已损坏") from e
+
+
+def unseal(magic: bytes, passphrase: str, blob: bytes) -> bytes:
+    old = {MAGIC_KEY: MAGIC_KEY_OLD, MAGIC_PROJECT: MAGIC_PROJECT_OLD}.get(magic)
+    if blob.startswith(magic):
+        return _unseal_new(magic, passphrase, blob)
+    if old and blob.startswith(old):
+        if len(blob) < len(old) + SALT_LEN + NONCE_LEN + 16:
+            raise ValueError("文件格式不正确或已损坏")
+        off = len(old)
+        salt = blob[off : off + SALT_LEN]
+        nonce = blob[off + SALT_LEN : off + SALT_LEN + NONCE_LEN]
+        ct = blob[off + SALT_LEN + NONCE_LEN :]
+        key = _derive(passphrase, salt)
+        try:
+            return AESGCM(key).decrypt(nonce, ct, old)
+        except InvalidTag as e:
+            raise ValueError("口令错误或文件已损坏") from e
+    raise ValueError("文件格式不正确或已损坏")
 
 
 def backup_master_key(master_hex: str, path: Path, passphrase: str) -> None:
@@ -77,7 +128,7 @@ def restore_master_key(path: Path, passphrase: str) -> str:
 
 
 def is_encrypted_project(data: bytes) -> bool:
-    return data.startswith(MAGIC_PROJECT)
+    return data.startswith(MAGIC_PROJECT) or data.startswith(MAGIC_PROJECT_OLD)
 
 
 def encrypt_project(data: bytes, passphrase: str) -> bytes:
