@@ -40,9 +40,9 @@ use crate::model::Session;
 pub const MAGIC: &[u8; 8] = b"EXAMPKG3";
 /// 尾部魔数，用于从 exe 末尾定位 payload。
 pub const MAGIC_TAIL: &[u8; 8] = b"EXAMTAIL";
-/// 当前格式版本。
-pub const VERSION: u32 = 4;
-/// 旧版（v3）仍可读；v4 起信封可带每生 PIN。
+/// 当前格式版本。v5 起可携带签名时间令牌；普通包仍写 v4。
+pub const VERSION: u32 = 5;
+/// v3–v5 可读；v5 仅用于 time.mode != off 的包（旧客户端最高 v4）。
 pub const MIN_SUPPORTED_VERSION: u32 = 3;
 
 /// 密钥区魔数：标记"这个包内嵌了 K_manifest"。
@@ -451,8 +451,15 @@ pub fn build_payload_with_options(
         }
         None => None,
     };
+    // 只有启用时间令牌的包才需要 v5；普通包继续写 v4，避免无谓地
+    // 把旧学生端全部挡在门外。旧客户端看到 v5 会明确报版本不支持。
+    let version = if time.is_some_and(|t| t.mode != "off") {
+        VERSION
+    } else {
+        4
+    };
     let header = Header {
-        version: VERSION,
+        version,
         salt: hex::encode(salt),
         kdf,
         sessions: session_headers,
@@ -482,7 +489,7 @@ pub fn build_payload_with_options(
     let key_len = u32::try_from(key_area.len())
         .map_err(|_| ContainerError::Format(format!("密钥区过大（{} 字节）", key_area.len())))?;
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&version.to_le_bytes());
     out.extend_from_slice(&header_len.to_le_bytes());
     out.extend_from_slice(&header_ct);
     out.extend_from_slice(&key_len.to_le_bytes());
@@ -1208,6 +1215,35 @@ mod tests {
             "答案必须被剥离"
         );
         assert_eq!(data.bank_index[0].total, 50);
+    }
+
+    #[test]
+    fn time_token_packages_are_v5_and_off_packages_stay_v4() {
+        let banks = vec![bank("math", 50)];
+        let sessions = vec![session(1, vec![2021001])];
+        let off = build_payload(&master(), &banks, &sessions, SALT, kdf(), true).unwrap();
+        assert_eq!(u32::from_le_bytes(off[8..12].try_into().unwrap()), 4);
+
+        let time = crate::model::TimeConfig {
+            mode: "require".into(),
+            url: "https://time.example.com/time".into(),
+            pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            max_skew: 300,
+        };
+        let payload = build_payload_with_options(
+            &master(),
+            &banks,
+            &sessions,
+            SALT,
+            kdf(),
+            true,
+            None,
+            Some(&time),
+        )
+        .unwrap();
+        assert_eq!(u32::from_le_bytes(payload[8..12].try_into().unwrap()), 5);
+        let (header, _) = parse_header(&payload, &k_manifest()).unwrap();
+        assert_eq!(header.time.mode, "require");
     }
 
     #[test]

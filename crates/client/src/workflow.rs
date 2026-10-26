@@ -202,22 +202,26 @@ fn run_time_gate(
     #[cfg(not(debug_assertions))]
     let _ = opts.skip_time_gate; // release 下没有这个开关
 
-    let net = if header.time.mode != "off" {
-        match timegate::fetch_signed_time(&header.time) {
+    let net = match header.time.mode.as_str() {
+        "off" => fallback_network_time()?,
+        "prefer" => match timegate::fetch_signed_time(&header.time) {
             Ok(n) => n,
-            Err(e) if header.time.mode == "require" => {
-                return Err(anyhow::anyhow!(
-                    "无法获取签名时间令牌：{e}\n\
-                     本场要求必须验证时间令牌，已拒绝开考。"
-                ));
-            }
             Err(e) => {
                 eprintln!("⚠ 签名时间令牌失败（回退 HTTPS Date）：{e}");
                 fallback_network_time()?
             }
+        },
+        "require" => timegate::fetch_signed_time(&header.time).map_err(|e| {
+            anyhow::anyhow!(
+                "无法获取签名时间令牌：{e}\n\
+                 本场要求必须验证时间令牌，已拒绝开考。"
+            )
+        })?,
+        other => {
+            return Err(anyhow::anyhow!(
+                "包内时间令牌配置无效（mode={other}），拒绝开考。"
+            ));
         }
-    } else {
-        fallback_network_time()?
     };
 
     let decision =
