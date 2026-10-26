@@ -207,6 +207,14 @@ class AnswersTab(QWidget):
         self.btn_absent.setEnabled(False)
         self.btn_absent.clicked.connect(self._show_attendance)
         btns.addWidget(self.btn_absent)
+        self.btn_receipt = QPushButton("签发答题卡收据…")
+        self.btn_receipt.setToolTip("用教师私钥对当前答题卡文件哈希签名，防止收卷后被改")
+        self.btn_receipt.setEnabled(False)
+        self.btn_receipt.clicked.connect(self._issue_receipt)
+        btns.addWidget(self.btn_receipt)
+        self.btn_verify_receipt = QPushButton("验证收据…")
+        self.btn_verify_receipt.clicked.connect(self._verify_receipt)
+        btns.addWidget(self.btn_verify_receipt)
         self.btn_csv = QPushButton("导出原始作答 CSV")
         self.btn_csv.setToolTip("只导出学生原始作答，不含分数；判分请用下方「导出判分结果…」")
         self.btn_csv.clicked.connect(self._export_csv)
@@ -483,6 +491,62 @@ class AnswersTab(QWidget):
         self.status.setText(f"校验完成：{ok} 通过 / {len(self.results) - ok} 失败")
         self.btn_csv.setEnabled(ok > 0)
         self.btn_absent.setEnabled(bool(self.results))
+        self.btn_receipt.setEnabled(ok > 0)
+
+    def _issue_receipt(self) -> None:
+        from app.core.receipt import build_receipt, fingerprint, load_or_create_key
+
+        files = []
+        for path in self.files:
+            r = self.results.get(str(path)) or {}
+            if r.get("ok") and r.get("sheet"):
+                files.append((path, r["sheet"]))
+        if not files:
+            QMessageBox.information(self, "没有可签发的答题卡", "请先完成校验。")
+            return
+        tag = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存答题卡收据", f"答题卡收据-{tag}.json", "收据 (*.json)"
+        )
+        if not path:
+            return
+        try:
+            key = load_or_create_key()
+            data = build_receipt(files, package=str(self.package or ""), key=key)
+            Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "签发失败", str(e))
+            return
+        QMessageBox.information(
+            self,
+            "已签发",
+            f"收据已保存：\n{path}\n\n"
+            f"签名密钥指纹：{fingerprint(key)}\n"
+            "请同时备份私钥（appdata 下 receipt-key.pem）。",
+        )
+
+    def _verify_receipt(self) -> None:
+        from app.core.receipt import load_key, verify_files, verify_receipt
+
+        path, _ = QFileDialog.getOpenFileName(self, "验证收据", "", "收据 (*.json)")
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            key = load_key()
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "无法验证", str(e))
+            return
+        if not verify_receipt(data, key):
+            QMessageBox.critical(self, "验签失败", "收据签名无效（被改过或不是本机密钥签发）。")
+            return
+        issues = verify_files(data)
+        if issues:
+            QMessageBox.warning(self, "文件已变化", "\n".join(issues[:10]))
+        else:
+            QMessageBox.information(
+                self, "验证通过", f"签名有效，{len(data.get('sheets', []))} 份答题卡哈希一致。"
+            )
 
     def _show_attendance(self) -> None:
         from app.ui.attendance_dialog import AttendanceDialog
