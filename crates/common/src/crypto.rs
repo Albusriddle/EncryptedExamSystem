@@ -237,10 +237,16 @@ pub fn session_entry_key(
     session_id: u32,
     salt: &[u8],
     kdf: KdfParams,
+    pin: Option<&str>,
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
-    let mut input = Vec::with_capacity(12);
+    let mut input = Vec::with_capacity(24);
     input.extend_from_slice(&student_id.to_le_bytes());
     input.extend_from_slice(&session_id.to_le_bytes());
+    // 旧包（无 PIN）绝不加任何前缀，保证 v3 包仍能解锁。
+    if let Some(pin) = pin {
+        input.extend_from_slice(b"pin:");
+        input.extend_from_slice(pin.as_bytes());
+    }
     let params = kdf.to_argon2()?;
     let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut out = [0u8; 32];
@@ -324,13 +330,17 @@ mod tests {
     #[test]
     fn session_entry_key_deterministic() {
         let kdf = KdfParams::cheap_for_tests();
-        let a = session_entry_key(2021001, 1, b"salt-123456789012", kdf).unwrap();
-        let b = session_entry_key(2021001, 1, b"salt-123456789012", kdf).unwrap();
+        let a = session_entry_key(2021001, 1, b"salt-123456789012", kdf, None).unwrap();
+        let b = session_entry_key(2021001, 1, b"salt-123456789012", kdf, None).unwrap();
         assert_eq!(*a, *b);
-        let c = session_entry_key(2021002, 1, b"salt-123456789012", kdf).unwrap();
+        let c = session_entry_key(2021002, 1, b"salt-123456789012", kdf, None).unwrap();
         assert_ne!(*a, *c);
-        let d = session_entry_key(2021001, 2, b"salt-123456789012", kdf).unwrap();
+        let d = session_entry_key(2021001, 2, b"salt-123456789012", kdf, None).unwrap();
         assert_ne!(*a, *d);
+        let e = session_entry_key(2021001, 1, b"salt-123456789012", kdf, Some("123456")).unwrap();
+        assert_ne!(*a, *e);
+        let f = session_entry_key(2021001, 1, b"salt-123456789012", kdf, Some("654321")).unwrap();
+        assert_ne!(*e, *f);
     }
 
     /// 生产参数必须明显强于测试参数，防止有人误把 cheap 参数用于发布。
@@ -409,7 +419,7 @@ mod tests {
             m_cost: u32::MAX,
             ..KdfParams::default()
         };
-        let err = session_entry_key(1, 1, b"0123456789abcdef", bad).unwrap_err();
+        let err = session_entry_key(1, 1, b"0123456789abcdef", bad, None).unwrap_err();
         assert!(
             matches!(err, CryptoError::Kdf(_)),
             "应返回 KDF 参数错误: {err}"

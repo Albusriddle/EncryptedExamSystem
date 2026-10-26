@@ -283,3 +283,11 @@ def _tab_build():
     from app.ui import tab_build  # noqa: PLC0415 - 延迟导入，缺 GUI 依赖时只跳过本组用例
 
     return tab_build
+
+
+def test_pin_login_flags(tmp_path: Path) -> None:
+    p = _paths(tmp_path)
+    pins = tmp_path / "pins.csv"
+    cmd = build_command(**p, pin_login=True, emit_pins=pins)
+    assert "--pin-login" in cmd
+    assert cmd[cmd.index("--emit-pins") + 1] == str(pins)

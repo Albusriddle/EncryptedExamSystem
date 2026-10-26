@@ -5,7 +5,7 @@
 //! - **无参数启动** → GUI（学生双击 exe，输入学号即可）
 //! - **有参数启动** → CLI（CI 验收、脚本、调试）
 //!
-//! 两种模式共用 [`workflow::unlock`] 同一套主干逻辑，
+//! 两种模式共用 [`workflow::unlock_with_pin`] 同一套主干逻辑，
 //! 因此 GUI 与学生实际考试走的是**完全相同的代码路径**，
 //! 不存在"GUI 能用但 CLI 挂了"或反过来的情况。
 
@@ -44,6 +44,9 @@ struct Cli {
     /// 在门禁通过后，进一步指定场次（**不能**绕过时间窗）
     #[arg(long)]
     session: Option<u32>,
+    /// 每生登录 PIN（包启用 PIN 登录时必填）
+    #[arg(long)]
+    pin: Option<String>,
     /// 跳过时间门禁。**仅 debug 构建可用**，release 里不存在这个参数。
     #[cfg(debug_assertions)]
     #[arg(long, hide = true)]
@@ -109,7 +112,7 @@ fn main() -> Result<()> {
         #[cfg(not(debug_assertions))]
         skip_time_gate: false,
     };
-    let unlocked = workflow::unlock(cli.student, &opts)?;
+    let unlocked = workflow::unlock_with_pin(cli.student, cli.pin.as_deref(), &opts)?;
     print_result(&unlocked);
     Ok(())
 }

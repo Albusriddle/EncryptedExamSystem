@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QThread, QTimer, Signal
@@ -220,6 +221,8 @@ class BuildWorker(QThread):
         out: Path,
         master_hex: str,
         keyfile: Path | None,
+        pin_login: bool = False,
+        emit_pins: Path | None = None,
     ) -> None:
         super().__init__()
         self.manifest_path = manifest_path
@@ -228,6 +231,8 @@ class BuildWorker(QThread):
         self.out = out
         self.master_hex = master_hex
         self.keyfile = keyfile
+        self.pin_login = pin_login
+        self.emit_pins = emit_pins
         self._proc: subprocess.Popen[str] | None = None
 
     def run(self) -> None:  # noqa: D401 - QThread 约定
@@ -240,6 +245,8 @@ class BuildWorker(QThread):
             stub=self.stub,
             out=self.out,
             keyfile=self.keyfile,
+            pin_login=self.pin_login,
+            emit_pins=self.emit_pins,
         )
         env = build_env(self.master_hex)
 
@@ -392,6 +399,12 @@ class BuildTab(QWidget):
         self.lbl_current.setStyleSheet("color: #888;")
         self.lbl_current.setWordWrap(True)
         form.addRow("当前工程", self.lbl_current)
+
+        self.chk_pin_login = QCheckBox("每生 PIN 登录（生成 6 位 PIN，导出 CSV 发给学生）")
+        self.chk_pin_login.setToolTip(
+            "包内不存 PIN 表；PIN 只写进教师保存的 CSV，学生凭学号+PIN 解锁"
+        )
+        form.addRow("登录方式", self.chk_pin_login)
 
         from app.ui.app_settings import PROJECT_ENCRYPT, settings
 
@@ -770,7 +783,16 @@ class BuildTab(QWidget):
         self.btn_cancel.setEnabled(True)
         self.progress.setVisible(True)
 
-        self.worker = BuildWorker(manifest_path, tmpdir, stub, out, master, keyfile)
+        pin_login = self.chk_pin_login.isChecked()
+        emit_pins = None
+        if pin_login:
+            from app.ui.app_settings import project_dir_display
+
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            emit_pins = project_dir_display() / f"登录PIN-{stamp}.csv"
+        self.worker = BuildWorker(
+            manifest_path, tmpdir, stub, out, master, keyfile, pin_login, emit_pins
+        )
         self.worker.log.connect(self._append)
         self.worker.done.connect(self._on_done)
         # 故意**不清空**主密钥输入框：教师打包完还要用它（复制保存）。

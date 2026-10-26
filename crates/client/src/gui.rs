@@ -1,6 +1,6 @@
 //! 学生端图形界面（egui/eframe）。
 //!
-//! 设计原则：**GUI 只是壳**。所有业务逻辑在 [`crate::workflow::unlock`]，
+//! 设计原则：**GUI 只是壳**。所有业务逻辑在 [`crate::workflow::unlock_with_pin`]，
 //! 这里只负责收集学号、把耗时操作丢到后台线程、把结果画出来。
 //!
 //! ## 为什么用 mpsc 而不是 Arc<Mutex<...>>
@@ -54,6 +54,7 @@ enum Stage {
     /// 等待输入学号
     Idle {
         input: String,
+        pin: String,
         error: Option<String>,
     },
     /// 后台工作中
@@ -163,6 +164,7 @@ impl ExamApp {
         Self {
             stage: Stage::Idle {
                 input: String::new(),
+                pin: String::new(),
                 error: None,
             },
             opts,
@@ -189,13 +191,19 @@ impl ExamApp {
     }
 
     /// 启动后台解锁。
-    fn start_unlock(&mut self, student_id: u64) {
+    fn start_unlock(&mut self, student_id: u64, pin: String) {
         let (tx, rx) = mpsc::channel();
         let opts = self.opts.clone();
         std::thread::spawn(move || {
             // 结果转成 String 错误：anyhow::Error 不是 Send 的友好类型，
             // 跨线程传递用展示文本足够。
-            let result = workflow::unlock(student_id, &opts).map_err(|e| format!("{e:#}"));
+            let pin_arg = if pin.is_empty() {
+                None
+            } else {
+                Some(pin.as_str())
+            };
+            let result =
+                workflow::unlock_with_pin(student_id, pin_arg, &opts).map_err(|e| format!("{e:#}"));
             let _ = tx.send(result);
         });
         self.stage = Stage::Busy {
@@ -283,6 +291,7 @@ impl ExamApp {
             Ok(Err(msg)) => {
                 self.stage = Stage::Idle {
                     input: String::new(),
+                    pin: String::new(),
                     error: Some(msg),
                 };
                 // 回到输入态时重新聚焦，方便学生改学号。
@@ -293,6 +302,7 @@ impl ExamApp {
             Err(TryRecvError::Disconnected) => {
                 self.stage = Stage::Idle {
                     input: String::new(),
+                    pin: String::new(),
                     error: Some("后台线程异常退出（可能是内存不足）".into()),
                 };
                 self.focus_pending = true;
@@ -316,7 +326,7 @@ impl eframe::App for ExamApp {
 
         // 诊断：启动即自动解锁（跳过人工输入学号）
         if let Some(sid) = self.autologin.take() {
-            self.start_unlock(sid);
+            self.start_unlock(sid, String::new());
         }
 
         // 后台工作期间主动请求重绘，否则界面不刷新。
@@ -367,13 +377,13 @@ impl eframe::App for ExamApp {
         // 闭包内只读 `self.stage` 并记录"要做什么"，
         // 真正的状态切换放到闭包外面——否则 `self.start_unlock(...)`
         // 会和 `&mut self.stage` 的借用冲突。
-        let mut submit: Option<String> = None;
+        let mut submit: Option<(String, String)> = None;
         // 焦点标志要在闭包内外传递，先取到局部变量：
         // 闭包里已经 `&mut self.stage`，不能再借 `self.focus_pending`。
         let mut want_focus = self.focus_pending;
 
         egui::CentralPanel::default().show(ctx, |ui| match &mut self.stage {
-            Stage::Idle { input, error } => {
+            Stage::Idle { input, pin, error } => {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
                     // 字体缺失时中文全是方块，此时中文提示也没用——用英文说明。
@@ -400,6 +410,14 @@ impl eframe::App for ExamApp {
                         want_focus = false;
                     }
 
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("登录 PIN（没有则留空）").size(14.0));
+                    ui.add(
+                        egui::TextEdit::singleline(pin)
+                            .hint_text("6 位 PIN")
+                            .desired_width(240.0),
+                    );
+
                     ui.add_space(16.0);
 
                     let clicked = ui
@@ -408,7 +426,7 @@ impl eframe::App for ExamApp {
                     let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
                     if clicked || enter {
-                        submit = Some(input.clone());
+                        submit = Some((input.clone(), pin.clone()));
                     }
 
                     if let Some(e) = error {
@@ -610,20 +628,22 @@ impl eframe::App for ExamApp {
         }
 
         // 闭包结束后再切状态。
-        if let Some(raw) = submit {
+        if let Some((raw, pin)) = submit {
             let trimmed = raw.trim();
             match trimmed.parse::<u64>() {
                 Ok(0) => {
                     self.stage = Stage::Idle {
                         input: raw,
+                        pin,
                         error: Some("学号必须是正整数".into()),
                     };
                     self.focus_pending = true;
                 }
-                Ok(sid) => self.start_unlock(sid),
+                Ok(sid) => self.start_unlock(sid, pin),
                 Err(_) => {
                     self.stage = Stage::Idle {
                         input: raw,
+                        pin,
                         error: Some("学号必须是纯数字".into()),
                     };
                     self.focus_pending = true;

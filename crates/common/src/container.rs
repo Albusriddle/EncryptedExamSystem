@@ -144,6 +144,9 @@ pub struct SessionHeader {
     pub envelopes: Vec<Envelope>,
 }
 
+/// (session_id, student_id) -> 6 位 PIN
+pub type PinMap = std::collections::HashMap<(u32, u64), String>;
+
 /// header 明文结构（加密前）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Header {
@@ -151,6 +154,10 @@ pub struct Header {
     pub salt: String,
     pub kdf: KdfParams,
     pub sessions: Vec<SessionHeader>,
+    /// 每生 PIN 表（用 master 派生的密钥加密）。学生端没有 master，
+    /// 因此即使提取了 K_manifest 也读不到 PIN；教师校验时用 master 解。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pins_ct: Option<String>,
 }
 
 /// 题库元信息（解锁后可见）。
@@ -215,6 +222,20 @@ pub fn build_payload(
     salt: &[u8],
     kdf: KdfParams,
     embed_k_manifest: bool,
+) -> Result<Vec<u8>, ContainerError> {
+    build_payload_with_pins(master, banks, sessions, salt, kdf, embed_k_manifest, None)
+}
+
+/// 带每生 PIN 的构建入口。`pins` 的键是 `(session_id, student_id)`；
+/// 为 `None` 时保持旧的"只凭学号解锁"行为。
+pub fn build_payload_with_pins(
+    master: &[u8; 32],
+    banks: &[crate::model::ExamBank],
+    sessions: &[Session],
+    salt: &[u8],
+    kdf: KdfParams,
+    embed_k_manifest: bool,
+    pins: Option<&PinMap>,
 ) -> Result<Vec<u8>, ContainerError> {
     // 1. 剥离答案与判分材料。
     //
@@ -359,7 +380,10 @@ pub fn build_payload(
             .students
             .par_iter()
             .map(|&sid| -> Result<Envelope, ContainerError> {
-                let entry_key = crypto::session_entry_key(sid, s.session_id, salt, kdf)?;
+                let pin = pins
+                    .and_then(|m| m.get(&(s.session_id, sid)))
+                    .map(String::as_str);
+                let entry_key = crypto::session_entry_key(sid, s.session_id, salt, kdf, pin)?;
                 let inner = EntryPayload {
                     student_id: sid,
                     session_secret: hex::encode(*session_secret),
@@ -386,11 +410,24 @@ pub fn build_payload(
 
     // 4. header 加密。K_manifest 用空 salt 派生（header 里才带真实 salt）。
     let k_manifest = manifest_key(master);
+    let pins_ct = match pins {
+        Some(map) => {
+            let mut plain = std::collections::BTreeMap::new();
+            for ((sid, stu), pin) in map {
+                plain.insert(format!("{sid}:{stu}"), pin.clone());
+            }
+            let key = crypto::hkdf_derive(master, salt, "student-pins");
+            let ct = crypto::encrypt(&key, &serde_json::to_vec(&plain)?, b"student-pins")?;
+            Some(base64_encode(&ct))
+        }
+        None => None,
+    };
     let header = Header {
         version: VERSION,
         salt: hex::encode(salt),
         kdf,
         sessions: session_headers,
+        pins_ct,
     };
     let header_plain = serde_json::to_vec(&header)?;
     let header_ct = crypto::encrypt(&k_manifest, &header_plain, b"header-v3")?;
@@ -863,7 +900,19 @@ pub fn try_unlock_session(
     student_id: u64,
     salt: &[u8],
 ) -> Result<Option<UnlockedSession>, ContainerError> {
-    let entry_key = crypto::session_entry_key(student_id, sh.session_id, salt, header.kdf)?;
+    try_unlock_session_with_pin(sh, header, blob_area, student_id, salt, None)
+}
+
+/// 带 PIN 的解锁入口；`pin=None` 等价于旧行为。
+pub fn try_unlock_session_with_pin(
+    sh: &SessionHeader,
+    header: &Header,
+    blob_area: &[u8],
+    student_id: u64,
+    salt: &[u8],
+    pin: Option<&str>,
+) -> Result<Option<UnlockedSession>, ContainerError> {
+    let entry_key = crypto::session_entry_key(student_id, sh.session_id, salt, header.kdf, pin)?;
     let tag = crypto::envelope_tag(&entry_key);
 
     // 按标签直接定位，只对命中的信封做一次 AEAD 解密。
@@ -916,6 +965,34 @@ pub fn decrypt_data(
     let plain = crypto::decrypt(&bank_key, data_ct, b"session-data")?;
     let data: PayloadData = serde_json::from_slice(&plain)?;
     Ok(data)
+}
+
+/// 教师侧（builder）用 master 解出每生 PIN 表。
+pub fn decrypt_pins(master: &[u8; 32], header: &Header) -> Result<Option<PinMap>, ContainerError> {
+    let Some(b64) = &header.pins_ct else {
+        return Ok(None);
+    };
+    let salt = hex::decode(&header.salt)
+        .map_err(|e| ContainerError::Format(format!("header.salt hex: {e}")))?;
+    let key = crypto::hkdf_derive(master, &salt, "student-pins");
+    let raw =
+        base64_decode(b64).map_err(|e| ContainerError::Format(format!("PIN 表 base64: {e}")))?;
+    let plain = crypto::decrypt(&key, &raw, b"student-pins")?;
+    let raw: std::collections::BTreeMap<String, String> = serde_json::from_slice(&plain)?;
+    let mut out = std::collections::HashMap::new();
+    for (k, v) in raw {
+        let (s, t) = k
+            .split_once(':')
+            .ok_or_else(|| ContainerError::Format("PIN 表键格式错误".into()))?;
+        let sid: u32 = s
+            .parse()
+            .map_err(|_| ContainerError::Format("PIN 场次号错误".into()))?;
+        let stu: u64 = t
+            .parse()
+            .map_err(|_| ContainerError::Format("PIN 学号错误".into()))?;
+        out.insert((sid, stu), v);
+    }
+    Ok(Some(out))
 }
 
 fn base64_encode(b: &[u8]) -> String {
@@ -1356,6 +1433,49 @@ mod tests {
         .unwrap();
         let sfx = append_payload_to_exe(b"FAKE_STUB_BYTES_1234567890", &payload).unwrap();
         assert_eq!(extract_payload(&sfx).unwrap(), payload.as_slice());
+    }
+
+    #[test]
+    fn pin_envelopes_require_correct_pin() {
+        use std::collections::HashMap;
+
+        let mut pins = HashMap::new();
+        pins.insert((1u32, 1u64), "123456".to_string());
+        let payload = build_payload_with_pins(
+            &master(),
+            &[bank("math", 10)],
+            &[session(1, vec![1])],
+            SALT,
+            kdf(),
+            true,
+            Some(&pins),
+        )
+        .unwrap();
+        let (header, blob) = parse_header(&payload, &k_manifest()).unwrap();
+        let salt = hex::decode(&header.salt).unwrap();
+        let sh = &header.sessions[0];
+
+        assert!(
+            try_unlock_session_with_pin(sh, &header, blob, 1, &salt, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            try_unlock_session_with_pin(sh, &header, blob, 1, &salt, Some("000000"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            try_unlock_session_with_pin(sh, &header, blob, 1, &salt, Some("123456"))
+                .unwrap()
+                .is_some()
+        );
+
+        let recovered = decrypt_pins(&master(), &header).unwrap().unwrap();
+        assert_eq!(
+            recovered.get(&(1u32, 1u64)).map(String::as_str),
+            Some("123456")
+        );
     }
 
     #[test]

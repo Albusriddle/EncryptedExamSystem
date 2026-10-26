@@ -31,6 +31,8 @@ def build_command(
     out: Path,
     keyfile: Path | None = None,
     force: bool = True,
+    pin_login: bool = False,
+    emit_pins: Path | None = None,
 ) -> list[str]:
     """拼出 `exam-builder build` 的完整 argv。
 
@@ -52,6 +54,10 @@ def build_command(
     ]
     if force:
         cmd.append("--force")
+    if pin_login:
+        cmd.append("--pin-login")
+        if emit_pins is not None:
+            cmd += ["--emit-pins", str(emit_pins)]
     if keyfile is not None:
         cmd += ["--emit-keyfile", str(keyfile)]
     return cmd

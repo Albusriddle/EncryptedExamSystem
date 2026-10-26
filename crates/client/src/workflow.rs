@@ -2,7 +2,7 @@
 //!
 //! 抽出来的目的有三个：
 //!
-//! 1. GUI 只是 `thread::spawn(move || unlock(...))`，不必重复实现流程；
+//! 1. GUI 只是 `thread::spawn(move || unlock_with_pin(...))`，不必重复实现流程；
 //! 2. 可以脱离 UI 直接测试（`scripts/verify-embed.sh` 走的就是 CLI 路径）；
 //! 3. 顺序被固化在这里，**时间门禁一定在派生入场密钥之前**，不会因为
 //!    某个界面的疏忽而跳过。
@@ -79,7 +79,8 @@ pub struct Unlocked {
 /// ```text
 /// 读 payload → 解 header → 【时间门禁】 → 解锁信封 → 解密题库 → 确定性抽题
 /// ```
-pub fn unlock(student_id: u64, opts: &UnlockOpts) -> Result<Unlocked> {
+/// 带每生 PIN 的解锁；`pin=None` 等价于旧包（只凭学号）。
+pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) -> Result<Unlocked> {
     // 1. 读自身 payload。
     let exe_path = match &opts.package {
         Some(p) => p.clone(),
@@ -108,9 +109,10 @@ pub fn unlock(student_id: u64, opts: &UnlockOpts) -> Result<Unlocked> {
         .with_context(|| format!("内部错误：门禁返回了不存在的场次 {session_id}"))?;
 
     // 4. 解锁：Argon2id(学号, 场次, salt) → tag → 信封。
-    let unlocked = container::try_unlock_session(session, &header, blob_area, student_id, &salt)
-        .context("解锁失败（包损坏或 KDF 参数异常）")?
-        .with_context(|| format!("学号 {student_id} 不在场次 {session_id} 的名单中"))?;
+    let unlocked =
+        container::try_unlock_session_with_pin(session, &header, blob_area, student_id, &salt, pin)
+            .context("解锁失败（包损坏或 KDF 参数异常）")?
+            .with_context(|| format!("学号 {student_id} 不在场次 {session_id} 的名单中"))?;
 
     // 5. 解密题库。
     let data = container::decrypt_data(&unlocked.session_secret, &salt, &unlocked.data_ct)

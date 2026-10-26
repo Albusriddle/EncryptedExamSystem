@@ -45,6 +45,12 @@ enum Cmd {
         /// 名单保密形同虚设。这个开关存在的唯一目的是让测试不必等 91ms/人。
         #[arg(long)]
         allow_weak_kdf: bool,
+        /// 每生 PIN 登录：为每个学生生成 6 位 PIN，信封用 PIN 派生密钥。
+        #[arg(long)]
+        pin_login: bool,
+        /// PIN 导出 CSV（pin_login 时必填，教师发给学生）。
+        #[arg(long, requires = "pin_login")]
+        emit_pins: Option<PathBuf>,
         /// 允许覆盖已存在的输出文件。
         ///
         /// 默认拒绝：旧实现直接覆盖，教师可能把上一次的包（连同上一场数据）
@@ -186,7 +192,7 @@ fn verify_answer_sheet(
     // L3：与包交叉校验
     let mut binding: Option<bool> = None;
     if let Some(pkg) = package {
-        match check_binding(pkg, &sheet, &k_manifest) {
+        match check_binding(pkg, &sheet, &k_manifest, &master) {
             Ok(true) => binding = Some(true),
             Ok(false) => {
                 emit_result(
@@ -243,6 +249,7 @@ fn check_binding(
     package: &std::path::Path,
     sheet: &common::answer_sheet::AnswerSheet,
     k_manifest: &[u8; 32],
+    master: &[u8; 32],
 ) -> Result<bool> {
     use common::picker;
 
@@ -257,14 +264,26 @@ fn check_binding(
         .iter()
         .find(|s| s.session_id == sheet.session_id)
         .with_context(|| format!("包内没有场次 {}", sheet.session_id))?;
-    let unlocked = container::try_unlock_session(session, &header, blob, sheet.student_id, &salt)
-        .context("解锁信封失败")?
-        .with_context(|| {
-            format!(
-                "学号 {} 不在场次 {} 的名单中",
-                sheet.student_id, sheet.session_id
-            )
-        })?;
+    let pins = container::decrypt_pins(master, &header).context("解密 PIN 表")?;
+    let pin = pins
+        .as_ref()
+        .and_then(|m| m.get(&(sheet.session_id, sheet.student_id)))
+        .map(String::as_str);
+    let unlocked = container::try_unlock_session_with_pin(
+        session,
+        &header,
+        blob,
+        sheet.student_id,
+        &salt,
+        pin,
+    )
+    .context("解锁信封失败")?
+    .with_context(|| {
+        format!(
+            "学号 {} 不在场次 {} 的名单中",
+            sheet.student_id, sheet.session_id
+        )
+    })?;
     let data = container::decrypt_data(&unlocked.session_secret, &salt, &unlocked.data_ct)
         .context("解密题库失败")?;
     let paper = picker::generate_paper_ranged(
@@ -340,6 +359,8 @@ fn main() -> Result<()> {
             master_file,
             emit_keyfile,
             no_embed_key,
+            pin_login,
+            emit_pins,
         } => {
             let key = resolve_master(master, master_file)?;
             build(BuildRequest {
@@ -352,6 +373,8 @@ fn main() -> Result<()> {
                 master_hex: key,
                 emit_keyfile,
                 embed_key: !no_embed_key,
+                pin_login,
+                emit_pins,
             })?;
         }
         Cmd::Verify {
@@ -407,6 +430,8 @@ struct BuildRequest {
     master_hex: String,
     emit_keyfile: Option<PathBuf>,
     embed_key: bool,
+    pin_login: bool,
+    emit_pins: Option<PathBuf>,
 }
 
 fn build(req: BuildRequest) -> Result<()> {
@@ -420,6 +445,8 @@ fn build(req: BuildRequest) -> Result<()> {
         master_hex,
         emit_keyfile,
         embed_key,
+        pin_login,
+        emit_pins,
     } = req;
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("读取清单 {}", manifest_path.display()))?;
@@ -522,13 +549,35 @@ fn build(req: BuildRequest) -> Result<()> {
         println!("   参考：m=65536/t=3 时单次约 91ms；缓存命中前请耐心等待，不要中断。");
     }
 
-    let payload = container::build_payload(
+    let pins = if pin_login {
+        use rand::Rng;
+        let mut map = std::collections::HashMap::new();
+        let mut csv = String::from("\u{feff}场次,学号,PIN\n");
+        for s in &manifest.sessions {
+            for &sid in &s.students {
+                let pin = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
+                map.insert((s.session_id, sid), pin.clone());
+                csv.push_str(&format!("{},{},{}\n", s.session_id, sid, pin));
+            }
+        }
+        let path = emit_pins
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--pin-login 必须配合 --emit-pins 导出 PIN 表"))?;
+        std::fs::write(path, csv).with_context(|| format!("写入 PIN 表 {}", path.display()))?;
+        println!("PIN 表已导出：{}", path.display());
+        Some(map)
+    } else {
+        None
+    };
+
+    let payload = container::build_payload_with_pins(
         &master,
         &banks,
         &manifest.sessions,
         &salt,
         manifest.kdf,
         embed_key,
+        pins.as_ref(),
     )
     .context("构建 payload")?;
     let stub =
@@ -770,6 +819,8 @@ mod tests {
             master_hex: master.to_string(),
             emit_keyfile: None,
             embed_key: true,
+            pin_login: false,
+            emit_pins: None,
         })
         .unwrap();
 
