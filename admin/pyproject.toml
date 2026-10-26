@@ -1,10 +1,12 @@
 [project]
 name = "exam-admin"
-version = "0.9.3"
+version = "0.10.0"
 license = { text = "Apache-2.0" }
 description = "保密考试系统管理端"
 requires-python = ">=3.11"
 dependencies = [
+    "argon2-cffi>=25.1.0",
+    "cryptography>=50.0.2",
     "pydantic>=2.7",
 ]
 

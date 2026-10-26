@@ -25,7 +25,9 @@ from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QFileDialog,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QSizePolicy,
@@ -34,11 +36,13 @@ from PySide6.QtWidgets import (
 )
 
 from app.branding import branding
+from app.core.audit import AuditLog
 from app.core.models import Manifest
-from app.core.state import ProjectState
+from app.core.state import ProjectLocked, ProjectState
 from app.ui.app_settings import (
     LAST_PROJECT,
     PROJECT_DIR,
+    PROJECT_ENCRYPT,
     active_projects_dir,
     project_dir_display,
     projects_dir,
@@ -63,6 +67,7 @@ class MainWindow(QMainWindow):
         #: 教师被问烦了就会无脑点"是"，真正该拦的时候反而拦不住。
         self._dirty = False
         self._config_bad = False
+        self.project_passphrase: str | None = None
 
         self.setWindowTitle(self._window_title())
         self.resize(1080, 760)
@@ -194,8 +199,10 @@ class MainWindow(QMainWindow):
             return
         self.state = ProjectState()
         self.project_path = None
+        self.project_passphrase = None
         self._dirty = False
         self._config_bad = False
+        self.project_passphrase: str | None = None
         note = self._ensure_project_dir()
         self._reload_tabs()
         self.statusBar().showMessage(note or "已新建工程", 8000)
@@ -251,13 +258,25 @@ class MainWindow(QMainWindow):
             )
             if ret != QMessageBox.StandardButton.Yes:
                 return
+        want_encrypt = bool(
+            getattr(getattr(self, "build_tab", None), "chk_encrypt", None)
+            and self.build_tab.chk_encrypt.isChecked()
+        )
+        if want_encrypt and self.project_passphrase is None:
+            pw = self._ask_passphrase("设置工程口令", confirm=True)
+            if pw is None:
+                return
+            self.project_passphrase = pw
+        if not want_encrypt:
+            self.project_passphrase = None
         try:
-            self.state.save(Path(path))
+            self.state.save(Path(path), self.project_passphrase)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "保存失败", str(e))
             return
         self.project_path = Path(path)
         self._dirty = False
+        self.audit("save_project", path=str(path), encrypted=bool(self.project_passphrase))
         st = settings()
         st.setValue(LAST_PROJECT, str(path))
         st.setValue(PROJECT_DIR, str(Path(path).parent))
@@ -267,6 +286,35 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"已保存 {path}", 5000)
 
     # ---------------------------------------------------------------- 工程自动保存/打开
+
+    def _audit_dir(self) -> Path:
+        return self.project_path.parent if self.project_path else active_projects_dir()
+
+    def audit(self, event: str, **fields) -> None:
+        """审计失败绝不影响主流程（例如目录只读）。"""
+        try:
+            AuditLog(self._audit_dir()).append(event, **fields)
+        except OSError:
+            pass
+
+    def _ask_passphrase(self, title: str, confirm: bool = False) -> str | None:
+        while True:
+            pw, ok = QInputDialog.getText(self, title, "口令：", QLineEdit.EchoMode.Password)
+            if not ok:
+                return None
+            if not pw:
+                QMessageBox.warning(self, title, "口令不能为空。")
+                continue
+            if confirm:
+                pw2, ok2 = QInputDialog.getText(
+                    self, title, "再次输入口令：", QLineEdit.EchoMode.Password
+                )
+                if not ok2:
+                    return None
+                if pw != pw2:
+                    QMessageBox.warning(self, title, "两次输入的口令不一致。")
+                    continue
+            return pw
 
     def _last_project_raw(self) -> Path | None:
         raw = settings().value(LAST_PROJECT, "", type=str)
@@ -312,11 +360,26 @@ class MainWindow(QMainWindow):
             return False
         try:
             state = ProjectState.load(path)
+        except ProjectLocked:
+            pw = self._ask_passphrase("工程已加密")
+            if pw is None:
+                return False
+            try:
+                state = ProjectState.load(path, pw)
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "打开失败", f"{path}\n\n{e}")
+                return False
+            self.project_passphrase = pw
+            settings().setValue(PROJECT_ENCRYPT, True)
         except Exception as e:  # noqa: BLE001 - 展示给用户，不吞掉
             QMessageBox.critical(self, "打开失败", f"{path}\n\n{e}")
             return False
+        else:
+            self.project_passphrase = None
+            settings().setValue(PROJECT_ENCRYPT, False)
         self.state = state
         self.project_path = path
+        self.audit("open_project", path=str(path))
         self._dirty = False
         st = settings()
         st.setValue(LAST_PROJECT, str(path))
@@ -405,7 +468,15 @@ class MainWindow(QMainWindow):
             )
 
         try:
-            self.state.save(proj)
+            enc = getattr(self.build_tab, "chk_encrypt", None)
+            if enc is not None and enc.isChecked():
+                if self.project_passphrase is None:
+                    pw = self._ask_passphrase("设置工程口令", confirm=True)
+                    if pw is None:
+                        self.build_tab.log_line("⚠ 未设置工程口令，本次没有保存工程")
+                        return
+                    self.project_passphrase = pw
+            self.state.save(proj, self.project_passphrase)
         except Exception as e:  # noqa: BLE001 - 展示给用户
             self.build_tab.log_line(f"✗ 工程保存失败：{proj}（{e}）")
             QMessageBox.warning(self, "工程自动保存失败", f"{proj}\n\n{e}")
@@ -416,6 +487,7 @@ class MainWindow(QMainWindow):
         st.setValue(PROJECT_DIR, str(proj.parent))
         self.project_path = proj
         self._dirty = False
+        self.audit("build_saved", path=str(proj), package=str(prod))
         self._refresh_status()
         self.build_tab.set_project_dir(proj.parent)
         self.build_tab.set_current_project(proj)

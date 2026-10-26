@@ -24,10 +24,12 @@ from pathlib import Path
 from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -328,12 +330,24 @@ class BuildTab(QWidget):
         btn_copy.setToolTip("把主密钥复制到剪贴板，粘贴到密码管理器里保存")
         btn_copy.clicked.connect(self.copy_master)
         row.addWidget(btn_copy)
+        btn_backup = QPushButton("备份…")
+        btn_backup.setToolTip("把主密钥加密备份成 .eekey 文件（建议存到密码管理器/U 盘）")
+        btn_backup.clicked.connect(self.backup_master)
+        row.addWidget(btn_backup)
+        btn_restore = QPushButton("恢复…")
+        btn_restore.setToolTip("从 .eekey 备份恢复主密钥")
+        btn_restore.clicked.connect(self.restore_master)
+        row.addWidget(btn_restore)
         # 显式的"清空"：教师自己决定何时抹掉，比定时器更可控。
         btn_clear = QPushButton("清空")
         btn_clear.setToolTip("立即清空输入框里的主密钥（请确认已保存到密码管理器）")
         btn_clear.clicked.connect(self.clear_master)
         row.addWidget(btn_clear)
         form.addRow("主密钥", row)
+        self.lbl_key_fp = QLabel("指纹：—")
+        self.lbl_key_fp.setStyleSheet("color: #888; font-size: 11px;")
+        form.addRow("主密钥指纹", self.lbl_key_fp)
+        self.edit_master.textChanged.connect(self._update_key_fp)
 
         self.copy_hint = QLabel("")
         self.copy_hint.setWordWrap(True)
@@ -378,6 +392,13 @@ class BuildTab(QWidget):
         self.lbl_current.setStyleSheet("color: #888;")
         self.lbl_current.setWordWrap(True)
         form.addRow("当前工程", self.lbl_current)
+
+        from app.ui.app_settings import PROJECT_ENCRYPT, settings
+
+        self.chk_encrypt = QCheckBox("加密保存工程（含标准答案，建议开启）")
+        self.chk_encrypt.setChecked(settings().value(PROJECT_ENCRYPT, False, type=bool))
+        self.chk_encrypt.toggled.connect(lambda on: settings().setValue(PROJECT_ENCRYPT, bool(on)))
+        form.addRow("工程加密", self.chk_encrypt)
 
         self.edit_keyfile = QLineEdit()
         self.edit_keyfile.setPlaceholderText("留空则不导出 K_manifest")
@@ -560,6 +581,76 @@ class BuildTab(QWidget):
         self.btn_gen.setEnabled(True)
         self.btn_gen.setText("生成")
         self.gen_progress.setVisible(False)
+
+    def _update_key_fp(self) -> None:
+        key = self.edit_master.text().strip()
+        if len(key) == 64 and all(c in "0123456789abcdefABCDEF" for c in key):
+            fp = hashlib.blake2s(key.lower().encode(), digest_size=4).hexdigest()
+            self.lbl_key_fp.setText(f"指纹：{fp}")
+        else:
+            self.lbl_key_fp.setText("指纹：—")
+
+    def _ask_passphrase(self, title: str, confirm: bool = False) -> str | None:
+        while True:
+            pw, ok = QInputDialog.getText(self, title, "口令：", QLineEdit.EchoMode.Password)
+            if not ok:
+                return None
+            if not pw:
+                QMessageBox.warning(self, title, "口令不能为空。")
+                continue
+            if confirm:
+                pw2, ok2 = QInputDialog.getText(
+                    self, title, "再次输入口令：", QLineEdit.EchoMode.Password
+                )
+                if not ok2:
+                    return None
+                if pw != pw2:
+                    QMessageBox.warning(self, title, "两次输入的口令不一致。")
+                    continue
+            return pw
+
+    def backup_master(self) -> None:
+        key = self.edit_master.text().strip()
+        if not key:
+            QMessageBox.information(self, "没有主密钥", "请先生成或填入主密钥。")
+            return
+        pw = self._ask_passphrase("设置备份口令", confirm=True)
+        if pw is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "备份主密钥", "主密钥备份.eekey", "密钥备份 (*.eekey)"
+        )
+        if not path:
+            return
+        try:
+            from app.core import secure
+
+            secure.backup_master_key(key, Path(path), pw)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "备份失败", str(e))
+            return
+        QMessageBox.information(
+            self, "已备份", f"主密钥已加密备份到：\n{path}\n\n请把口令另行保存。"
+        )
+
+    def restore_master(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "恢复主密钥", "", "密钥备份 (*.eekey);;全部文件 (*)"
+        )
+        if not path:
+            return
+        pw = self._ask_passphrase("输入备份口令")
+        if pw is None:
+            return
+        try:
+            from app.core import secure
+
+            key = secure.restore_master_key(Path(path), pw)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "恢复失败", str(e))
+            return
+        self.edit_master.setText(key)
+        QMessageBox.information(self, "已恢复", "主密钥已填入输入框，请核对指纹。")
 
     def refresh_preview(self) -> None:
         """节流：validate() 含精确难度 DP，大题库时别在每个事件里跑。"""

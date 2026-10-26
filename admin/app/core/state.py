@@ -53,6 +53,10 @@ def _load_classes(raw: object, path: Path) -> list[StudentClass]:
 PROJECT_VERSION = 2
 
 
+class ProjectLocked(Exception):
+    """工程文件已加密，需要口令才能打开。"""
+
+
 @dataclass
 class ProjectState:
     """一个考试项目的全部配置。"""
@@ -365,8 +369,8 @@ class ProjectState:
 
     # ---------------------------------------------------------------- 存取
 
-    def save(self, path: Path) -> None:
-        """保存工程配置。
+    def save(self, path: Path, passphrase: str | None = None) -> None:
+        """保存工程配置；passphrase 非空时写加密格式（EESPROJ2）。
 
         **绝不写入 master**：只存 salt、KDF、题库路径、学生、场次。
         题库内容也不存——教师会持续修改源文件，存路径更合理。
@@ -380,12 +384,24 @@ class ProjectState:
             "classes": [c.model_dump() for c in self.classes],
             "sessions": [s.model_dump() for s in self.sessions],
         }
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        raw = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        if passphrase:
+            from app.core import secure
+
+            raw = secure.encrypt_project(raw, passphrase)
+        path.write_bytes(raw)
 
     @classmethod
-    def load(cls, path: Path) -> ProjectState:
+    def load(cls, path: Path, passphrase: str | None = None) -> ProjectState:
         """加载工程配置，并重新读取题库源文件（校验其仍然合法）。"""
-        data = json.loads(path.read_text(encoding="utf-8"))
+        from app.core import secure
+
+        raw = path.read_bytes()
+        if secure.is_encrypted_project(raw):
+            if not passphrase:
+                raise ProjectLocked("工程已加密，需要口令才能打开。")
+            raw = secure.decrypt_project(raw, passphrase)
+        data = json.loads(raw.decode("utf-8"))
         salt = data.get("salt")
         if not salt:
             raise ValueError(f"{path.name} 缺少 salt 字段，可能不是本程序保存的工程文件。")

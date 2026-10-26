@@ -16,6 +16,8 @@ from PySide6.QtCore import QSettings
 LAST_PROJECT = "last_project"
 #: 老师指定的工程保存目录（空 = 程序目录 projects/）
 PROJECT_DIR = "project_dir"
+#: 是否加密保存工程（EESPROJ2）
+PROJECT_ENCRYPT = "project_encrypt"
 
 
 def settings_path() -> Path:

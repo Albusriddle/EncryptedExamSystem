@@ -689,6 +689,11 @@ class AnswersTab(QWidget):
                 self.grade_table.setItem(row, col, item)
         self.grade_table.blockSignals(False)
 
+    def _audit(self, event: str, **fields) -> None:
+        fn = getattr(self.window(), "audit", None)
+        if fn is not None:
+            fn(event, **fields)
+
     def _on_score_edited(self, item: QTableWidgetItem) -> None:
         if item.column() != 7:
             return
@@ -699,8 +704,17 @@ class AnswersTab(QWidget):
         raw = item.text().strip()
         if raw == "":
             # 清空 = 撤销人工评分（未判题回到"待人工判分"）
+            old = result.manual_score
             result.manual_score = None
             result.adjusted_at = ""
+            self._audit(
+                "manual_score",
+                student=result.student_id,
+                session=result.session_id,
+                qid=result.qid,
+                old=old,
+                new=None,
+            )
             self.grade_table.blockSignals(True)
             item.setText("")
             self.grade_table.blockSignals(False)

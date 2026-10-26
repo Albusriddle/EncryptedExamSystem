@@ -83,3 +83,22 @@ def test_dirty_project_prompts_and_can_cancel(qapp, monkeypatch) -> None:
         assert asked, "有未保存改动时必须询问"
     finally:
         win.deleteLater()
+
+
+def test_save_project_encrypted_when_checkbox(qapp, tmp_path, monkeypatch) -> None:
+    from PySide6.QtWidgets import QFileDialog
+
+    from app.core import secure
+    from app.core.state import ProjectState
+
+    win = MainWindow()
+    try:
+        win.build_tab.chk_encrypt.setChecked(True)
+        monkeypatch.setattr(win, "_ask_passphrase", lambda *a, **k: "pw-123")
+        target = tmp_path / "enc.eesproj"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+        win.save_project()
+        assert target.read_bytes().startswith(secure.MAGIC_PROJECT)
+        assert ProjectState.load(target, "pw-123").students == []
+    finally:
+        win.deleteLater()
