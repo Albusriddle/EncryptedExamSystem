@@ -302,3 +302,61 @@ def test_same_name_copy_does_not_overwrite(qapp, local_appdata, monkeypatch) -> 
         assert conflict.read_text(encoding="utf-8") == "另一个工程"
     finally:
         win.deleteLater()
+
+
+def test_build_never_saves_project_into_output_dir(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import PROJECT_DIR, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    out_dir = WORK / "考试包"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    settings().setValue(PROJECT_DIR, str(out_dir))
+
+    win = MainWindow()
+    try:
+        out = out_dir / "StudentClient.exe"
+        out.write_bytes(b"x")
+        win._on_built(str(out))
+
+        assert win.project_path is not None
+        assert win.project_path.parent != out_dir, "工程不能写进要发给学生的目录"
+        assert not list(out_dir.glob("*.eesproj"))
+    finally:
+        win.deleteLater()
+
+
+def test_new_project_falls_back_when_dir_invalid(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import PROJECT_DIR, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    bad = WORK / "bad-dir"
+    bad.write_text("not a dir", encoding="utf-8")
+    settings().setValue(PROJECT_DIR, str(bad))
+
+    win = MainWindow()
+    try:
+        win.new_project()
+        assert settings().value(PROJECT_DIR, "", type=str) == ""
+        assert win.build_tab.edit_projdir.text() == str(
+            __import__("app.ui.app_settings", fromlist=["projects_dir"]).projects_dir()
+        )
+    finally:
+        win.deleteLater()
+
+
+def test_last_project_tooltip_reports_missing(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import LAST_PROJECT, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    st = settings()
+    st.setValue(LAST_PROJECT, str(WORK / "gone2.eesproj"))
+    st.sync()
+
+    win = MainWindow()
+    try:
+        assert "已不存在" in win.act_last.toolTip()
+    finally:
+        win.deleteLater()

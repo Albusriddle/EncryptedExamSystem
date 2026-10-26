@@ -14,8 +14,6 @@ from PySide6.QtCore import QSettings
 
 #: 上次打开的工程（.eesproj / .json 绝对路径）
 LAST_PROJECT = "last_project"
-#: 启动时是否自动打开上次工程
-AUTOLOAD = "autoload"
 #: 老师指定的工程保存目录（空 = 程序目录 projects/）
 PROJECT_DIR = "project_dir"
 

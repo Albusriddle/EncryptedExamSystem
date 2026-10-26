@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, QUrl
@@ -40,6 +41,7 @@ from app.ui.app_settings import (
     PROJECT_DIR,
     active_projects_dir,
     project_dir_display,
+    projects_dir,
     settings,
 )
 from app.ui.tab_answers import AnswersTab
@@ -192,8 +194,24 @@ class MainWindow(QMainWindow):
         self.state = ProjectState()
         self.project_path = None
         self._dirty = False
+        self._config_bad = False
+        self._ensure_project_dir()
         self._reload_tabs()
         self.statusBar().showMessage("已新建工程", 4000)
+
+    def _ensure_project_dir(self) -> None:
+        """目录失效（U 盘拔出/共享盘离线）时回退到默认位置。"""
+        d = project_dir_display()
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            probe = d / ".ees-write-test"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink()
+        except OSError:
+            settings().remove(PROJECT_DIR)
+            self.statusBar().showMessage(
+                f"原工程目录不可用，已改用默认目录：{projects_dir()}", 8000
+            )
 
     def open_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -251,9 +269,15 @@ class MainWindow(QMainWindow):
         return f"；上次工程：{p.name}（工具栏【打开上次工程】）" if p else ""
 
     def _refresh_last_action(self) -> None:
+        raw = self._last_project_raw()
         p = self._last_project_path()
         self.act_last.setEnabled(p is not None)
-        self.act_last.setToolTip(f"上次工程：{p}\n点击打开" if p else "没有可打开的上次工程")
+        if p is not None:
+            self.act_last.setToolTip(f"上次工程：{p}\n点击打开")
+        elif raw is not None:
+            self.act_last.setToolTip(f"上次工程文件已不存在：\n{raw}")
+        else:
+            self.act_last.setToolTip("还没有保存或打开过工程")
 
     def open_last_project(self) -> None:
         raw = self._last_project_raw()
@@ -310,6 +334,16 @@ class MainWindow(QMainWindow):
         if getattr(self, "build_tab", None) is not None:
             self.build_tab.commit_project_dir()
         target_dir = active_projects_dir()
+        blocked = False
+        if target_dir.resolve() == prod.parent.resolve():
+            # 绝不把含标准答案的工程写进要发给学生的目录
+            fallback = projects_dir()
+            if fallback.resolve() == prod.parent.resolve():
+                from app.ui.app_settings import settings_path
+
+                fallback = settings_path().parent / "projects"
+            target_dir = fallback
+            blocked = True
         if self.project_path is not None and self.project_path.parent == target_dir:
             proj = self.project_path
             renamed = False
@@ -337,6 +371,9 @@ class MainWindow(QMainWindow):
                     if not cand.exists():
                         proj = cand
                         break
+                else:
+                    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    proj = proj.with_name(f"{proj.stem}-{stamp}{proj.suffix}")
 
         try:
             proj.parent.mkdir(parents=True, exist_ok=True)
@@ -371,6 +408,8 @@ class MainWindow(QMainWindow):
         self.build_tab.set_current_project(proj)
 
         note = "（已另存到新目录，旧文件保留）" if renamed else ""
+        if blocked:
+            note += "（已避开考试包输出目录）"
         self.build_tab.log_line(f"✔ 已保存到工程：{proj}{note}")
         self.statusBar().showMessage(f"工程已保存：{proj}", 10000)
 
