@@ -20,7 +20,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -36,11 +36,10 @@ from app.branding import branding
 from app.core.models import Manifest
 from app.core.state import ProjectState
 from app.ui.app_settings import (
-    AUTOLOAD,
     LAST_PROJECT,
     PROJECT_DIR,
     active_projects_dir,
-    projects_dir,
+    project_dir_display,
     settings,
 )
 from app.ui.tab_answers import AnswersTab
@@ -52,7 +51,7 @@ from app.version import app_version, watermark
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, autoload: bool = True) -> None:
+    def __init__(self, autoload: bool = False) -> None:
         super().__init__()
         self.state = ProjectState()
         self.project_path: Path | None = None
@@ -60,6 +59,7 @@ class MainWindow(QMainWindow):
         #: 每次新建或打开工程都会问"未保存的修改会丢失"——哪怕刚保存过。
         #: 教师被问烦了就会无脑点"是"，真正该拦的时候反而拦不住。
         self._dirty = False
+        self._config_bad = False
 
         self.setWindowTitle(self._window_title())
         self.resize(1080, 760)
@@ -69,7 +69,9 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._refresh_status()
         if autoload:
-            self._autoload_last_project()
+            self.open_last_project()
+        else:
+            self.statusBar().showMessage("已新建空白工程" + self._last_project_hint(), 10000)
 
     # ---------------------------------------------------------------- 构建
 
@@ -80,6 +82,10 @@ class MainWindow(QMainWindow):
         act_new = QAction("新建工程", self)
         act_new.triggered.connect(self.new_project)
         bar.addAction(act_new)
+
+        self.act_last = QAction("打开上次工程", self)
+        self.act_last.triggered.connect(self.open_last_project)
+        bar.addAction(self.act_last)
 
         act_open = QAction("打开工程…", self)
         act_open.triggered.connect(self.open_project)
@@ -153,12 +159,33 @@ class MainWindow(QMainWindow):
 
     def _refresh_status(self) -> None:
         self.status_label.setText(self.state.summary())
+        self._update_window_title()
+        if getattr(self, "build_tab", None) is not None:
+            self.build_tab.set_current_project(self.project_path)
+        if hasattr(self, "act_last"):
+            self._refresh_last_action()
+        self._schedule_config_check()
+
+    def _update_window_title(self) -> None:
         title = self._window_title()
         if self.project_path:
             title += f" — {self.project_path.name}"
-        if self.state.validate():
+        if self._config_bad:
             title += "  ⚠ 配置有问题"
         self.setWindowTitle(title)
+
+    def _schedule_config_check(self) -> None:
+        if not hasattr(self, "_config_timer"):
+            self._config_timer = QTimer(self)
+            self._config_timer.setSingleShot(True)
+            self._config_timer.timeout.connect(self._check_config_now)
+        self._config_timer.start(300)
+
+    def _check_config_now(self) -> None:
+        bad = bool(self.state.validate())
+        if bad != self._config_bad:
+            self._config_bad = bad
+            self._update_window_title()
 
     # ---------------------------------------------------------------- 动作
 
@@ -172,32 +199,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("已新建工程", 4000)
 
     def open_project(self) -> None:
-        if not self._confirm_discard():
-            return
         path, _ = QFileDialog.getOpenFileName(
             self,
             "打开工程",
-            str(projects_dir(create=False)),  # 只打开对话框，不创建目录
+            str(project_dir_display()),
             "工程 (*.eesproj *.json);;全部文件 (*)",
         )
         if not path:
             return
-        try:
-            self.state = ProjectState.load(Path(path))
-        except Exception as e:  # noqa: BLE001 - 展示给用户，不吞掉
-            QMessageBox.critical(self, "打开失败", f"{path}\n\n{e}")
-            return
-        self.project_path = Path(path)
-        self._dirty = False
-        self._reload_tabs()
-        missing = set(self.state.bank_paths) - set(self.state.banks)
-        if missing:
-            QMessageBox.warning(
-                self,
-                "题库缺失",
-                "以下题库的源文件无法读取，请重新导入：\n\n" + "\n".join(sorted(missing)),
-            )
-        self.statusBar().showMessage(f"已打开 {path}", 5000)
+        self._load_project(Path(path))
 
     def save_project(self) -> None:
         path, selected = QFileDialog.getSaveFileName(
@@ -218,54 +228,100 @@ class MainWindow(QMainWindow):
             return
         self.project_path = Path(path)
         self._dirty = False
-        settings().setValue(LAST_PROJECT, str(path))
+        st = settings()
+        st.setValue(LAST_PROJECT, str(path))
+        st.setValue(PROJECT_DIR, str(Path(path).parent))
         self._refresh_status()
+        self.build_tab.set_project_dir(Path(path).parent)
+        self.build_tab.set_current_project(Path(path))
         self.statusBar().showMessage(f"已保存 {path}", 5000)
 
     # ---------------------------------------------------------------- 工程自动保存/打开
+
+    def _last_project_path(self) -> Path | None:
+        raw = settings().value(LAST_PROJECT, "", type=str)
+        if not raw:
+            return None
+        p = Path(raw)
+        return p if p.is_file() else None
+
+    def _last_project_hint(self) -> str:
+        p = self._last_project_path()
+        return f"；上次工程：{p.name}（工具栏【打开上次工程】）" if p else ""
+
+    def _refresh_last_action(self) -> None:
+        p = self._last_project_path()
+        self.act_last.setEnabled(p is not None)
+        self.act_last.setToolTip(f"上次工程：{p}\n点击打开" if p else "没有可打开的上次工程")
+
+    def open_last_project(self) -> None:
+        p = self._last_project_path()
+        if p is None:
+            QMessageBox.information(self, "没有上次工程", "还没有保存或打开过工程。")
+            self._refresh_last_action()
+            return
+        self._load_project(p)
+
+    def _load_project(self, path: Path) -> bool:
+        if not self._confirm_discard():
+            return False
+        try:
+            state = ProjectState.load(path)
+        except Exception as e:  # noqa: BLE001 - 展示给用户，不吞掉
+            QMessageBox.critical(self, "打开失败", f"{path}\n\n{e}")
+            return False
+        self.state = state
+        self.project_path = path
+        self._dirty = False
+        st = settings()
+        st.setValue(LAST_PROJECT, str(path))
+        st.setValue(PROJECT_DIR, str(path.parent))
+        self._reload_tabs()
+        self._refresh_status()
+        missing = set(self.state.bank_paths) - set(self.state.banks)
+        if missing:
+            names = "、".join(sorted(missing))
+            self.statusBar().showMessage(
+                f"已打开 {path.name}，但 {len(missing)} 个题库源文件读不到（{names}）",
+                20000,
+            )
+            self.setToolTip(f"缺失题库：{names}")
+        else:
+            self.statusBar().showMessage(f"已打开工程：{path}", 8000)
+        return True
 
     def _on_built(self, out: str) -> None:
         """打包成功后自动保存工程，并把保存位置明确告诉老师。
 
         **绝不写在考试包输出目录**：那是要发给学生的目录，工程里有标准答案。
-        优先覆盖教师自己的工程文件；否则存到老师设置的目录，
-        没设置过就**当场要求选一个**。
+        保存目标 = 「工程保存位置」目录；当前工程若在同一目录就写回原文件，
+        否则另存一份到该目录（旧文件保留）。
         """
         prod = Path(out)
-        if self.project_path is not None:
+        if getattr(self, "build_tab", None) is not None:
+            self.build_tab.commit_project_dir()
+        target_dir = active_projects_dir()
+        if self.project_path is not None and self.project_path.parent == target_dir:
             proj = self.project_path
+            renamed = False
         else:
-            target = settings().value(PROJECT_DIR, "", type=str)
-            if not target:
-                target = QFileDialog.getExistingDirectory(
-                    self,
-                    "请选择工程保存位置（首次打包需要设置一次）",
-                    str(projects_dir(create=False)),
+            if self.project_path is not None:
+                name = self.project_path.name
+                renamed = True
+            else:
+                payload = json.dumps(
+                    {
+                        "bank_paths": self.state.bank_paths,
+                        "students": self.state.students,
+                        "sessions": [x.model_dump() for x in self.state.sessions],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
                 )
-                if not target:
-                    self.build_tab.log_line("⚠ 未设置工程保存位置，本次没有保存工程")
-                    QMessageBox.information(
-                        self,
-                        "未保存工程",
-                        "还没有设置工程保存位置，本次没有自动保存工程。\n\n"
-                        "随时可以在「打包」页的「工程保存位置」里设置。",
-                    )
-                    return
-                settings().setValue(PROJECT_DIR, target)
-
-            # 用**工程内容**做短哈希：这样移动/改名考试包仍复用同一个工程文件，
-            # 而内容不同的两个同名包不会互相覆盖。
-            payload = json.dumps(
-                {
-                    "bank_paths": self.state.bank_paths,
-                    "students": self.state.students,
-                    "sessions": [x.model_dump() for x in self.state.sessions],
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            digest = hashlib.blake2s(payload.encode("utf-8"), digest_size=3).hexdigest()
-            proj = Path(target) / f"{prod.stem}-{digest}.eesproj"
+                digest = hashlib.blake2s(payload.encode("utf-8"), digest_size=3).hexdigest()
+                name = f"{prod.stem}-{digest}.eesproj"
+                renamed = False
+            proj = target_dir / name
 
         try:
             proj.parent.mkdir(parents=True, exist_ok=True)
@@ -292,19 +348,21 @@ class MainWindow(QMainWindow):
 
         st = settings()
         st.setValue(LAST_PROJECT, str(proj))
-        st.setValue(AUTOLOAD, True)
+        st.setValue(PROJECT_DIR, str(proj.parent))
         self.project_path = proj
         self._dirty = False
         self._refresh_status()
+        self.build_tab.set_project_dir(proj.parent)
+        self.build_tab.set_current_project(proj)
 
-        # 每次都写日志 + 弹窗：老师必须知道工程存到哪了
-        self.build_tab.log_line(f"✔ 工程已保存：{proj}")
-        self.statusBar().showMessage(f"工程已自动保存：{proj}", 10000)
+        note = "（已另存到新目录，旧文件保留）" if renamed else ""
+        self.build_tab.log_line(f"✔ 已保存到工程：{proj}{note}")
+        self.statusBar().showMessage(f"工程已保存：{proj}", 10000)
 
         box = QMessageBox(self)
         box.setWindowTitle("工程已保存")
         box.setIcon(QMessageBox.Icon.Information)
-        box.setText(f"工程已保存到：\n{proj}")
+        box.setText(f"工程已保存到：\n{proj}{note}")
         box.setInformativeText("⚠ 该文件含标准答案与判分材料，切勿随考试包分发。")
         open_btn = box.addButton("打开目录", QMessageBox.ButtonRole.ActionRole)
         box.addButton("确定", QMessageBox.ButtonRole.AcceptRole)
@@ -313,39 +371,6 @@ class MainWindow(QMainWindow):
             from PySide6.QtGui import QDesktopServices
 
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(proj.parent)))
-
-    def _autoload_last_project(self) -> None:
-        """启动时自动打开上次的工程（可在设置里关掉）。"""
-        st = settings()
-        if not st.value(AUTOLOAD, True, type=bool):
-            return
-        raw = st.value(LAST_PROJECT, "", type=str)
-        if not raw:
-            return
-        path = Path(raw)
-        if not path.is_file():
-            self.statusBar().showMessage("上次的工程文件已不存在，已新建空白工程", 8000)
-            return
-        try:
-            self.state = ProjectState.load(path)
-        except Exception as e:  # noqa: BLE001 - 自动打开失败不能拦住启动
-            self.statusBar().showMessage(f"上次的工程无法打开（{e}），已新建空白工程", 10000)
-            return
-        self.project_path = path
-        self._dirty = False
-        self._reload_tabs()
-        missing = set(self.state.bank_paths) - set(self.state.banks)
-        if missing:
-            # 不弹模态框：启动阶段弹窗会挡住窗口，远程桌面/录屏时尤其难受。
-            names = "、".join(sorted(missing))
-            self.statusBar().showMessage(
-                f"已打开上次工程，但 {len(missing)} 个题库源文件读不到"
-                f"（{names}）——请到「题库」页重新导入",
-                20000,
-            )
-            self.setToolTip(f"缺失题库：{names}")
-        else:
-            self.statusBar().showMessage(f"已打开上次工程：{path}", 8000)
 
     def open_projects_dir(self) -> None:
         from PySide6.QtGui import QDesktopServices

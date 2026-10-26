@@ -1,4 +1,4 @@
-"""打包自动保存工程 + 启动自动打开。"""
+"""启动空白工程 + 打开上次工程 + 打包自动保存。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QFileDialog, QMessageBox  # noqa: E402
 
 from app.core.state import ProjectState  # noqa: E402
 
@@ -30,24 +30,67 @@ def qapp():
 def local_appdata(monkeypatch):
     import shutil
 
-    shutil.rmtree(WORK, ignore_errors=True)  # 上一轮留下的 .eesproj 会让断言误判
+    shutil.rmtree(WORK, ignore_errors=True)
     WORK.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("LOCALAPPDATA", str(WORK))
     yield WORK
 
 
-def test_autosave_and_autoload_roundtrip(qapp, local_appdata, monkeypatch) -> None:
-    from app.ui.app_settings import AUTOLOAD, LAST_PROJECT, settings
-    from app.ui.main_window import MainWindow
-
+def _mute(monkeypatch) -> None:
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0, raising=False)
 
+
+def test_startup_is_blank_even_with_last_project(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import LAST_PROJECT, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    proj = WORK / "old.eesproj"
+    ProjectState(salt="00" * 16, students=[7]).save(proj)
     st = settings()
-    st.setValue(AUTOLOAD, True)
-    st.setValue("project_dir", str(WORK / "projdir"))  # 首次打包要求先设置
+    st.setValue(LAST_PROJECT, str(proj))
     st.sync()
+
+    win = MainWindow()
+    try:
+        assert win.project_path is None, "启动必须是空白工程"
+        assert win.act_last.isEnabled(), "有上次工程时按钮应可用"
+
+        win.open_last_project()
+        assert win.project_path == proj
+        assert win.state.students == [7]
+    finally:
+        win.deleteLater()
+
+
+def test_open_last_project_with_missing_file(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import LAST_PROJECT, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    st = settings()
+    st.setValue(LAST_PROJECT, str(WORK / "nope.eesproj"))
+    st.sync()
+
+    win = MainWindow()
+    try:
+        assert not win.act_last.isEnabled()
+        win.open_last_project()  # 不应崩溃
+        assert win.project_path is None
+    finally:
+        win.deleteLater()
+
+
+def test_autosave_saves_project_and_last_project(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import LAST_PROJECT, PROJECT_DIR, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    projdir = WORK / "projdir"
+    settings().setValue(PROJECT_DIR, str(projdir))
 
     win = MainWindow()
     try:
@@ -55,70 +98,30 @@ def test_autosave_and_autoload_roundtrip(qapp, local_appdata, monkeypatch) -> No
         out.write_bytes(b"x")
         win._on_built(str(out))
 
-        # 绝不能写在考试包旁边（那是发给学生的目录）
         assert not out.with_suffix(".eesproj").exists(), "不得把工程写进分发目录"
-        projects = WORK / "projdir"
-        found = list(projects.glob("包-*.eesproj"))
-        assert found, "应存到老师设置的工程目录（带短哈希后缀）"
+        found = list(projdir.glob("包-*.eesproj"))
+        assert found, "应存到工程保存位置"
         proj = found[0]
         assert settings().value(LAST_PROJECT, "", type=str) == str(proj)
 
-        # 再开一个主窗口：应自动打开刚才的工程
+        # 下次启动是空白；点"打开上次工程"能读回
         win2 = MainWindow()
         try:
+            assert win2.project_path is None
+            win2.open_last_project()
             assert win2.project_path == proj
-            assert win2.state.salt == win.state.salt
         finally:
             win2.deleteLater()
     finally:
         win.deleteLater()
 
 
-def test_autoload_can_be_disabled(qapp, local_appdata, monkeypatch) -> None:
-    from app.ui.app_settings import AUTOLOAD, LAST_PROJECT, settings
-    from app.ui.main_window import MainWindow
-
-    proj = WORK / "p.eesproj"
-    ProjectState(salt="11" * 16, students=[7]).save(proj)
-    st = settings()
-    st.setValue(LAST_PROJECT, str(proj))
-    st.setValue(AUTOLOAD, False)
-    st.sync()
-
-    win = MainWindow()
-    try:
-        assert win.project_path is None
-        assert win.state.students == []
-    finally:
-        win.deleteLater()
-
-
-def test_missing_project_does_not_crash(qapp, local_appdata) -> None:
-    from app.ui.app_settings import AUTOLOAD, LAST_PROJECT, settings
-    from app.ui.main_window import MainWindow
-
-    st = settings()
-    st.setValue(LAST_PROJECT, str(WORK / "nope.eesproj"))
-    st.setValue(AUTOLOAD, True)
-    st.sync()
-
-    win = MainWindow()
-    try:
-        assert win.project_path is None
-    finally:
-        win.deleteLater()
-
-
 def test_same_content_builds_share_project_file(qapp, local_appdata, monkeypatch) -> None:
-    """同内容、不同输出路径的两个包应复用同一个 .eesproj（移动包不新建）。"""
-    from app.ui.app_settings import settings
+    from app.ui.app_settings import PROJECT_DIR, settings
     from app.ui.main_window import MainWindow
 
-    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
-    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0, raising=False)
-    settings().setValue("autoload", False)
-    settings().setValue("project_dir", str(WORK / "projdir"))
+    _mute(monkeypatch)
+    settings().setValue(PROJECT_DIR, str(WORK / "projdir"))
 
     win = MainWindow()
     try:
@@ -130,7 +133,7 @@ def test_same_content_builds_share_project_file(qapp, local_appdata, monkeypatch
         out2.write_bytes(b"x")
 
         win._on_built(str(out1))
-        win.project_path = None  # 模拟没有手动保存过工程
+        win.project_path = None
         win._on_built(str(out2))
 
         files = list((WORK / "projdir").glob("期末-*.eesproj"))
@@ -154,3 +157,58 @@ def test_projects_dir_uses_program_dir_when_frozen(monkeypatch, tmp_path) -> Non
     got = app_settings.projects_dir()
     assert got == fake_exe.parent / "projects"
     assert got.is_dir()
+
+
+def test_open_project_updates_last_project_and_build_dir(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import LAST_PROJECT, PROJECT_DIR, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    proj = WORK / "opened" / "自定义工程.eesproj"
+    proj.parent.mkdir(parents=True, exist_ok=True)
+    ProjectState(salt="11" * 16, students=[3]).save(proj)
+    st = settings()
+    st.setValue(LAST_PROJECT, str(WORK / "old.eesproj"))
+    st.sync()
+
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(proj), ""))
+    )
+    win = MainWindow()
+    try:
+        win.open_project()
+        assert win.project_path == proj
+        assert settings().value(LAST_PROJECT, "", type=str) == str(proj)
+        assert settings().value(PROJECT_DIR, "", type=str) == str(proj.parent)
+        assert win.build_tab.edit_projdir.text() == str(proj.parent)
+    finally:
+        win.deleteLater()
+
+
+def test_changed_project_dir_saves_copy(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import PROJECT_DIR, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    old_dir = WORK / "old"
+    new_dir = WORK / "new"
+    settings().setValue(PROJECT_DIR, str(old_dir))
+
+    win = MainWindow()
+    try:
+        out = WORK / "包.exe"
+        out.write_bytes(b"x")
+        win._on_built(str(out))
+        old_proj = win.project_path
+        assert old_proj is not None and old_proj.parent == old_dir
+
+        win.build_tab.edit_projdir.setText(str(new_dir))
+        win._on_built(str(out))
+
+        assert win.project_path is not None
+        assert win.project_path.parent == new_dir
+        assert win.project_path.name == old_proj.name
+        assert old_proj.exists(), "旧工程应保留"
+        assert settings().value(PROJECT_DIR, "", type=str) == str(new_dir)
+    finally:
+        win.deleteLater()

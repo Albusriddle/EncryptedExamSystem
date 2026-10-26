@@ -68,9 +68,9 @@ def settings() -> QSettings:
 
 
 def project_dir_display() -> Path:
-    """只用于界面显示：不创建目录。"""
+    """界面显示用：返回实际会用的目录（含 projects 子目录/回退）。"""
     raw = settings().value(PROJECT_DIR, "", type=str)
-    return Path(raw) if raw else projects_dir(create=False)
+    return Path(raw) if raw else projects_dir()
 
 
 def active_projects_dir() -> Path:

@@ -355,22 +355,29 @@ class BuildTab(QWidget):
         row3.addWidget(btn_out)
         form.addRow("输出包", row3)
 
-        from app.ui.app_settings import PROJECT_DIR, project_dir_display, settings
+        from app.ui.app_settings import project_dir_display
 
         self.edit_projdir = QLineEdit()
-        self.edit_projdir.setReadOnly(True)
         self.edit_projdir.setText(str(project_dir_display()))
-        self.edit_projdir.setToolTip("打包成功后工程自动保存到这里（含标准答案，勿分发）")
+        self.edit_projdir.setToolTip(
+            "当前工程会保存到这个目录；新建工程时也用它。含标准答案，勿分发。"
+        )
+        self.edit_projdir.editingFinished.connect(self._apply_project_dir)
         row_pd = QHBoxLayout()
         row_pd.addWidget(self.edit_projdir, 1)
-        btn_pd = QPushButton("更改…")
-        btn_pd.clicked.connect(lambda: self._pick_project_dir(PROJECT_DIR, settings))
+        btn_pd = QPushButton("浏览…")
+        btn_pd.clicked.connect(self._browse_project_dir)
         row_pd.addWidget(btn_pd)
         btn_pd_reset = QPushButton("默认")
         btn_pd_reset.setToolTip("恢复为程序目录下的 projects\\")
-        btn_pd_reset.clicked.connect(lambda: self._reset_project_dir(PROJECT_DIR, settings))
+        btn_pd_reset.clicked.connect(self._reset_project_dir)
         row_pd.addWidget(btn_pd_reset)
         form.addRow("工程保存位置", row_pd)
+
+        self.lbl_current = QLabel("未打开（打包时新建工程）")
+        self.lbl_current.setStyleSheet("color: #888;")
+        self.lbl_current.setWordWrap(True)
+        form.addRow("当前工程", self.lbl_current)
 
         self.edit_keyfile = QLineEdit()
         self.edit_keyfile.setPlaceholderText("留空则不导出 K_manifest")
@@ -536,6 +543,7 @@ class BuildTab(QWidget):
         self._keygen = KeygenWorker(self)
         self._keygen.done.connect(self._on_keygen_done)
         self._keygen.failed.connect(self._on_keygen_failed)
+        self._keygen.finished.connect(self._keygen.deleteLater)
         self._keygen.start()
 
     def _on_keygen_done(self, key: str) -> None:
@@ -716,19 +724,51 @@ class BuildTab(QWidget):
         """供主窗口写入打包日志（如"工程已保存"）。"""
         self._append(line)
 
-    def _pick_project_dir(self, key: str, settings) -> None:
+    def set_project_dir(self, path) -> None:
+        self.edit_projdir.setText(str(path))
+
+    def set_current_project(self, path) -> None:
+        if path is None:
+            self.lbl_current.setText("未打开（打包时新建工程）")
+            self.lbl_current.setToolTip("")
+        else:
+            self.lbl_current.setText(f"{path.name}（{path.parent}）")
+            self.lbl_current.setToolTip(str(path))
+
+    def commit_project_dir(self) -> None:
+        """打包前把输入框里的目录落盘（防止没触发 editingFinished）。"""
+        self._apply_project_dir()
+
+    def _browse_project_dir(self) -> None:
         from PySide6.QtWidgets import QFileDialog
 
         d = QFileDialog.getExistingDirectory(self, "选择工程保存位置", self.edit_projdir.text())
-        if not d:
+        if d:
+            self.edit_projdir.setText(d)
+            self._apply_project_dir()
+
+    def _apply_project_dir(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        from app.ui.app_settings import PROJECT_DIR, project_dir_display, settings
+
+        raw = self.edit_projdir.text().strip()
+        if not raw:
+            self._reset_project_dir()
             return
-        settings().setValue(key, d)
-        self.edit_projdir.setText(d)
+        p = Path(raw)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, "目录不可用", f"{p}\n\n{e}")
+            self.edit_projdir.setText(str(project_dir_display()))
+            return
+        settings().setValue(PROJECT_DIR, str(p))
 
-    def _reset_project_dir(self, key: str, settings) -> None:
-        settings().remove(key)
-        from app.ui.app_settings import project_dir_display
+    def _reset_project_dir(self) -> None:
+        from app.ui.app_settings import PROJECT_DIR, project_dir_display, settings
 
+        settings().remove(PROJECT_DIR)
         self.edit_projdir.setText(str(project_dir_display()))
 
     def _append(self, line: str) -> None:
