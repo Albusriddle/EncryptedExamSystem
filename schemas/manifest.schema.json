@@ -117,6 +117,40 @@
       ],
       "title": "SessionExam",
       "type": "object"
+    },
+    "TimeConfig": {
+      "description": "签名时间令牌配置（阶段 4.2）。\n\noff：沿用 HTTPS Date；prefer：尝试令牌，失败回落；require：必须有令牌。",
+      "properties": {
+        "mode": {
+          "default": "off",
+          "enum": [
+            "off",
+            "prefer",
+            "require"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "title": "Url",
+          "type": "string"
+        },
+        "pubkey": {
+          "default": "",
+          "title": "Pubkey",
+          "type": "string"
+        },
+        "max_skew": {
+          "default": 300,
+          "maximum": 3600,
+          "minimum": 30,
+          "title": "Max Skew",
+          "type": "integer"
+        }
+      },
+      "title": "TimeConfig",
+      "type": "object"
     }
   },
   "properties": {
@@ -138,6 +172,9 @@
     },
     "kdf": {
       "$ref": "#/$defs/KdfParams"
+    },
+    "time": {
+      "$ref": "#/$defs/TimeConfig"
     }
   },
   "required": [

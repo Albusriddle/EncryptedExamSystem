@@ -160,6 +160,9 @@ pub struct Header {
     /// 因此即使提取了 K_manifest 也读不到 PIN；教师校验时用 master 解。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pins_ct: Option<String>,
+    /// 签名时间令牌配置（阶段 4.2；旧包默认 off）。
+    #[serde(default)]
+    pub time: crate::model::TimeConfig,
 }
 
 /// 题库元信息（解锁后可见）。
@@ -238,6 +241,30 @@ pub fn build_payload_with_pins(
     kdf: KdfParams,
     embed_k_manifest: bool,
     pins: Option<&PinMap>,
+) -> Result<Vec<u8>, ContainerError> {
+    build_payload_with_options(
+        master,
+        banks,
+        sessions,
+        salt,
+        kdf,
+        embed_k_manifest,
+        pins,
+        None,
+    )
+}
+
+/// 带时间令牌配置的构建入口（builder 使用）。
+#[allow(clippy::too_many_arguments)]
+pub fn build_payload_with_options(
+    master: &[u8; 32],
+    banks: &[crate::model::ExamBank],
+    sessions: &[Session],
+    salt: &[u8],
+    kdf: KdfParams,
+    embed_k_manifest: bool,
+    pins: Option<&PinMap>,
+    time: Option<&crate::model::TimeConfig>,
 ) -> Result<Vec<u8>, ContainerError> {
     // 1. 剥离答案与判分材料。
     //
@@ -430,6 +457,7 @@ pub fn build_payload_with_pins(
         kdf,
         sessions: session_headers,
         pins_ct,
+        time: time.cloned().unwrap_or_default(),
     };
     let header_plain = serde_json::to_vec(&header)?;
     let header_ct = crypto::encrypt(&k_manifest, &header_plain, b"header-v3")?;

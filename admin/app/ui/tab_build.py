@@ -26,6 +26,7 @@ from PySide6.QtCore import QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -413,6 +415,32 @@ class BuildTab(QWidget):
         self.chk_encrypt.toggled.connect(lambda on: settings().setValue(PROJECT_ENCRYPT, bool(on)))
         form.addRow("工程加密", self.chk_encrypt)
 
+        self.cb_time_mode = QComboBox()
+        self.cb_time_mode.addItem("关闭（仍用 HTTPS Date）", "off")
+        self.cb_time_mode.addItem("优先：有令牌就用，失败回退", "prefer")
+        self.cb_time_mode.addItem("必须：没有有效令牌就不开考", "require")
+        idx = self.cb_time_mode.findData(self.state.time_mode or "off")
+        self.cb_time_mode.setCurrentIndex(max(0, idx))
+        form.addRow("时间令牌", self.cb_time_mode)
+        self.edit_time_url = QLineEdit(self.state.time_url)
+        self.edit_time_url.setPlaceholderText(
+            "https://time.example.com/time（require/prefer 时必填）"
+        )
+        form.addRow("令牌 URL", self.edit_time_url)
+        self.edit_time_pubkey = QLineEdit(self.state.time_pubkey)
+        self.edit_time_pubkey.setPlaceholderText("base64 Ed25519 公钥（32 字节）")
+        form.addRow("令牌公钥", self.edit_time_pubkey)
+        self.spin_time_skew = QSpinBox()
+        self.spin_time_skew.setRange(30, 3600)
+        self.spin_time_skew.setValue(int(self.state.time_max_skew or 300))
+        self.spin_time_skew.setSuffix(" 秒")
+        form.addRow("允许时钟偏差", self.spin_time_skew)
+        # 改完就同步到 state，保证"保存工程"也会带上时间令牌配置
+        self.cb_time_mode.currentIndexChanged.connect(self._sync_time_config)
+        self.edit_time_url.textChanged.connect(self._sync_time_config)
+        self.edit_time_pubkey.textChanged.connect(self._sync_time_config)
+        self.spin_time_skew.valueChanged.connect(self._sync_time_config)
+
         self.edit_keyfile = QLineEdit()
         self.edit_keyfile.setPlaceholderText("留空则不导出 K_manifest")
         row4 = QHBoxLayout()
@@ -681,6 +709,7 @@ class BuildTab(QWidget):
 
     def _refresh_preview_now(self) -> None:
         total = sum(len(s.students) for s in self.state.sessions)
+        self._sync_time_config()
         problems = self.state.validate()
         if problems:
             self.preview.setText(
@@ -697,6 +726,12 @@ class BuildTab(QWidget):
             self.preview.setStyleSheet("color:#2a7a2a;")
 
     # ---------------------------------------------------------------- 打包
+
+    def _sync_time_config(self) -> None:
+        self.state.time_mode = str(self.cb_time_mode.currentData() or "off")
+        self.state.time_url = self.edit_time_url.text().strip()
+        self.state.time_pubkey = self.edit_time_pubkey.text().strip()
+        self.state.time_max_skew = int(self.spin_time_skew.value())
 
     def start_build(self) -> None:
         if self.worker is not None and self.worker.isRunning():

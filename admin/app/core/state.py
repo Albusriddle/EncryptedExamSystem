@@ -77,6 +77,11 @@ class ProjectState:
     salt: str = ""
     #: 题库文件的原始路径（保存工程时记录，便于下次重新读取）
     bank_paths: dict[str, str] = field(default_factory=dict)
+    #: 签名时间令牌（阶段 4.2）
+    time_mode: str = "off"
+    time_url: str = ""
+    time_pubkey: str = ""
+    time_max_skew: int = 300
 
     def __post_init__(self) -> None:
         if not self.salt:
@@ -234,11 +239,19 @@ class ProjectState:
         这是**唯一的**"能否打包"判定入口：pydantic 的所有 model_validator
         都会在这里触发。UI 只需捕获 ValidationError 并把消息显示给教师。
         """
+        from app.core.models import TimeConfig
+
         return Manifest(
             version=2,
             salt=self.salt,
             sessions=self.sessions,
             kdf=self.kdf,
+            time=TimeConfig(
+                mode=self.time_mode,
+                url=self.time_url,
+                pubkey=self.time_pubkey,
+                max_skew=self.time_max_skew,
+            ),
         )
 
     def validate(self) -> list[str]:
@@ -270,6 +283,19 @@ class ProjectState:
         # 放在这里而不是只在导入时查，是因为题库源文件可能在导入后被改过。
         for bank in self.banks.values():
             problems.extend(validate_bank_answers(bank))
+
+        # 时间令牌配置：提前给出可读错误，而不是让 build_manifest 抛 pydantic 异常
+        from app.core.models import TimeConfig
+
+        try:
+            TimeConfig(
+                mode=self.time_mode,
+                url=self.time_url,
+                pubkey=self.time_pubkey,
+                max_skew=self.time_max_skew,
+            )
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"时间令牌配置：{e}")
 
         # 逐个场次单独校验，收集全部错误
         for s in self.sessions:
@@ -383,6 +409,12 @@ class ProjectState:
             "salt": self.salt,
             "kdf": self.kdf.model_dump(),
             "bank_paths": self.bank_paths,
+            "time": {
+                "mode": self.time_mode,
+                "url": self.time_url,
+                "pubkey": self.time_pubkey,
+                "max_skew": self.time_max_skew,
+            },
             "students": self.students,
             "classes": [c.model_dump() for c in self.classes],
             "sessions": [s.model_dump() for s in self.sessions],
@@ -434,6 +466,11 @@ class ProjectState:
         )
         st.sessions = [Session.model_validate(s) for s in data.get("sessions", [])]
         st.bank_paths = dict(data.get("bank_paths", {}))
+        t = data.get("time") or {}
+        st.time_mode = str(t.get("mode") or "off")
+        st.time_url = str(t.get("url") or "")
+        st.time_pubkey = str(t.get("pubkey") or "")
+        st.time_max_skew = int(t.get("max_skew") or 300)
 
         # 重新读取题库：源文件可能已被教师修改。
         #

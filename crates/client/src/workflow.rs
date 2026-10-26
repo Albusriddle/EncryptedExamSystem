@@ -149,6 +149,25 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
 }
 
 /// 执行时间门禁，返回 (场次编号, 网络时间信息)。
+fn fallback_network_time() -> anyhow::Result<timegate::NetworkTime> {
+    let sources = build_time_sources();
+    timegate::fetch_network_time_with_policy(
+        &sources,
+        timegate::FetchPolicy {
+            min_sources: 2,
+            max_spread: 60,
+            rounds: 2,
+        },
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "无法获取可信的网络时间：{e}\n\
+             已自动重试一次仍失败。请再点一次【开始考试】，或改用手机热点。\n\
+             为避免误判，本系统在取时失败时**拒绝解锁**。"
+        )
+    })
+}
+
 fn run_time_gate(
     header: &Header,
     opts: &UnlockOpts,
@@ -183,23 +202,23 @@ fn run_time_gate(
     #[cfg(not(debug_assertions))]
     let _ = opts.skip_time_gate; // release 下没有这个开关
 
-    let sources = build_time_sources();
-    // 最多两轮：第二轮只重查失败的源，网络抖一下不至于让学生考不了。
-    let net = timegate::fetch_network_time_with_policy(
-        &sources,
-        timegate::FetchPolicy {
-            min_sources: 2,
-            max_spread: 60,
-            rounds: 2,
-        },
-    )
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "无法获取可信的网络时间：{e}\n\
-             已自动重试一次仍失败。请再点一次【开始考试】，或改用手机热点。\n\
-             为避免误判，本系统在取时失败时**拒绝解锁**。"
-        )
-    })?;
+    let net = if header.time.mode != "off" {
+        match timegate::fetch_signed_time(&header.time) {
+            Ok(n) => n,
+            Err(e) if header.time.mode == "require" => {
+                return Err(anyhow::anyhow!(
+                    "无法获取签名时间令牌：{e}\n\
+                     本场要求必须验证时间令牌，已拒绝开考。"
+                ));
+            }
+            Err(e) => {
+                eprintln!("⚠ 签名时间令牌失败（回退 HTTPS Date）：{e}");
+                fallback_network_time()?
+            }
+        }
+    } else {
+        fallback_network_time()?
+    };
 
     let decision =
         decide_session(&windows, opts.session, net.unix).map_err(|e| anyhow::anyhow!("{e}"))?;

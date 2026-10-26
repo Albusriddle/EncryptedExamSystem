@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -317,13 +318,38 @@ class KdfParams(BaseModel):
         return self
 
 
+class TimeConfig(BaseModel):
+    """签名时间令牌配置（阶段 4.2）。
+
+    off：沿用 HTTPS Date；prefer：尝试令牌，失败回落；require：必须有令牌。
+    """
+
+    mode: Literal["off", "prefer", "require"] = "off"
+    url: str = ""
+    pubkey: str = ""  # base64(Ed25519 32B)
+    max_skew: int = Field(default=300, ge=30, le=3600)
+
+    @model_validator(mode="after")
+    def _check(self) -> TimeConfig:
+        if self.mode == "off":
+            return self
+        if not self.url.startswith("https://"):
+            raise ValueError("时间令牌 URL 必须以 https:// 开头")
+        try:
+            raw = base64.b64decode(self.pubkey, validate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError("时间令牌公钥必须是 base64") from exc
+        if len(raw) != 32:
+            raise ValueError("时间令牌公钥必须是 32 字节 Ed25519 公钥")
+        return self
+
+
 class Manifest(BaseModel):
     version: int = 2
     salt: str
     sessions: list[Session]
-    # 注：曾有 time_sources / time_pubkey 两字段，但无任何代码使用，
-    # 属于"配置了不生效"的死配置，已删除（详见 model.rs 同处注释）。
     kdf: KdfParams = Field(default_factory=KdfParams)
+    time: TimeConfig = Field(default_factory=TimeConfig)
 
     @field_validator("salt")
     @classmethod

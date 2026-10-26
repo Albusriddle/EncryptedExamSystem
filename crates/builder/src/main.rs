@@ -610,7 +610,8 @@ fn build(req: BuildRequest) -> Result<()> {
         None
     };
 
-    let payload = container::build_payload_with_pins(
+    manifest.time.validate().map_err(anyhow::Error::msg)?;
+    let payload = container::build_payload_with_options(
         &master,
         &banks,
         &manifest.sessions,
@@ -618,6 +619,7 @@ fn build(req: BuildRequest) -> Result<()> {
         manifest.kdf,
         embed_key,
         pins.as_ref(),
+        Some(&manifest.time),
     )
     .context("构建 payload")?;
     let stub =

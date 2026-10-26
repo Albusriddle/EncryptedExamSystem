@@ -19,6 +19,12 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use serde::Deserialize;
+
+use crate::model::TimeConfig;
+
 /// 时间获取错误。
 #[derive(Debug, thiserror::Error)]
 pub enum TimeError {
@@ -213,6 +219,174 @@ fn fetch_date_header(url: &str, timeout: Duration) -> Result<String, String> {
         }
     }
     Err("响应中没有 Date 头".into())
+}
+
+/// 读取 HTTPS 响应正文（签名时间令牌用）。
+#[cfg(windows)]
+fn fetch_body(url: &str, timeout: Duration) -> Result<String, String> {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Networking::WinHttp::*;
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    unsafe {
+        let agent = wide("EncryptedExamSystem/0.1");
+        let session = WinHttpOpen(
+            agent.as_ptr(),
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+        );
+        if session.is_null() {
+            return Err(format!("WinHttpOpen 失败（错误码 {}）", GetLastError()));
+        }
+        let _guard = SessionGuard(session);
+        let ms = timeout.as_millis().min(u32::MAX as u128) as i32;
+        WinHttpSetTimeouts(session, ms, ms, ms, ms);
+
+        let rest = url
+            .strip_prefix("https://")
+            .ok_or_else(|| format!("只支持 https:// 开头的地址: {url}"))?;
+        let (host, path) = match rest.split_once('/') {
+            Some((h, p)) => (h, format!("/{p}")),
+            None => (rest, "/".to_string()),
+        };
+        let host_w = wide(host);
+        let path_w = wide(&path);
+        let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
+        if connect.is_null() {
+            return Err(format!("WinHttpConnect 失败（错误码 {}）", GetLastError()));
+        }
+        let _connect_guard = HandleGuard(connect);
+        let request = WinHttpOpenRequest(
+            connect,
+            wide("GET").as_ptr(),
+            path_w.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            WINHTTP_FLAG_SECURE,
+        );
+        if request.is_null() {
+            return Err(format!(
+                "WinHttpOpenRequest 失败（错误码 {}）",
+                GetLastError()
+            ));
+        }
+        let _req_guard = HandleGuard(request);
+        if WinHttpSendRequest(request, std::ptr::null(), 0, std::ptr::null_mut(), 0, 0, 0) == 0 {
+            return Err(format!(
+                "WinHttpSendRequest 失败（错误码 {}）",
+                GetLastError()
+            ));
+        }
+        if WinHttpReceiveResponse(request, std::ptr::null_mut()) == 0 {
+            return Err(format!(
+                "WinHttpReceiveResponse 失败（错误码 {}）",
+                GetLastError()
+            ));
+        }
+        let mut body = Vec::new();
+        loop {
+            let mut buf = [0u8; 4096];
+            let mut read: u32 = 0;
+            if WinHttpReadData(
+                request,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+                &mut read,
+            ) == 0
+            {
+                return Err(format!("读取响应失败（错误码 {}）", GetLastError()));
+            }
+            if read == 0 {
+                break;
+            }
+            body.extend_from_slice(&buf[..read as usize]);
+            if body.len() > 1_000_000 {
+                return Err("时间令牌响应过大".into());
+            }
+        }
+        String::from_utf8(body).map_err(|e| format!("响应不是 UTF-8: {e}"))
+    }
+}
+
+#[cfg(not(windows))]
+fn fetch_body(url: &str, timeout: Duration) -> Result<String, String> {
+    let out = std::process::Command::new("curl")
+        .args(["-sS", "--max-time", &timeout.as_secs().to_string(), url])
+        .output()
+        .map_err(|e| format!("启动 curl 失败: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "curl 请求失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("响应不是 UTF-8: {e}"))
+}
+
+#[derive(Deserialize)]
+struct SignedToken {
+    t: u64,
+    n: String,
+    sig: String,
+}
+
+/// 验证服务端返回的令牌正文（独立函数便于单元测试）。
+pub fn verify_signed_token(config: &TimeConfig, body: &str, nonce: &str) -> Result<u64, String> {
+    let token: SignedToken =
+        serde_json::from_str(body).map_err(|e| format!("时间令牌 JSON 无法解析: {e}"))?;
+    if token.n != nonce {
+        return Err("时间令牌 nonce 不匹配（疑似重放）".into());
+    }
+    let pub_raw = base64::engine::general_purpose::STANDARD
+        .decode(&config.pubkey)
+        .map_err(|_| "时间令牌公钥不是合法 base64".to_string())?;
+    let pub_arr: [u8; 32] = pub_raw
+        .as_slice()
+        .try_into()
+        .map_err(|_| "时间令牌公钥长度不是 32 字节".to_string())?;
+    let key = VerifyingKey::from_bytes(&pub_arr).map_err(|e| format!("时间令牌公钥无效: {e}"))?;
+    let sig_raw = base64::engine::general_purpose::STANDARD
+        .decode(&token.sig)
+        .map_err(|_| "时间令牌签名不是合法 base64".to_string())?;
+    let sig =
+        Signature::from_slice(&sig_raw).map_err(|_| "时间令牌签名长度不是 64 字节".to_string())?;
+    key.verify(format!("{}:{}", token.t, token.n).as_bytes(), &sig)
+        .map_err(|_| "时间令牌签名验证失败".to_string())?;
+    Ok(token.t)
+}
+
+/// 获取并验证签名时间令牌。签名覆盖 `"{t}:{nonce}"`。
+pub fn fetch_signed_time(config: &TimeConfig) -> Result<NetworkTime, String> {
+    config.validate()?;
+    let nonce = hex::encode(crate::crypto::random_key());
+    let sep = if config.url.contains('?') { '&' } else { '?' };
+    let url = format!("{}{}nonce={}", config.url, sep, nonce);
+    let body = fetch_body(&url, Duration::from_secs(3))?;
+    let t = verify_signed_token(config, &body, &nonce)?;
+
+    let local = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let skew = local as i64 - t as i64;
+    if skew.unsigned_abs() > config.max_skew {
+        eprintln!(
+            "⚠ 本机时钟与签名时间相差 {skew} 秒（配置允许 {} 秒）",
+            config.max_skew
+        );
+    }
+    Ok(NetworkTime {
+        unix: t,
+        sources: 1,
+        spread: 0,
+        local_skew_secs: skew,
+    })
 }
 
 /// 解析 HTTP `Date` 头（RFC 7231 IMF-fixdate）。
@@ -1129,5 +1303,61 @@ mod gate_tests {
         assert_eq!(parse_rfc3339("1994-11-06T08:49:37Z"), Some(784111777));
         assert!(parse_rfc3339("not-a-date").is_none());
         assert!(parse_rfc3339("2026-13-01T00:00:00Z").is_none());
+    }
+}
+
+#[cfg(test)]
+mod signed_token_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn config(key: &SigningKey) -> TimeConfig {
+        TimeConfig {
+            mode: "require".into(),
+            url: "https://time.example.com/time".into(),
+            pubkey: base64::engine::general_purpose::STANDARD
+                .encode(key.verifying_key().to_bytes()),
+            max_skew: 300,
+        }
+    }
+
+    fn body(key: &SigningKey, t: u64, nonce: &str) -> String {
+        let sig = key.sign(format!("{t}:{nonce}").as_bytes());
+        format!(
+            r#"{{"t":{t},"n":"{nonce}","sig":"{}"}}"#,
+            base64::engine::general_purpose::STANDARD.encode(sig.to_bytes())
+        )
+    }
+
+    #[test]
+    fn accepts_valid_signed_token() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let nonce = "abc123";
+        assert_eq!(
+            verify_signed_token(&config(&key), &body(&key, 1_760_000_000, nonce), nonce).unwrap(),
+            1_760_000_000
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_nonce_and_tamper() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let nonce = "abc123";
+        assert!(
+            verify_signed_token(&config(&key), &body(&key, 1_760_000_000, "other"), nonce).is_err()
+        );
+        let mut text = body(&key, 1_760_000_000, nonce);
+        text = text.replace("1760000000", "1760000001");
+        assert!(verify_signed_token(&config(&key), &text, nonce).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_key() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let other = SigningKey::from_bytes(&[8u8; 32]);
+        let nonce = "abc123";
+        assert!(
+            verify_signed_token(&config(&other), &body(&key, 1_760_000_000, nonce), nonce).is_err()
+        );
     }
 }

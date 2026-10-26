@@ -179,6 +179,64 @@ pub struct Session {
     pub exams: Vec<SessionExam>,
 }
 
+/// 签名时间令牌配置（阶段 4.2）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TimeConfig {
+    /// off / prefer / require
+    #[serde(default = "default_time_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub url: String,
+    /// base64(Ed25519 32B)
+    #[serde(default)]
+    pub pubkey: String,
+    #[serde(default = "default_time_skew")]
+    pub max_skew: u64,
+}
+
+fn default_time_mode() -> String {
+    "off".to_string()
+}
+fn default_time_skew() -> u64 {
+    300
+}
+
+impl Default for TimeConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_time_mode(),
+            url: String::new(),
+            pubkey: String::new(),
+            max_skew: default_time_skew(),
+        }
+    }
+}
+
+impl TimeConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.mode == "off" {
+            return Ok(());
+        }
+        if self.mode != "prefer" && self.mode != "require" {
+            return Err(format!(
+                "时间令牌 mode 必须是 off/prefer/require，实际 {}",
+                self.mode
+            ));
+        }
+        if !self.url.starts_with("https://") {
+            return Err("时间令牌 URL 必须以 https:// 开头".into());
+        }
+        use base64::Engine as _;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&self.pubkey)
+            .map_err(|_| "时间令牌公钥不是合法 base64".to_string())?;
+        if raw.len() != 32 {
+            return Err("时间令牌公钥必须是 32 字节 Ed25519 公钥".into());
+        }
+        Ok(())
+    }
+}
+
 /// 顶层构建清单（管理端产出，builder 消费）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
@@ -193,6 +251,8 @@ pub struct Manifest {
     /// Argon2id 参数（随包存储，便于将来调参而不作废旧包）。
     #[serde(default)]
     pub kdf: crate::crypto::KdfParams,
+    #[serde(default)]
+    pub time: TimeConfig,
 }
 
 /// 模型校验错误。
