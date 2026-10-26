@@ -756,13 +756,17 @@ class BuildTab(QWidget):
         if not raw:
             self._reset_project_dir()
             return
-        p = Path(raw)
+        p = Path(raw).expanduser().resolve()
         try:
             p.mkdir(parents=True, exist_ok=True)
+            probe = p / ".ees-write-test"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink()
         except OSError as e:
             QMessageBox.warning(self, "目录不可用", f"{p}\n\n{e}")
             self.edit_projdir.setText(str(project_dir_display()))
             return
+        self.edit_projdir.setText(str(p))
         settings().setValue(PROJECT_DIR, str(p))
 
     def _reset_project_dir(self) -> None:

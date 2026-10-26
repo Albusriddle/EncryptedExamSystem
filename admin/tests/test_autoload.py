@@ -212,3 +212,93 @@ def test_changed_project_dir_saves_copy(qapp, local_appdata, monkeypatch) -> Non
         assert settings().value(PROJECT_DIR, "", type=str) == str(new_dir)
     finally:
         win.deleteLater()
+
+
+def test_project_dir_is_normalized_to_absolute(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import PROJECT_DIR, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    monkeypatch.chdir(WORK)
+    win = MainWindow()
+    try:
+        win.build_tab.edit_projdir.setText("相对目录")
+        win.build_tab.commit_project_dir()
+        saved = Path(settings().value(PROJECT_DIR, "", type=str))
+        assert saved.is_absolute()
+        assert saved == (WORK / "相对目录").resolve()
+    finally:
+        win.deleteLater()
+
+
+def test_save_dialog_starts_in_project_dir(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import PROJECT_DIR, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    settings().setValue(PROJECT_DIR, str(WORK / "projdir"))
+    captured: list[str] = []
+
+    def fake_save(parent, title, directory, filters):  # noqa: ANN001, ARG001
+        captured.append(directory)
+        return ("", "")
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(fake_save))
+    win = MainWindow()
+    try:
+        win.save_project()
+        assert captured and captured[0].startswith(str(WORK / "projdir"))
+    finally:
+        win.deleteLater()
+
+
+def test_open_last_project_reports_missing_path(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import LAST_PROJECT, settings
+    from app.ui.main_window import MainWindow
+
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda parent, title, text: shown.append(text))
+    )
+    st = settings()
+    st.setValue(LAST_PROJECT, str(WORK / "gone.eesproj"))
+    st.sync()
+
+    win = MainWindow()
+    try:
+        win.open_last_project()
+        assert shown and "已不存在" in shown[0]
+    finally:
+        win.deleteLater()
+
+
+def test_same_name_copy_does_not_overwrite(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import PROJECT_DIR, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    old_dir = WORK / "old2"
+    new_dir = WORK / "new2"
+    settings().setValue(PROJECT_DIR, str(old_dir))
+
+    win = MainWindow()
+    try:
+        out = WORK / "包2.exe"
+        out.write_bytes(b"x")
+        win._on_built(str(out))
+        old_proj = win.project_path
+        assert old_proj is not None
+
+        new_dir.mkdir(parents=True, exist_ok=True)
+        conflict = new_dir / old_proj.name
+        conflict.write_text("另一个工程", encoding="utf-8")
+
+        win.build_tab.edit_projdir.setText(str(new_dir))
+        win._on_built(str(out))
+
+        assert win.project_path is not None
+        assert win.project_path != conflict
+        assert win.project_path.name.endswith("-1.eesproj")
+        assert conflict.read_text(encoding="utf-8") == "另一个工程"
+    finally:
+        win.deleteLater()

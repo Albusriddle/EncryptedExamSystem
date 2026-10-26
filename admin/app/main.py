@@ -111,7 +111,7 @@ def main() -> int:
         from PySide6.QtWidgets import QToolBar
 
         app = QApplication(sys.argv)
-        win = MainWindow(autoload=False)
+        win = MainWindow()
         win.show()
         for _ in range(10):
             app.processEvents()

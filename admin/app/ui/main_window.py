@@ -51,7 +51,7 @@ from app.version import app_version, watermark
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, autoload: bool = False) -> None:
+    def __init__(self) -> None:
         super().__init__()
         self.state = ProjectState()
         self.project_path: Path | None = None
@@ -68,10 +68,7 @@ class MainWindow(QMainWindow):
         self._build_tabs()
         self._build_statusbar()
         self._refresh_status()
-        if autoload:
-            self.open_last_project()
-        else:
-            self.statusBar().showMessage("已新建空白工程" + self._last_project_hint(), 10000)
+        self.statusBar().showMessage("已新建空白工程" + self._last_project_hint(), 10000)
 
     # ---------------------------------------------------------------- 构建
 
@@ -210,10 +207,13 @@ class MainWindow(QMainWindow):
         self._load_project(Path(path))
 
     def save_project(self) -> None:
+        start = project_dir_display() / (
+            self.project_path.name if self.project_path else "project.eesproj"
+        )
         path, selected = QFileDialog.getSaveFileName(
             self,
             "保存工程",
-            self.project_path.name if self.project_path else "project.eesproj",
+            str(start),
             "工程 (*.eesproj);;JSON (*.json)",
         )
         if not path:
@@ -238,12 +238,13 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- 工程自动保存/打开
 
-    def _last_project_path(self) -> Path | None:
+    def _last_project_raw(self) -> Path | None:
         raw = settings().value(LAST_PROJECT, "", type=str)
-        if not raw:
-            return None
-        p = Path(raw)
-        return p if p.is_file() else None
+        return Path(raw) if raw else None
+
+    def _last_project_path(self) -> Path | None:
+        p = self._last_project_raw()
+        return p if p is not None and p.is_file() else None
 
     def _last_project_hint(self) -> str:
         p = self._last_project_path()
@@ -255,12 +256,20 @@ class MainWindow(QMainWindow):
         self.act_last.setToolTip(f"上次工程：{p}\n点击打开" if p else "没有可打开的上次工程")
 
     def open_last_project(self) -> None:
-        p = self._last_project_path()
-        if p is None:
+        raw = self._last_project_raw()
+        if raw is None:
             QMessageBox.information(self, "没有上次工程", "还没有保存或打开过工程。")
             self._refresh_last_action()
             return
-        self._load_project(p)
+        if not raw.is_file():
+            QMessageBox.warning(
+                self,
+                "上次工程不存在",
+                f"上次工程文件已不存在：\n{raw}\n\n可能被移动或删除。",
+            )
+            self._refresh_last_action()
+            return
+        self._load_project(raw)
 
     def _load_project(self, path: Path) -> bool:
         if not self._confirm_discard():
@@ -322,6 +331,12 @@ class MainWindow(QMainWindow):
                 name = f"{prod.stem}-{digest}.eesproj"
                 renamed = False
             proj = target_dir / name
+            if renamed and proj.exists():
+                for i in range(1, 1000):
+                    cand = proj.with_name(f"{proj.stem}-{i}{proj.suffix}")
+                    if not cand.exists():
+                        proj = cand
+                        break
 
         try:
             proj.parent.mkdir(parents=True, exist_ok=True)
