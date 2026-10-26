@@ -237,15 +237,8 @@ class MainWindow(QMainWindow):
         self._load_project(Path(path))
 
     def _save_project_state(self, path: Path, passphrase: str | None) -> bool:
-        """保存工程；加密依赖缺失时降级明文，返回是否降级。"""
-        try:
-            self.state.save(path, passphrase)
-            return False
-        except ModuleNotFoundError:
-            if not passphrase:
-                raise
-            self.state.save(path, None)
-            return True
+        """保存工程；加密依赖缺失时由 ProjectState 统一降级明文。"""
+        return self.state.save(path, passphrase)
 
     def save_project(self) -> None:
         start = project_dir_display() / (
