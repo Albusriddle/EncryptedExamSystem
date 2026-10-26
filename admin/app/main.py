@@ -79,13 +79,23 @@ def selftest() -> int:
     一启动就 ModuleNotFoundError。这一步把它变成构建期失败。
     """
     try:
+        import argon2  # noqa: F401
         import pydantic  # noqa: F401
         from PySide6.QtWidgets import QApplication  # noqa: F401
 
         from app.branding import branding
+        from app.core import secure
         from app.core.models import Manifest  # noqa: F401
         from app.core.state import ProjectState  # noqa: F401
         from app.ui.main_window import MainWindow  # noqa: F401
+
+        blob = secure.seal(secure.MAGIC_KEY, "selftest-pass", b"x" * 32)
+        if secure.unseal(secure.MAGIC_KEY, "selftest-pass", blob) != b"x" * 32:
+            raise RuntimeError("secure.seal/unseal 自检失败")
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        ed = Ed25519PrivateKey.generate()
+        ed.public_key().verify(ed.sign(b"selftest"), b"selftest")
 
         # 品牌信息必须真的打进包：漏了 branding.json 时程序照常启动，
         # 只是欢迎弹窗的"致谢"会空着——这种静默降级必须在这里拦下。

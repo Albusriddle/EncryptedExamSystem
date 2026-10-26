@@ -156,6 +156,14 @@ def main() -> int:
         # 品牌信息：欢迎弹窗的仓库地址/许可证/致谢都从这里读
         "--add-data",
         f"{ROOT / 'branding.json'}{sep}.",
+        # 加密依赖是**动态导入**的（ProjectState.save 里 from app.core import secure），
+        # PyInstaller 静态分析看不到 argon2；v0.12.2 因此出现"打包版备份/加密全失败"。
+        "--collect-all",
+        "argon2",
+        "--collect-all",
+        "cryptography",
+        "--hidden-import",
+        "_argon2_cffi_bindings",
         # 让 PyInstaller 能找到 app 包
         "--paths",
         str(ADMIN),

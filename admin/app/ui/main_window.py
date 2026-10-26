@@ -236,6 +236,17 @@ class MainWindow(QMainWindow):
             return
         self._load_project(Path(path))
 
+    def _save_project_state(self, path: Path, passphrase: str | None) -> bool:
+        """保存工程；加密依赖缺失时降级明文，返回是否降级。"""
+        try:
+            self.state.save(path, passphrase)
+            return False
+        except ModuleNotFoundError:
+            if not passphrase:
+                raise
+            self.state.save(path, None)
+            return True
+
     def save_project(self) -> None:
         start = project_dir_display() / (
             self.project_path.name if self.project_path else "project.eesproj"
@@ -278,7 +289,7 @@ class MainWindow(QMainWindow):
         if not want_encrypt:
             self.project_passphrase = None
         try:
-            self.state.save(Path(path), self.project_passphrase)
+            downgraded = self._save_project_state(Path(path), self.project_passphrase)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "保存失败", str(e))
             return
@@ -291,6 +302,12 @@ class MainWindow(QMainWindow):
         self._refresh_status()
         self.build_tab.set_project_dir(Path(path).parent)
         self.build_tab.set_current_project(Path(path))
+        if downgraded:
+            QMessageBox.warning(
+                self,
+                "已降级为明文保存",
+                "本机缺少加密依赖（argon2），工程已按明文保存。\n请重新安装/更新管理端以恢复加密。",
+            )
         self.statusBar().showMessage(f"已保存 {path}", 5000)
 
     # ---------------------------------------------------------------- 工程自动保存/打开
@@ -494,7 +511,9 @@ class MainWindow(QMainWindow):
                 self.project_passphrase = pw
             if not want_encrypt:
                 self.project_passphrase = None
-            self.state.save(proj, self.project_passphrase if want_encrypt else None)
+            downgraded = self._save_project_state(
+                proj, self.project_passphrase if want_encrypt else None
+            )
         except Exception as e:  # noqa: BLE001 - 展示给用户
             self.build_tab.log_line(f"✗ 工程保存失败：{proj}（{e}）")
             QMessageBox.warning(self, "工程自动保存失败", f"{proj}\n\n{e}")
@@ -511,6 +530,8 @@ class MainWindow(QMainWindow):
         self.build_tab.set_current_project(proj)
 
         note = "（已另存到新目录，旧文件保留）" if renamed else ""
+        if downgraded:
+            note += "（加密依赖缺失，已明文保存）"
         if blocked:
             note += "（已避开考试包输出目录）"
         self.build_tab.log_line(f"✔ 已保存到工程：{proj}{note}")

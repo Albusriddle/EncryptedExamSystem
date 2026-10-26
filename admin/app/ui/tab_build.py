@@ -22,7 +22,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtCore import QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -567,8 +567,13 @@ class BuildTab(QWidget):
                 f"{exe}\n\n请先 cargo build --release -p builder",
             )
             return
-        if getattr(self, "_keygen", None) is not None and self._keygen.isRunning():
-            return
+        keygen = getattr(self, "_keygen", None)
+        try:
+            if keygen is not None and keygen.isRunning():
+                return
+        except RuntimeError:
+            # 上一轮 finished→deleteLater 后 C++ 对象已删，别在它上面调 isRunning
+            self._keygen = None
         self.btn_gen.setEnabled(False)
         self.btn_gen.setText("生成中…")
         self.gen_progress.setVisible(True)
@@ -591,6 +596,7 @@ class BuildTab(QWidget):
         QMessageBox.critical(self, "生成失败", message)
 
     def _reset_keygen_ui(self) -> None:
+        self._keygen = None
         self.btn_gen.setEnabled(True)
         self.btn_gen.setText("生成")
         self.gen_progress.setVisible(False)
@@ -784,6 +790,7 @@ class BuildTab(QWidget):
         self.progress.setVisible(True)
 
         pin_login = self.chk_pin_login.isChecked()
+        self._pin_path: Path | None = None
         emit_pins = None
         if pin_login:
             from app.ui.app_settings import project_dir_display, settings_path
@@ -793,6 +800,7 @@ class BuildTab(QWidget):
                 project_dir_display(), out, settings_path().parent / "projects"
             )
             emit_pins = safe_dir / f"登录PIN-{stamp}.csv"
+            self._pin_path = emit_pins
             if blocked:
                 self._append("⚠ 工程位置在考试包目录内，PIN 表已改存到默认目录")
             self._append(f"PIN 表将导出到：{emit_pins}")
@@ -929,6 +937,9 @@ class BuildTab(QWidget):
             self._append(f"  SHA-256 {digest}")
         except OSError:
             pass
+        pin_note = ""
+        if getattr(self, "_pin_path", None) is not None and self._pin_path.exists():
+            pin_note = f"\n\nPIN 表：\n{self._pin_path}"
         QMessageBox.information(
             self,
             "打包成功",
@@ -936,5 +947,17 @@ class BuildTab(QWidget):
             "✔ 密钥已内嵌在包内，学生双击即可使用（无需任何参数）。\n\n"
             "⚠ 请点上方【复制主密钥】保存到密码管理器——\n"
             "  它是重新打包本场考试的唯一凭据。\n\n"
-            "请核对日志里的 SHA-256。",
+            "请核对日志里的 SHA-256。" + pin_note,
         )
+        if getattr(self, "_pin_path", None) is not None and self._pin_path.exists():
+            box = QMessageBox(self)
+            box.setWindowTitle("PIN 表已导出")
+            box.setText(f"PIN 表已导出到：\n{self._pin_path}")
+            box.setInformativeText("请把这份 CSV 发给学生；它不在考试包目录里（故意）。")
+            open_btn = box.addButton("打开目录", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("确定", QMessageBox.ButtonRole.AcceptRole)
+            box.exec()
+            if box.clickedButton() is open_btn:
+                from PySide6.QtGui import QDesktopServices
+
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._pin_path.parent)))
