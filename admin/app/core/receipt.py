@@ -50,8 +50,8 @@ def load_or_create_key(path: Path | None = None) -> Ed25519PrivateKey:
     return key
 
 
-def fingerprint(key: Ed25519PrivateKey | None = None) -> str:
-    k = key or load_key()
+def fingerprint(signer: Ed25519PrivateKey | None = None) -> str:
+    k = signer or load_key()
     pub = k.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
@@ -68,9 +68,9 @@ def build_receipt(
     files: list[tuple[Path, dict[str, Any]]],
     *,
     package: str = "",
-    key: Ed25519PrivateKey | None = None,
+    signer: Ed25519PrivateKey | None = None,
 ) -> dict[str, Any]:
-    k = key or load_or_create_key()
+    k = signer or load_or_create_key()
     sheets = []
     for path, sheet in files:
         sheets.append(
@@ -93,12 +93,12 @@ def build_receipt(
     return data
 
 
-def verify_receipt(data: dict[str, Any], key: Ed25519PrivateKey | None = None) -> bool:
+def verify_receipt(data: dict[str, Any], signer: Ed25519PrivateKey | None = None) -> bool:
     sig = data.get("signature")
     if not sig:
         return False
     try:
-        k = key or load_key()
+        k = signer or load_key()
         k.public_key().verify(base64.b64decode(sig), _canonical(data))
         return True
     except Exception:  # noqa: BLE001 - 任何验签失败都返回 False

@@ -512,7 +512,7 @@ class AnswersTab(QWidget):
             return
         try:
             key = load_or_create_key()
-            data = build_receipt(files, package=str(self.package or ""), key=key)
+            data = build_receipt(files, package=str(self.package or ""), signer=key)
             Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "签发失败", str(e))
