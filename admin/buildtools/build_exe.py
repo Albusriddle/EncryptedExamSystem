@@ -164,6 +164,8 @@ def main() -> int:
         "cryptography",
         "--hidden-import",
         "_argon2_cffi_bindings",
+        "--hidden-import",
+        "app.core.receipt",
         # 让 PyInstaller 能找到 app 包
         "--paths",
         str(ADMIN),

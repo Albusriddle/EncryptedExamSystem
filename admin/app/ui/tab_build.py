@@ -940,24 +940,27 @@ class BuildTab(QWidget):
         pin_note = ""
         if getattr(self, "_pin_path", None) is not None and self._pin_path.exists():
             pin_note = f"\n\nPIN 表：\n{self._pin_path}"
-        QMessageBox.information(
-            self,
-            "打包成功",
+        box = QMessageBox(self)
+        box.setWindowTitle("打包成功")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(
             f"已生成：\n{out}\n\n"
             "✔ 密钥已内嵌在包内，学生双击即可使用（无需任何参数）。\n\n"
             "⚠ 请点上方【复制主密钥】保存到密码管理器——\n"
             "  它是重新打包本场考试的唯一凭据。\n\n"
-            "请核对日志里的 SHA-256。" + pin_note,
+            "请核对日志里的 SHA-256。" + pin_note
         )
-        if getattr(self, "_pin_path", None) is not None and self._pin_path.exists():
-            box = QMessageBox(self)
-            box.setWindowTitle("PIN 表已导出")
-            box.setText(f"PIN 表已导出到：\n{self._pin_path}")
-            box.setInformativeText("请把这份 CSV 发给学生；它不在考试包目录里（故意）。")
-            open_btn = box.addButton("打开目录", QMessageBox.ButtonRole.ActionRole)
-            box.addButton("确定", QMessageBox.ButtonRole.AcceptRole)
-            box.exec()
-            if box.clickedButton() is open_btn:
-                from PySide6.QtGui import QDesktopServices
+        if pin_note:
+            box.setInformativeText("PIN 表只发给教师，不在考试包目录里（故意）。")
+        open_out = box.addButton("打开输出目录", QMessageBox.ButtonRole.ActionRole)
+        open_pin = None
+        if pin_note:
+            open_pin = box.addButton("打开 PIN 目录", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("确定", QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+        from PySide6.QtGui import QDesktopServices
 
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._pin_path.parent)))
+        if box.clickedButton() is open_out:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(out.parent)))
+        elif open_pin is not None and box.clickedButton() is open_pin:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._pin_path.parent)))

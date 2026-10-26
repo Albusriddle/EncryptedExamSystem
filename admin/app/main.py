@@ -97,6 +97,19 @@ def selftest() -> int:
         ed = Ed25519PrivateKey.generate()
         ed.public_key().verify(ed.sign(b"selftest"), b"selftest")
 
+        # 收据模块是动态导入的，必须显式跑一次，防止打包漏模块
+        import tempfile
+        from pathlib import Path
+
+        from app.core.receipt import build_receipt, verify_receipt
+
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "a.eea"
+            fake.write_bytes(b"selftest")
+            rec = build_receipt([(fake, {"student_id": 1, "session_id": 1})], signer=ed)
+            if not verify_receipt(rec):
+                raise RuntimeError("receipt 自检失败")
+
         # 品牌信息必须真的打进包：漏了 branding.json 时程序照常启动，
         # 只是欢迎弹窗的"致谢"会空着——这种静默降级必须在这里拦下。
         b = branding()

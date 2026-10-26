@@ -567,6 +567,32 @@ class AnswersTab(QWidget):
             self, "已备份", f"收据私钥已导出：\n{path}\n\n指纹：{fingerprint(signer=key)}"
         )
 
+    def _restore_receipt_key(self) -> None:
+        from app.core.receipt import fingerprint, key_path, load_key
+
+        src, _ = QFileDialog.getOpenFileName(self, "恢复收据私钥", "", "PEM (*.pem)")
+        if not src:
+            return
+        pw, ok = QInputDialog.getText(
+            self, "恢复口令", "备份口令（未加密则留空）：", QLineEdit.EchoMode.Password
+        )
+        if not ok:
+            return
+        try:
+            key = load_key(Path(src), pw or None)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "恢复失败", f"{src}\n\n{e}")
+            return
+        try:
+            key_path().parent.mkdir(parents=True, exist_ok=True)
+            Path(key_path()).write_bytes(Path(src).read_bytes())
+        except OSError as e:
+            QMessageBox.critical(self, "恢复失败", str(e))
+            return
+        QMessageBox.information(
+            self, "已恢复", f"收据私钥已恢复。\n指纹：{fingerprint(signer=key)}"
+        )
+
     def _verify_receipt(self) -> None:
         from app.core.receipt import verify_files, verify_package, verify_receipt_detailed
 
@@ -606,6 +632,10 @@ class AnswersTab(QWidget):
             QMessageBox.critical(self, "验签失败", f"原因：{reason}")
             return
         issues = verify_files(data, base_dir=Path(path).parent, strict=True)
+        if issues and any("文件不存在" in x for x in issues):
+            d = QFileDialog.getExistingDirectory(self, "选择答题卡所在目录", str(Path(path).parent))
+            if d:
+                issues = verify_files(data, base_dir=Path(d), strict=True)
         if issues:
             QMessageBox.warning(self, "文件已变化", "\n".join(issues[:10]))
             return

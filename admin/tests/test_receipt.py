@@ -128,3 +128,13 @@ def test_receipt_rejects_non_eea(tmp_path: Path) -> None:
     key = Ed25519PrivateKey.generate()
     with pytest.raises(ValueError):
         build_receipt([(bad, {"student_id": 1, "session_id": 2})], signer=key)
+
+
+def test_encrypted_key_backup_roundtrip(tmp_path: Path) -> None:
+    from app.core.receipt import export_key, fingerprint, load_key
+
+    key = Ed25519PrivateKey.generate()
+    out = tmp_path / "key.pem"
+    export_key(out, key, "backup-pass")
+    loaded = load_key(out, "backup-pass")
+    assert fingerprint(signer=loaded) == fingerprint(signer=key)

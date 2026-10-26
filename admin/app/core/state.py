@@ -371,10 +371,11 @@ class ProjectState:
 
     # ---------------------------------------------------------------- 存取
 
-    def save(self, path: Path, passphrase: str | None = None) -> None:
-        """保存工程配置；passphrase 非空时写加密格式（EESPROJ2）。
+    def save(self, path: Path, passphrase: str | None = None) -> bool:
+        """保存工程配置；passphrase 非空时写加密格式（EESPROJ3）。
 
-        **绝不写入 master**：只存 salt、KDF、题库路径、学生、场次。
+        返回 True 表示请求了加密但本机缺少加密依赖，已降级为明文保存。
+        绝不写入 master：只存 salt、KDF、题库路径、学生、场次。
         题库内容也不存——教师会持续修改源文件，存路径更合理。
         """
         data = {
@@ -387,10 +388,14 @@ class ProjectState:
             "sessions": [s.model_dump() for s in self.sessions],
         }
         raw = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        downgraded = False
         if passphrase:
-            from app.core import secure
+            try:
+                from app.core import secure
 
-            raw = secure.encrypt_project(raw, passphrase)
+                raw = secure.encrypt_project(raw, passphrase)
+            except ModuleNotFoundError:
+                downgraded = True
         tmp = path.with_name(path.name + ".tmp")
         try:
             tmp.write_bytes(raw)
@@ -399,6 +404,7 @@ class ProjectState:
             os.replace(tmp, path)
         finally:
             tmp.unlink(missing_ok=True)
+        return downgraded
 
     @classmethod
     def load(cls, path: Path, passphrase: str | None = None) -> ProjectState:
