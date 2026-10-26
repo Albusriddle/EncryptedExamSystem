@@ -415,6 +415,7 @@ impl eframe::App for ExamApp {
                     ui.add(
                         egui::TextEdit::singleline(pin)
                             .hint_text("6 位 PIN")
+                            .password(true)
                             .desired_width(240.0),
                     );
 

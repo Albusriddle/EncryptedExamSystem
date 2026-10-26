@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.banks_io import write_temp_banks
-from app.core.buildcmd import build_command, build_env
+from app.core.buildcmd import build_command, build_env, safe_pin_dir
 from app.core.state import ProjectState
 from app.core.subproc import no_window_kwargs
 
@@ -786,10 +786,16 @@ class BuildTab(QWidget):
         pin_login = self.chk_pin_login.isChecked()
         emit_pins = None
         if pin_login:
-            from app.ui.app_settings import project_dir_display
+            from app.ui.app_settings import project_dir_display, settings_path
 
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            emit_pins = project_dir_display() / f"登录PIN-{stamp}.csv"
+            safe_dir, blocked = safe_pin_dir(
+                project_dir_display(), out, settings_path().parent / "projects"
+            )
+            emit_pins = safe_dir / f"登录PIN-{stamp}.csv"
+            if blocked:
+                self._append("⚠ 工程位置在考试包目录内，PIN 表已改存到默认目录")
+            self._append(f"PIN 表将导出到：{emit_pins}")
         self.worker = BuildWorker(
             manifest_path, tmpdir, stub, out, master, keyfile, pin_login, emit_pins
         )

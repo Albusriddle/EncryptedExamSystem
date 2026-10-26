@@ -92,6 +92,17 @@ enum Cmd {
         #[arg(long)]
         master_file: Option<PathBuf>,
     },
+    /// 从包里导出 PIN 表（需要 master）
+    ExportPins {
+        #[arg(long)]
+        package: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, conflicts_with = "master_file")]
+        master: Option<String>,
+        #[arg(long)]
+        master_file: Option<PathBuf>,
+    },
     /// 校验一个包能否被指定密钥解开
     Verify {
         #[arg(long)]
@@ -306,6 +317,34 @@ fn check_binding(
     Ok(qids == sheet.qids)
 }
 
+fn export_pins(
+    package: &std::path::Path,
+    out: &std::path::Path,
+    master: Option<String>,
+    master_file: Option<PathBuf>,
+) -> Result<()> {
+    let master_hex = resolve_master(master, master_file)?;
+    let master = crypto::master_from_hex(&master_hex).context("解析主密钥")?;
+    let bytes = std::fs::read(package).with_context(|| format!("读取 {}", package.display()))?;
+    let payload = container::extract_payload(&bytes).context("包里没有 payload")?;
+    let k_manifest = container::manifest_key(&master);
+    let (header, _) = container::parse_header(payload, &k_manifest).context("解析 header")?;
+    let pins = container::decrypt_pins(&master, &header)?
+        .context("这个包没有 PIN 表（旧包或未启用「每生 PIN 登录」）")?;
+    let mut rows: Vec<((u32, u64), String)> = pins.into_iter().collect();
+    rows.sort_by_key(|((s, t), _)| (*s, *t));
+    let mut csv = format!(
+        "\u{feff}# package: {}\n场次,学号,PIN\n",
+        package.file_name().unwrap_or_default().to_string_lossy()
+    );
+    for ((sid, stu), pin) in rows {
+        csv.push_str(&format!("{sid},{stu},{pin}\n"));
+    }
+    std::fs::write(out, csv).with_context(|| format!("写入 {}", out.display()))?;
+    println!("PIN 表已导出：{}", out.display());
+    Ok(())
+}
+
 fn emit_result(
     as_json: bool,
     ok: bool,
@@ -376,6 +415,14 @@ fn main() -> Result<()> {
                 pin_login,
                 emit_pins,
             })?;
+        }
+        Cmd::ExportPins {
+            package,
+            out,
+            master,
+            master_file,
+        } => {
+            export_pins(&package, &out, master, master_file)?;
         }
         Cmd::Verify {
             package,
@@ -552,19 +599,15 @@ fn build(req: BuildRequest) -> Result<()> {
     let pins = if pin_login {
         use rand::Rng;
         let mut map = std::collections::HashMap::new();
-        let mut csv = String::from("\u{feff}场次,学号,PIN\n");
         for s in &manifest.sessions {
             for &sid in &s.students {
                 let pin = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
                 map.insert((s.session_id, sid), pin.clone());
-                csv.push_str(&format!("{},{},{}\n", s.session_id, sid, pin));
             }
         }
-        let path = emit_pins
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("--pin-login 必须配合 --emit-pins 导出 PIN 表"))?;
-        std::fs::write(path, csv).with_context(|| format!("写入 PIN 表 {}", path.display()))?;
-        println!("PIN 表已导出：{}", path.display());
+        if emit_pins.is_none() {
+            anyhow::bail!("--pin-login 必须配合 --emit-pins 导出 PIN 表");
+        }
         Some(map)
     } else {
         None
@@ -647,6 +690,21 @@ fn build(req: BuildRequest) -> Result<()> {
         let _ = std::fs::remove_file(&tmp_path);
     }
     write_result?;
+
+    if let (Some(path), Some(map)) = (&emit_pins, &pins) {
+        let mut rows: Vec<((u32, u64), String)> =
+            map.iter().map(|(k, v)| (*k, v.clone())).collect();
+        rows.sort_by_key(|((s, t), _)| (*s, *t));
+        let mut csv = format!(
+            "\u{feff}# package: {}\n场次,学号,PIN\n",
+            out_path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        for ((sid, stu), pin) in rows {
+            csv.push_str(&format!("{sid},{stu},{pin}\n"));
+        }
+        std::fs::write(path, csv).with_context(|| format!("写入 PIN 表 {}", path.display()))?;
+        println!("PIN 表已导出：{}", path.display());
+    }
 
     let total_students: usize = manifest.sessions.iter().map(|s| s.students.len()).sum();
     println!("✔ 已生成 {}", out_path.display());

@@ -20,7 +20,9 @@ mod nav;
 mod welcome;
 mod workflow;
 
-use anyhow::Result;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 use clap::Parser;
 
 use common::timegate;
@@ -44,9 +46,12 @@ struct Cli {
     /// 在门禁通过后，进一步指定场次（**不能**绕过时间窗）
     #[arg(long)]
     session: Option<u32>,
-    /// 每生登录 PIN（包启用 PIN 登录时必填）
+    /// 每生登录 PIN（包启用 PIN 登录时必填；调试用，注意进程列表可见）
     #[arg(long)]
     pin: Option<String>,
+    /// 从文件读取 PIN（推荐，避免进进程列表）
+    #[arg(long, conflicts_with = "pin")]
+    pin_file: Option<PathBuf>,
     /// 跳过时间门禁。**仅 debug 构建可用**，release 里不存在这个参数。
     #[cfg(debug_assertions)]
     #[arg(long, hide = true)]
@@ -112,7 +117,17 @@ fn main() -> Result<()> {
         #[cfg(not(debug_assertions))]
         skip_time_gate: false,
     };
-    let unlocked = workflow::unlock_with_pin(cli.student, cli.pin.as_deref(), &opts)?;
+    let pin = match (cli.pin, cli.pin_file) {
+        (Some(p), _) => Some(p),
+        (None, Some(path)) => Some(
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("读取 PIN 文件 {}", path.display()))?
+                .trim()
+                .to_string(),
+        ),
+        (None, None) => None,
+    };
+    let unlocked = workflow::unlock_with_pin(cli.student, pin.as_deref(), &opts)?;
     print_result(&unlocked);
     Ok(())
 }

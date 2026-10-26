@@ -112,7 +112,9 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
     let unlocked =
         container::try_unlock_session_with_pin(session, &header, blob_area, student_id, &salt, pin)
             .context("解锁失败（包损坏或 KDF 参数异常）")?
-            .with_context(|| format!("学号 {student_id} 不在场次 {session_id} 的名单中"))?;
+            .with_context(|| {
+                format!("学号或 PIN 不正确，或学号 {student_id} 不在场次 {session_id} 的名单中")
+            })?;
 
     // 5. 解密题库。
     let data = container::decrypt_data(&unlocked.session_secret, &salt, &unlocked.data_ct)

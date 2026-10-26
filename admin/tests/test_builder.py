@@ -291,3 +291,14 @@ def test_pin_login_flags(tmp_path: Path) -> None:
     cmd = build_command(**p, pin_login=True, emit_pins=pins)
     assert "--pin-login" in cmd
     assert cmd[cmd.index("--emit-pins") + 1] == str(pins)
+
+
+def test_safe_pin_dir_avoids_output(tmp_path: Path) -> None:
+    from app.core.buildcmd import safe_pin_dir
+
+    out = tmp_path / "考试包" / "StudentClient.exe"
+    fallback = tmp_path / "fallback"
+    d, blocked = safe_pin_dir(tmp_path / "考试包" / "工程", out, fallback)
+    assert blocked and d == fallback
+    d2, blocked2 = safe_pin_dir(tmp_path / "projects", out, fallback)
+    assert not blocked2 and d2 == tmp_path / "projects"

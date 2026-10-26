@@ -22,6 +22,21 @@ from pathlib import Path
 MASTER_ENV = "EXAM_MASTER"
 
 
+def safe_pin_dir(project_dir: Path, output: Path, fallback: Path) -> tuple[Path, bool]:
+    """PIN 表绝不能落在考试包输出目录（含子目录）。
+
+    返回 (实际目录, 是否被迫避开)。
+    """
+    try:
+        proj = project_dir.resolve()
+        out_dir = output.resolve().parent
+    except OSError:
+        return project_dir, False
+    if proj == out_dir or proj.is_relative_to(out_dir):
+        return fallback, True
+    return project_dir, False
+
+
 def build_command(
     *,
     builder_exe: Path,

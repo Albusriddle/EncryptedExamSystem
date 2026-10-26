@@ -41,7 +41,9 @@ pub const MAGIC: &[u8; 8] = b"EXAMPKG3";
 /// 尾部魔数，用于从 exe 末尾定位 payload。
 pub const MAGIC_TAIL: &[u8; 8] = b"EXAMTAIL";
 /// 当前格式版本。
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
+/// 旧版（v3）仍可读；v4 起信封可带每生 PIN。
+pub const MIN_SUPPORTED_VERSION: u32 = 3;
 
 /// 密钥区魔数：标记"这个包内嵌了 K_manifest"。
 pub const KEY_MAGIC: &[u8; 8] = b"EXAMKEY1";
@@ -831,9 +833,9 @@ pub fn embedded_k_manifest(payload: &[u8]) -> Result<Option<[u8; 32]>, Container
         return Err(ContainerError::Format("payload 魔数错误".into()));
     }
     let version = u32::from_le_bytes(payload[8..12].try_into().expect("4 字节"));
-    if version != VERSION {
+    if !(MIN_SUPPORTED_VERSION..=VERSION).contains(&version) {
         return Err(ContainerError::Format(format!(
-            "不支持的版本 {version}（当前支持 {VERSION}）"
+            "不支持的版本 {version}（当前支持 {MIN_SUPPORTED_VERSION}–{VERSION}）"
         )));
     }
     let header_len = u32::from_le_bytes(payload[12..16].try_into().expect("4 字节")) as usize;
@@ -861,9 +863,9 @@ pub fn parse_header<'a>(
         return Err(ContainerError::Format("payload 魔数错误".into()));
     }
     let version = u32::from_le_bytes(payload[8..12].try_into().expect("4 字节"));
-    if version != VERSION {
+    if !(MIN_SUPPORTED_VERSION..=VERSION).contains(&version) {
         return Err(ContainerError::Format(format!(
-            "不支持的版本 {version}（当前支持 {VERSION}）"
+            "不支持的版本 {version}（当前支持 {MIN_SUPPORTED_VERSION}–{VERSION}）"
         )));
     }
     let header_len = u32::from_le_bytes(payload[12..16].try_into().expect("4 字节")) as usize;
