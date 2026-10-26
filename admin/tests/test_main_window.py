@@ -122,9 +122,13 @@ def test_encrypted_save_forces_eesproj_suffix(qapp, tmp_path, monkeypatch) -> No
 
 
 def test_on_built_respects_encrypt_checkbox(qapp, tmp_path, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
     from app.core.state import ProjectState
     from app.ui.app_settings import PROJECT_DIR, settings
 
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0, raising=False)
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
     win = MainWindow()
     try:
         settings().setValue(PROJECT_DIR, str(tmp_path))
