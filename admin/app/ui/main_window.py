@@ -43,6 +43,7 @@ from app.ui.app_settings import (
     project_dir_display,
     projects_dir,
     settings,
+    settings_path,
 )
 from app.ui.tab_answers import AnswersTab
 from app.ui.tab_banks import BanksTab
@@ -195,11 +196,11 @@ class MainWindow(QMainWindow):
         self.project_path = None
         self._dirty = False
         self._config_bad = False
-        self._ensure_project_dir()
+        note = self._ensure_project_dir()
         self._reload_tabs()
-        self.statusBar().showMessage("已新建工程", 4000)
+        self.statusBar().showMessage(note or "已新建工程", 8000)
 
-    def _ensure_project_dir(self) -> None:
+    def _ensure_project_dir(self) -> str | None:
         """目录失效（U 盘拔出/共享盘离线）时回退到默认位置。"""
         d = project_dir_display()
         try:
@@ -209,9 +210,8 @@ class MainWindow(QMainWindow):
             probe.unlink()
         except OSError:
             settings().remove(PROJECT_DIR)
-            self.statusBar().showMessage(
-                f"原工程目录不可用，已改用默认目录：{projects_dir()}", 8000
-            )
+            return f"原工程目录不可用，已改用默认目录：{projects_dir()}"
+        return None
 
     def open_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -239,6 +239,18 @@ class MainWindow(QMainWindow):
         if not Path(path).suffix:
             # 按老师选的过滤器补扩展名；默认（工程）补 .eesproj
             path += ".json" if "JSON" in (selected or "") else ".eesproj"
+        out = self.build_tab.edit_out.text().strip() if getattr(self, "build_tab", None) else ""
+        if out and _is_inside(Path(path).parent, Path(out).parent):
+            ret = QMessageBox.question(
+                self,
+                "工程会随考试包分发",
+                f"这个目录就是考试包的输出目录：\n{Path(out).parent}\n\n"
+                "工程文件含标准答案，**不要随考试包发给学生**。\n仍要保存到这里吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return
         try:
             self.state.save(Path(path))
         except Exception as e:  # noqa: BLE001
@@ -333,14 +345,13 @@ class MainWindow(QMainWindow):
         prod = Path(out)
         if getattr(self, "build_tab", None) is not None:
             self.build_tab.commit_project_dir()
+        output_dir = prod.parent
         target_dir = active_projects_dir()
         blocked = False
-        if target_dir.resolve() == prod.parent.resolve():
-            # 绝不把含标准答案的工程写进要发给学生的目录
+        if _is_inside(target_dir, output_dir):
+            # 绝不把含标准答案的工程写进要发给学生的目录（含子目录）
             fallback = projects_dir()
-            if fallback.resolve() == prod.parent.resolve():
-                from app.ui.app_settings import settings_path
-
+            if _is_inside(fallback, output_dir):
                 fallback = settings_path().parent / "projects"
             target_dir = fallback
             blocked = True
@@ -382,13 +393,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "工程自动保存失败", f"目录不可写：{proj.parent}\n\n{e}")
             return
 
-        legacy = prod.with_suffix(".eesproj")
-        if legacy.exists() and legacy != proj:
+        stray = [x for x in prod.parent.glob("*.eesproj") if x.resolve() != proj.resolve()]
+        if stray:
+            names = "\n".join(f"· {x.name}" for x in sorted(stray)[:8])
+            more = f"\n…（共 {len(stray)} 个）" if len(stray) > 8 else ""
             QMessageBox.warning(
                 self,
-                "发现旧版工程文件",
-                f"考试包目录里有一个旧版工程文件：\n{legacy}\n\n"
-                "它包含标准答案，**不要随考试包发给学生**。\n建议手动删除。",
+                "考试包目录里有工程文件",
+                f"考试包目录里有 {len(stray)} 个工程文件（含标准答案）：\n{names}{more}\n\n"
+                "**不要随考试包发给学生**，请删除或移到工程保存位置。",
             )
 
         try:
@@ -467,6 +480,14 @@ class MainWindow(QMainWindow):
         """
         self._build_tabs()
         self._refresh_status()
+
+
+def _is_inside(path: Path, root: Path) -> bool:
+    """path 是否等于 root 或在 root 之下（用于判断"会不会随包发出去"）。"""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
 
 
 def make_manifest(state: ProjectState) -> Manifest:

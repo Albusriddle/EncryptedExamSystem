@@ -94,7 +94,8 @@ def test_autosave_saves_project_and_last_project(qapp, local_appdata, monkeypatc
 
     win = MainWindow()
     try:
-        out = WORK / "包.exe"
+        out = WORK / "out" / "包.exe"
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"x")
         win._on_built(str(out))
 
@@ -196,7 +197,8 @@ def test_changed_project_dir_saves_copy(qapp, local_appdata, monkeypatch) -> Non
 
     win = MainWindow()
     try:
-        out = WORK / "包.exe"
+        out = WORK / "out" / "包.exe"
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"x")
         win._on_built(str(out))
         old_proj = win.project_path
@@ -283,7 +285,8 @@ def test_same_name_copy_does_not_overwrite(qapp, local_appdata, monkeypatch) -> 
 
     win = MainWindow()
     try:
-        out = WORK / "包2.exe"
+        out = WORK / "out2" / "包2.exe"
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"x")
         win._on_built(str(out))
         old_proj = win.project_path
@@ -358,5 +361,98 @@ def test_last_project_tooltip_reports_missing(qapp, local_appdata, monkeypatch) 
     win = MainWindow()
     try:
         assert "已不存在" in win.act_last.toolTip()
+    finally:
+        win.deleteLater()
+
+
+def test_build_avoids_subdir_of_output(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import PROJECT_DIR, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    out_dir = WORK / "out3"
+    settings().setValue(PROJECT_DIR, str(out_dir / "工程"))
+
+    win = MainWindow()
+    try:
+        out = out_dir / "包.exe"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"x")
+        win._on_built(str(out))
+        assert not list(out_dir.rglob("*.eesproj")), "子目录也会随包发出去，必须避开"
+    finally:
+        win.deleteLater()
+
+
+def test_fallback_also_avoids_output_dir(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui import main_window as mw
+    from app.ui.app_settings import PROJECT_DIR, settings
+
+    _mute(monkeypatch)
+    out_dir = WORK / "out4"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    settings().setValue(PROJECT_DIR, str(out_dir))
+    # 模拟"默认目录也在输出目录里"的极端情况
+    monkeypatch.setattr(mw, "projects_dir", lambda: out_dir / "projects")
+
+    win = mw.MainWindow()
+    try:
+        out = out_dir / "包.exe"
+        out.write_bytes(b"x")
+        win._on_built(str(out))
+        assert not list(out_dir.rglob("*.eesproj"))
+    finally:
+        win.deleteLater()
+
+
+def test_stray_project_files_are_reported(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import PROJECT_DIR, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    out_dir = WORK / "out5"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "old-a.eesproj").write_text("x", encoding="utf-8")
+    (out_dir / "old-b.eesproj").write_text("x", encoding="utf-8")
+    settings().setValue(PROJECT_DIR, str(WORK / "projdir5"))
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda parent, title, text: warnings.append(text))
+    )
+
+    win = MainWindow()
+    try:
+        out = out_dir / "包.exe"
+        out.write_bytes(b"x")
+        win._on_built(str(out))
+        assert any("2 个工程文件" in w for w in warnings), warnings
+    finally:
+        win.deleteLater()
+
+
+def test_save_project_warns_inside_output_dir(qapp, local_appdata, monkeypatch) -> None:
+    from app.ui.app_settings import PROJECT_DIR, settings
+    from app.ui.main_window import MainWindow
+
+    _mute(monkeypatch)
+    out_dir = WORK / "out6"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    settings().setValue(PROJECT_DIR, str(WORK / "projdir6"))
+
+    monkeypatch.setattr(
+        QFileDialog,
+        "getSaveFileName",
+        staticmethod(lambda *a, **k: (str(out_dir / "x.eesproj"), "")),
+    )
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.No)
+    )
+
+    win = MainWindow()
+    try:
+        win.build_tab.edit_out.setText(str(out_dir / "StudentClient.exe"))
+        win.save_project()
+        assert not (out_dir / "x.eesproj").exists()
     finally:
         win.deleteLater()
