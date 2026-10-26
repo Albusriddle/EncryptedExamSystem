@@ -215,6 +215,12 @@ class AnswersTab(QWidget):
         self.btn_verify_receipt = QPushButton("验证收据…")
         self.btn_verify_receipt.clicked.connect(self._verify_receipt)
         btns.addWidget(self.btn_verify_receipt)
+        self.btn_receipt_key = QPushButton("备份收据私钥…")
+        self.btn_receipt_key.setToolTip(
+            "把 receipt-key.pem 导出到安全位置（换机/重装后验证旧收据用）"
+        )
+        self.btn_receipt_key.clicked.connect(self._backup_receipt_key)
+        btns.addWidget(self.btn_receipt_key)
         self.btn_csv = QPushButton("导出原始作答 CSV")
         self.btn_csv.setToolTip("只导出学生原始作答，不含分数；判分请用下方「导出判分结果…」")
         self.btn_csv.clicked.connect(self._export_csv)
@@ -514,6 +520,12 @@ class AnswersTab(QWidget):
             key = load_or_create_key()
             data = build_receipt(files, package=str(self.package or ""), signer=key)
             Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._audit(
+                "receipt_issued",
+                path=path,
+                count=len(files),
+                fingerprint=data.get("key_fingerprint", ""),
+            )
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "签发失败", str(e))
             return
@@ -525,28 +537,72 @@ class AnswersTab(QWidget):
             "请同时备份私钥（appdata 下 receipt-key.pem）。",
         )
 
+    def _backup_receipt_key(self) -> None:
+        from app.core.receipt import export_key, fingerprint, load_or_create_key
+
+        try:
+            key = load_or_create_key()
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "无法读取收据私钥", str(e))
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "备份收据私钥", f"receipt-key-{fingerprint(signer=key)}.pem", "PEM (*.pem)"
+        )
+        if not path:
+            return
+        try:
+            export_key(Path(path), key)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "备份失败", str(e))
+            return
+        QMessageBox.information(
+            self, "已备份", f"收据私钥已导出：\n{path}\n\n指纹：{fingerprint(signer=key)}"
+        )
+
     def _verify_receipt(self) -> None:
-        from app.core.receipt import load_key, verify_files, verify_receipt
+        from app.core.receipt import verify_files, verify_package, verify_receipt_detailed
 
         path, _ = QFileDialog.getOpenFileName(self, "验证收据", "", "收据 (*.json)")
         if not path:
             return
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
-            key = load_key()
         except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "无法验证", str(e))
+            QMessageBox.critical(self, "无法读取收据", str(e))
             return
-        if not verify_receipt(data, key):
-            QMessageBox.critical(self, "验签失败", "收据签名无效（被改过或不是本机密钥签发）。")
+        ok, reason = verify_receipt_detailed(data)
+        if not ok and reason == "missing_public_key":
+            try:
+                from app.core.receipt import load_key
+
+                ok, reason = verify_receipt_detailed(data, load_key())
+            except Exception:  # noqa: BLE001
+                pass
+        if not ok:
+            QMessageBox.critical(self, "验签失败", f"原因：{reason}")
             return
-        issues = verify_files(data)
+        issues = verify_files(data, base_dir=Path(path).parent)
         if issues:
             QMessageBox.warning(self, "文件已变化", "\n".join(issues[:10]))
-        else:
-            QMessageBox.information(
-                self, "验证通过", f"签名有效，{len(data.get('sheets', []))} 份答题卡哈希一致。"
-            )
+            return
+        pkg_issue = ""
+        if data.get("package") and data.get("package_sha256"):
+            pkg_issue = verify_package(data, Path(str(data["package"])))
+        if pkg_issue:
+            QMessageBox.warning(self, "考试包不一致", pkg_issue)
+            return
+        self._audit(
+            "receipt_verified",
+            path=path,
+            count=len(data.get("sheets", [])),
+            fingerprint=data.get("key_fingerprint", ""),
+        )
+        QMessageBox.information(
+            self,
+            "验证通过",
+            f"签名有效，{len(data.get('sheets', []))} 份答题卡哈希一致。\n"
+            f"密钥指纹：{data.get('key_fingerprint', '—')}",
+        )
 
     def _show_attendance(self) -> None:
         from app.ui.attendance_dialog import AttendanceDialog

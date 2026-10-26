@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -21,27 +20,20 @@ PROJECT_ENCRYPT = "project_encrypt"
 
 
 def settings_path() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
-    return Path(base) / "ExamSystem" / "settings.ini"
+    from app.core.paths import settings_path as _p
+
+    return _p()
 
 
 def teacher_dir() -> Path | None:
-    """教师端程序所在目录（打包后）；源码运行返回 None。
-
-    源码运行时返回 None 是为了不往仓库里写工程文件——测试与开发都走 appdata。
-    """
+    """教师端程序所在目录（打包后）；源码运行返回 None。"""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return None
 
 
 def projects_dir(create: bool = True) -> Path:
-    """自动保存的工程目录。
-
-    优先**教师端程序目录**下的 `projects/`（老师看得见、好备份）；
-    程序目录只读（Program Files / 只读 U 盘）时回退 `%LOCALAPPDATA%`。
-    **绝不放在考试包输出目录**——那里是要发给学生的。
-    """
+    """自动保存的工程目录；程序目录只读时回退 appdata。"""
     base = teacher_dir()
     if base is not None:
         d = base / "projects"
