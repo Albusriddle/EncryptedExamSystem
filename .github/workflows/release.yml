@@ -118,7 +118,9 @@ jobs:
           cp target/x86_64-pc-windows-msvc/release/exam-builder.exe release/
           cp target/x86_64-pc-windows-msvc/release/exam-client.exe release/stub-template.exe
           cp dist/ExamAdmin-*-windows.zip release/
+          ( cd release && sha256sum * > SHA256SUMS.txt )
           ls -la release/
+          cat release/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -156,4 +158,5 @@ jobs:
             release/ExamAdmin-*-windows.zip
             release/exam-builder.exe
             release/stub-template.exe
+            release/SHA256SUMS.txt
           body_path: body.md
