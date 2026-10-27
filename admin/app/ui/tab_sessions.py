@@ -549,6 +549,7 @@ class SessionsTab(QWidget):
                 return None
             parts: list[SectionPart] = []
             part_titles: set[str] = set()
+            part_ids: set[str] = set()
             for prow in srow.parts:
                 ptitle = prow.title.text().strip()
                 if not ptitle:
@@ -558,6 +559,14 @@ class SessionsTab(QWidget):
                     QMessageBox.warning(self, "部分标题重复", f"「{title} / {ptitle}」重复。")
                     return None
                 part_titles.add(ptitle)
+                if prow.part_id in part_ids:
+                    QMessageBox.warning(
+                        self,
+                        "部分编号重复",
+                        f"「{title}」部分编号 {prow.part_id} 重复。",
+                    )
+                    return None
+                part_ids.add(prow.part_id)
                 count = int(prow.count.value())
                 diff = int(prow.difficulty.value())
                 available = sum(1 for q in bank.questions if q.difficulty == diff)

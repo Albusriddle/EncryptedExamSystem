@@ -166,6 +166,9 @@ fn print_result(unlocked: &Unlocked) {
             sec.items.len(),
             sec.total_score()
         );
+        for part in &sec.parts {
+            println!("  [{}] {} 题", part.title, part.items.len());
+        }
         for (n, item) in sec.items.iter().enumerate() {
             println!("  {}. ({}) {}", n + 1, item.score, item.stem);
             // 正文按形态打印：CLI 是排障与自动化验证的主要出口，

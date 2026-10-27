@@ -774,6 +774,39 @@ mod tests {
         assert_eq!(paper.sections[0].items.len(), 2);
     }
 
+    #[test]
+    fn parts_flatten_matches_items() {
+        let bank = difficulty_bank();
+        let sections = vec![crate::model::Section {
+            section_id: "s1".into(),
+            title: "第1大题".into(),
+            file: "math.json".into(),
+            count: 4,
+            difficulty: 1,
+            parts: vec![
+                crate::model::SectionPart {
+                    part_id: "s1p1".into(),
+                    title: "第1部分".into(),
+                    count: 2,
+                    difficulty: 1,
+                },
+                crate::model::SectionPart {
+                    part_id: "s1p2".into(),
+                    title: "第2部分".into(),
+                    count: 2,
+                    difficulty: 2,
+                },
+            ],
+        }];
+        let paper = generate_paper_parts(1, 1, b"salt", &[bank], &sections).unwrap();
+        let sec = &paper.sections[0];
+        assert_eq!(sec.parts.len(), 2);
+        assert_eq!(
+            sec.items.len(),
+            sec.parts.iter().map(|p| p.items.len()).sum::<usize>()
+        );
+    }
+
     /// 旧题库只有 `options: ["A","B",…]`，没有 body。
     /// 进试卷时必须自动补成带键的 Options，否则学生端只剩一串裸文本。
     #[test]

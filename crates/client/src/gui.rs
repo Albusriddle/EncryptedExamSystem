@@ -566,7 +566,22 @@ impl eframe::App for ExamApp {
                 .paper
                 .sections
                 .iter()
-                .map(|s| (s.title.clone(), s.items.len()))
+                .map(|s| {
+                    let title = if s.parts.is_empty() {
+                        s.title.clone()
+                    } else {
+                        format!(
+                            "{}（{}）",
+                            s.title,
+                            s.parts
+                                .iter()
+                                .map(|p| p.title.clone())
+                                .collect::<Vec<_>>()
+                                .join(" / ")
+                        )
+                    };
+                    (title, s.items.len())
+                })
                 .collect();
 
             // 诊断：模拟点击某个题号（验证跳转链路）

@@ -761,6 +761,7 @@ fn validate_sessions_impl(sessions: &[Session], emit_warnings: bool) -> Result<(
                     }
                 } else {
                     let mut seen_parts = std::collections::HashSet::new();
+                    let mut seen_part_titles = std::collections::HashSet::new();
                     for part in &sec.parts {
                         if part.part_id.trim().is_empty() || part.title.trim().is_empty() {
                             return Err(ContainerError::Format(format!(
@@ -772,6 +773,12 @@ fn validate_sessions_impl(sessions: &[Session], emit_warnings: bool) -> Result<(
                             return Err(ContainerError::Format(format!(
                                 "场次 {} 的大题 {} 部分编号 {} 重复",
                                 s.session_id, sec.title, part.part_id
+                            )));
+                        }
+                        if !seen_part_titles.insert(part.title.clone()) {
+                            return Err(ContainerError::Format(format!(
+                                "场次 {} 的大题 {} 部分标题 {} 重复",
+                                s.session_id, sec.title, part.title
                             )));
                         }
                         if part.count == 0 || !(1..=255).contains(&part.difficulty) {

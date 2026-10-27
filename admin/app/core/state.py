@@ -380,7 +380,18 @@ class ProjectState:
                     if not sec.parts
                     else [(p.title, p.count, p.difficulty) for p in sec.parts]
                 )
+                part_ids: set[str] = set()
+                for part in sec.parts:
+                    if part.part_id in part_ids:
+                        problems.append(f"场次 {s.session_id}: 部分编号 {part.part_id} 重复")
+                    part_ids.add(part.part_id)
+                part_titles: set[str] = set()
                 for ptitle, pcount, pdiff in parts:
+                    if ptitle in part_titles:
+                        problems.append(
+                            f"场次 {s.session_id}: 大题 {sec.title} 的部分标题 {ptitle} 重复"
+                        )
+                    part_titles.add(ptitle)
                     available = sum(1 for q in bank.questions if q.difficulty == pdiff)
                     if pcount > available:
                         problems.append(
