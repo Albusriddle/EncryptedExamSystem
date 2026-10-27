@@ -40,9 +40,9 @@ use crate::model::Session;
 pub const MAGIC: &[u8; 8] = b"EXAMPKG3";
 /// 尾部魔数，用于从 exe 末尾定位 payload。
 pub const MAGIC_TAIL: &[u8; 8] = b"EXAMTAIL";
-/// 当前格式版本。v5 起可携带签名时间令牌；普通包仍写 v4。
-pub const VERSION: u32 = 5;
-/// v3–v5 可读；v5 仅用于 time.mode != off 的包（旧客户端最高 v4）。
+/// 当前格式版本。v5 时间令牌、v6 大题；普通包仍写 v4。
+pub const VERSION: u32 = 6;
+/// v3–v6 可读；v6 仅用于 sections 非空的包（旧客户端最高 v5）。
 pub const MIN_SUPPORTED_VERSION: u32 = 3;
 
 /// 密钥区魔数：标记"这个包内嵌了 K_manifest"。
@@ -131,6 +131,9 @@ struct EntryPayload {
     /// 本场会话密钥（hex）。用它派生题库解密密钥。
     session_secret: String,
     exams: Vec<crate::model::SessionExam>,
+    /// 新“按大题”模式；旧信封没有该字段，serde 默认空。
+    #[serde(default)]
+    sections: Vec<crate::model::Section>,
 }
 
 /// 场次的 header 部分。
@@ -208,6 +211,7 @@ pub struct UnlockedSession {
     pub start: String,
     pub end: String,
     pub exams: Vec<crate::model::SessionExam>,
+    pub sections: Vec<crate::model::Section>,
     /// 本场题库密文（已切好片）。
     pub data_ct: Vec<u8>,
     /// 本场会话密钥。
@@ -382,6 +386,34 @@ pub fn build_payload_with_options(
                 pick,
             });
         }
+        for sec in &s.sections {
+            let bank = match_bank(&sec.file, &clean_banks).ok_or_else(|| {
+                ContainerError::Format(format!(
+                    "场次 {} 的大题 {} 引用的题库 {} 匹配不到",
+                    s.session_id, sec.title, sec.file
+                ))
+            })?;
+            let available = bank
+                .questions
+                .iter()
+                .filter(|q| q.difficulty == Some(sec.difficulty))
+                .count();
+            if available < sec.count as usize {
+                return Err(ContainerError::Format(format!(
+                    "场次 {} 的大题 {} 要抽 {} 题，但题库 {} 难度 {} 只有 {} 题",
+                    s.session_id, sec.title, sec.count, bank.exam_id, sec.difficulty, available
+                )));
+            }
+            if !session_banks.iter().any(|b| b.exam_id == bank.exam_id) {
+                session_banks.push(bank.clone());
+                session_index.push(BankIndex {
+                    exam_id: bank.exam_id.clone(),
+                    title: bank.title.clone(),
+                    total: bank.questions.len(),
+                    pick: bank.pick,
+                });
+            }
+        }
 
         let data = PayloadData {
             banks: session_banks,
@@ -417,6 +449,7 @@ pub fn build_payload_with_options(
                     student_id: sid,
                     session_secret: hex::encode(*session_secret),
                     exams: s.exams.clone(),
+                    sections: s.sections.clone(),
                 };
                 let inner_plain = serde_json::to_vec(&inner)?;
                 let blob = crypto::encrypt(&entry_key, &inner_plain, b"envelope-v2")?;
@@ -451,10 +484,13 @@ pub fn build_payload_with_options(
         }
         None => None,
     };
-    // 只有启用时间令牌的包才需要 v5；普通包继续写 v4，避免无谓地
-    // 把旧学生端全部挡在门外。旧客户端看到 v5 会明确报版本不支持。
-    let version = if time.is_some_and(|t| t.mode != "off") {
+    // 普通包继续写 v4，避免无谓地把旧学生端全部挡在门外。
+    // 时间令牌需要 v5，大题需要 v6；旧客户端看到高版本会明确报错。
+    let has_sections = sessions.iter().any(|s| !s.sections.is_empty());
+    let version = if has_sections {
         VERSION
+    } else if time.is_some_and(|t| t.mode != "off") {
+        5
     } else {
         4
     };
@@ -659,11 +695,38 @@ fn validate_sessions_impl(sessions: &[Session], emit_warnings: bool) -> Result<(
                 )));
             }
         }
-        if s.exams.is_empty() {
-            return Err(ContainerError::Format(format!(
-                "场次 {} 没有任何考试科目",
-                s.session_id
-            )));
+        if s.sections.is_empty() {
+            if s.exams.is_empty() {
+                return Err(ContainerError::Format(format!(
+                    "场次 {} 没有任何考试科目",
+                    s.session_id
+                )));
+            }
+        } else {
+            let mut seen_sections = std::collections::HashSet::new();
+            for sec in &s.sections {
+                if sec.section_id.trim().is_empty()
+                    || sec.title.trim().is_empty()
+                    || sec.file.trim().is_empty()
+                {
+                    return Err(ContainerError::Format(format!(
+                        "场次 {} 的大题编号/标题不能为空",
+                        s.session_id
+                    )));
+                }
+                if !seen_sections.insert(sec.section_id.clone()) {
+                    return Err(ContainerError::Format(format!(
+                        "场次 {} 的大题编号 {} 重复",
+                        s.session_id, sec.section_id
+                    )));
+                }
+                if sec.count == 0 || !(1..=255).contains(&sec.difficulty) {
+                    return Err(ContainerError::Format(format!(
+                        "场次 {} 的大题 {} 题数/难度非法",
+                        s.session_id, sec.title
+                    )));
+                }
+            }
         }
     }
 
@@ -987,6 +1050,7 @@ pub fn try_unlock_session_with_pin(
         start: sh.start.clone(),
         end: sh.end.clone(),
         exams: payload.exams,
+        sections: payload.sections,
         data_ct: blob_area[off..end].to_vec(),
         session_secret: Zeroizing::new(session_secret),
     }))
@@ -1109,6 +1173,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         let err = validate_sessions_silent(&[sess.clone()]).unwrap_err();
         assert!(
@@ -1169,6 +1234,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         }
     }
 
@@ -1215,6 +1281,33 @@ mod tests {
             "答案必须被剥离"
         );
         assert_eq!(data.bank_index[0].total, 50);
+    }
+
+    #[test]
+    fn sections_build_v6_and_survive_unlock() {
+        let mut bank = bank("math", 6);
+        for (i, q) in bank.questions.iter_mut().enumerate() {
+            q.difficulty = Some((i % 2 + 1) as u8);
+        }
+        let s = Session {
+            session_id: 1,
+            start: "2026-12-20T09:00:00+08:00".into(),
+            end: "2026-12-20T11:00:00+08:00".into(),
+            students: vec![1],
+            exams: vec![],
+            sections: vec![crate::model::Section {
+                section_id: "s1".into(),
+                title: "第1大题".into(),
+                file: "math.json".into(),
+                count: 2,
+                difficulty: 1,
+            }],
+        };
+        let payload = build_payload(&master(), &[bank], &[s], SALT, kdf(), true).unwrap();
+        assert_eq!(u32::from_le_bytes(payload[8..12].try_into().unwrap()), 6);
+        let u = unlock(&payload, 1, 1).unwrap().unwrap();
+        assert_eq!(u.sections.len(), 1);
+        assert_eq!(u.sections[0].title, "第1大题");
     }
 
     #[test]
@@ -1384,6 +1477,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         let s2 = Session {
             session_id: 2,
@@ -1396,6 +1490,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         let payload = build_payload(&master(), &banks, &[s1, s2], SALT, kdf(), true).unwrap();
 
@@ -1424,6 +1519,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         let payload = build_payload(&master(), &banks, &[s], SALT, kdf(), true).unwrap();
         let u = unlock(&payload, 1, 1).unwrap().unwrap();
@@ -1446,6 +1542,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         assert!(build_payload(&master(), &banks, &[s], SALT, kdf(), true).is_err());
     }
@@ -1464,6 +1561,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         assert!(build_payload(&master(), &banks, &[s], SALT, kdf(), true).is_err());
     }
@@ -1482,6 +1580,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         assert!(build_payload(&master(), &banks, &[s], SALT, kdf(), true).is_err());
     }
@@ -1643,6 +1742,7 @@ mod tests {
                     difficulty_max: None,
                 },
             ],
+            sections: Vec::new(),
         };
         let err = validate_sessions(&[s]).unwrap_err();
         assert!(
@@ -1674,6 +1774,7 @@ mod tests {
                     difficulty_max: None,
                 },
             ],
+            sections: Vec::new(),
         };
         assert!(validate_sessions(&[s]).is_ok());
     }
@@ -1687,6 +1788,7 @@ mod tests {
             end: "2026-12-20T11:00:00+08:00".into(),
             students: vec![1],
             exams: vec![],
+            sections: Vec::new(),
         };
         assert!(validate_sessions(&[s]).is_err());
     }
@@ -1706,6 +1808,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         let a = mk(
             1,
@@ -1748,6 +1851,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         let s2 = Session {
             session_id: 2,
@@ -1760,6 +1864,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         let payload = build_payload(&master(), &banks, &[s1, s2], salt, kdf(), true).unwrap();
 
@@ -1794,6 +1899,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         let a = mk(1, "2026-12-20T09:00:00+08:00", "2026-12-20T11:00:00+08:00");
         let b = mk(2, "2026-12-20T10:00:00+08:00", "2026-12-20T12:00:00+08:00");
@@ -1818,6 +1924,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         let err = validate_sessions(&[s]).unwrap_err();
         assert!(
@@ -1840,6 +1947,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         assert!(validate_sessions(&[s]).is_ok(), "12 位学号应当被接受");
     }
@@ -1857,6 +1965,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         assert!(validate_sessions(&[s]).is_err(), "时间倒挂必须报错");
     }
@@ -1874,6 +1983,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         assert!(validate_sessions(&[s]).is_err(), "重复学号必须报错");
     }
@@ -1891,6 +2001,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         assert!(validate_sessions(&[mk(1), mk(1)]).is_err());
         // 注意：两场用**不同学生**，否则会因时间窗重叠+学生交集而报错，
@@ -1921,6 +2032,7 @@ mod tests {
                 difficulty_min: None,
                 difficulty_max: None,
             }],
+            sections: Vec::new(),
         };
         assert!(validate_sessions(&[s]).is_err());
     }

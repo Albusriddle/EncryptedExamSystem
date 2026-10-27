@@ -22,6 +22,47 @@
       "title": "KdfParams",
       "type": "object"
     },
+    "Section": {
+      "description": "场次里的一个“大题”：固定题库、固定题数、固定难度。",
+      "properties": {
+        "section_id": {
+          "minLength": 1,
+          "title": "Section Id",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "file": {
+          "minLength": 1,
+          "title": "File",
+          "type": "string"
+        },
+        "count": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "difficulty": {
+          "maximum": 255,
+          "minimum": 1,
+          "title": "Difficulty",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "section_id",
+        "title",
+        "file",
+        "count",
+        "difficulty"
+      ],
+      "title": "Section",
+      "type": "object"
+    },
     "Session": {
       "properties": {
         "session_id": {
@@ -50,6 +91,13 @@
             "$ref": "#/$defs/SessionExam"
           },
           "title": "Exams",
+          "type": "array"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/Section"
+          },
+          "title": "Sections",
           "type": "array"
         }
       },

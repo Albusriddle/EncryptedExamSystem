@@ -121,14 +121,25 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
         .context("解密题库失败")?;
 
     // 6. 确定性抽题。
-    let paper = picker::generate_paper_ranged(
-        student_id,
-        unlocked.session_id,
-        &salt,
-        &data.banks,
-        |exam_id, fallback| (data.pick_for(exam_id, fallback), data.range_for(exam_id)),
-    )
-    .context("抽题失败")?;
+    let paper = if unlocked.sections.is_empty() {
+        picker::generate_paper_ranged(
+            student_id,
+            unlocked.session_id,
+            &salt,
+            &data.banks,
+            |exam_id, fallback| (data.pick_for(exam_id, fallback), data.range_for(exam_id)),
+        )
+        .context("抽题失败")?
+    } else {
+        picker::generate_paper_sections(
+            student_id,
+            unlocked.session_id,
+            &salt,
+            &data.banks,
+            &unlocked.sections,
+        )
+        .context("大题抽题失败")?
+    };
 
     // 结束时刻必须能解析：validate_sessions 已经保证过，这里再兜一次，
     // 因为"到点自动收卷"依赖它——解析不出来就永远不收盘了。

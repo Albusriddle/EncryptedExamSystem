@@ -212,6 +212,16 @@ class SessionExam(BaseModel):
         return self
 
 
+class Section(BaseModel):
+    """场次里的一个“大题”：固定题库、固定题数、固定难度。"""
+
+    section_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    file: str = Field(min_length=1)
+    count: int = Field(ge=1, le=2**32 - 1)
+    difficulty: int = Field(ge=1, le=255)
+
+
 class Session(BaseModel):
     # Rust 是 u32
     session_id: int = Field(ge=0, le=2**32 - 1)
@@ -219,6 +229,7 @@ class Session(BaseModel):
     end: str
     students: list[int]
     exams: list[SessionExam]
+    sections: list[Section] = Field(default_factory=list)
 
     @field_validator("students")
     @classmethod

@@ -164,6 +164,16 @@ pub struct SessionExam {
     pub difficulty_max: Option<u8>,
 }
 
+/// 场次里的一个大题：固定题库、题数、精确难度。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Section {
+    pub section_id: String,
+    pub title: String,
+    pub file: String,
+    pub count: u32,
+    pub difficulty: u8,
+}
+
 /// 一个考试场次。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Session {
@@ -175,8 +185,11 @@ pub struct Session {
     pub end: String,
     /// 该场考生学号列表。
     pub students: Vec<u64>,
-    /// 本场包含的题库与抽题数。
+    /// 本场包含的题库与抽题数（旧“按平均难度”模式）。
     pub exams: Vec<SessionExam>,
+    /// 本场的大题列表（新“按大题”模式）；为空时用旧模式。
+    #[serde(default)]
+    pub sections: Vec<Section>,
 }
 
 /// 签名时间令牌配置（阶段 4.2）。

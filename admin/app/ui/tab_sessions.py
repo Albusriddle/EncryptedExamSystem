@@ -35,9 +35,24 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.difficulty import check_difficulty_range
-from app.core.models import Session, SessionExam
+from app.core.models import Section, Session, SessionExam
 from app.core.state import ProjectState, match_bank_exam_id
 from app.core.timeparse import local_to_rfc3339, parse_rfc3339
+
+
+@dataclass
+class SectionRow:
+    """一个大题行：标题、题库、题数、精确难度、上下移动。"""
+
+    box: QWidget
+    title: QLineEdit
+    bank: QComboBox
+    count: QSpinBox
+    difficulty: QSpinBox
+    hint: QLabel
+    section_id: str
+    up: QPushButton
+    down: QPushButton
 
 
 @dataclass
@@ -231,12 +246,32 @@ class SessionsTab(QWidget):
 
         rl.addWidget(form_box)
 
-        # 科目
-        subj_box = QGroupBox("考试科目")
+        # 科目 / 大题
+        subj_box = QGroupBox("考试科目 / 大题")
         sl = QVBoxLayout(subj_box)
+        self.chk_sections = QCheckBox("按大题模式（每行固定题库、题数、精确难度；可上下调整顺序）")
+        self.chk_sections.toggled.connect(self._on_sections_toggle)
+        sl.addWidget(self.chk_sections)
+
+        self.old_subject_widget = QWidget()
+        old_subject_lay = QVBoxLayout(self.old_subject_widget)
+        old_subject_lay.setContentsMargins(0, 0, 0, 0)
         self.checks: list[BankRow] = []
         self.combo_holder = QVBoxLayout()
-        sl.addLayout(self.combo_holder)
+        old_subject_lay.addLayout(self.combo_holder)
+        sl.addWidget(self.old_subject_widget)
+
+        self.sections_widget = QWidget()
+        sec_lay = QVBoxLayout(self.sections_widget)
+        sec_lay.setContentsMargins(0, 0, 0, 0)
+        self.section_rows: list[SectionRow] = []
+        self.sections_layout = QVBoxLayout()
+        sec_lay.addLayout(self.sections_layout)
+        self.btn_add_section = QPushButton("+ 新建大题")
+        self.btn_add_section.clicked.connect(lambda: self._add_section_row())
+        sec_lay.addWidget(self.btn_add_section)
+        self.sections_widget.setVisible(False)
+        sl.addWidget(self.sections_widget)
         rl.addWidget(subj_box)
 
         # 保存按钮
@@ -264,6 +299,155 @@ class SessionsTab(QWidget):
         self.timeline = TimelineWidget()
         al.addWidget(self.timeline)
         lay.addWidget(axis_box, 1)
+
+    # ---------------------------------------------------------------- 大题
+
+    def _on_sections_toggle(self, on: bool) -> None:
+        self.old_subject_widget.setVisible(not on)
+        self.sections_widget.setVisible(on)
+        if on and not self.section_rows:
+            self._add_section_row()
+
+    def _add_section_row(self, sec: Section | None = None) -> None:
+        box = QWidget()
+        hl = QHBoxLayout(box)
+        hl.setContentsMargins(0, 0, 0, 0)
+        title = QLineEdit(sec.title if sec else f"第{len(self.section_rows) + 1}大题")
+        title.setMinimumWidth(110)
+        bank = QComboBox()
+        for exam_id, b in sorted(self.state.banks.items()):
+            bank.addItem(b.title, exam_id)
+        if sec:
+            idx = bank.findData(match_bank_exam_id(sec.file, self.state.banks) or "")
+            if idx >= 0:
+                bank.setCurrentIndex(idx)
+        count = QSpinBox()
+        count.setRange(1, 9999)
+        count.setValue(sec.count if sec else 1)
+        diff = QSpinBox()
+        diff.setRange(1, 255)
+        diff.setValue(sec.difficulty if sec else 1)
+        hint = QLabel("")
+        hint.setStyleSheet("color:#888;font-size:11px;")
+        up = QPushButton("↑")
+        up.setFixedWidth(28)
+        down = QPushButton("↓")
+        down.setFixedWidth(28)
+        delete = QPushButton("删除")
+        hl.addWidget(QLabel("大题"))
+        hl.addWidget(title)
+        hl.addWidget(QLabel("题库"))
+        hl.addWidget(bank, 1)
+        hl.addWidget(QLabel("题数"))
+        hl.addWidget(count)
+        hl.addWidget(QLabel("难度"))
+        hl.addWidget(diff)
+        hl.addWidget(hint)
+        hl.addWidget(up)
+        hl.addWidget(down)
+        hl.addWidget(delete)
+        if sec:
+            sid = sec.section_id
+        else:
+            existing = {r.section_id for r in self.section_rows}
+            n = 1
+            while f"s{n}" in existing:
+                n += 1
+            sid = f"s{n}"
+        row = SectionRow(box, title, bank, count, diff, hint, sid, up, down)
+        self.section_rows.append(row)
+        self.sections_layout.addWidget(box)
+        count.valueChanged.connect(lambda _v, r=row: self._update_section_hint(r))
+        diff.valueChanged.connect(lambda _v, r=row: self._update_section_hint(r))
+        bank.currentIndexChanged.connect(lambda _i, r=row: self._update_section_hint(r))
+        up.clicked.connect(lambda _b=False, r=row: self._move_section(r, -1))
+        down.clicked.connect(lambda _b=False, r=row: self._move_section(r, 1))
+        delete.clicked.connect(lambda _b=False, r=row: self._remove_section_row(r))
+        self._update_section_hint(row)
+
+    def _remove_section_row(self, row: SectionRow) -> None:
+        if row in self.section_rows:
+            self.section_rows.remove(row)
+            self.sections_layout.removeWidget(row.box)
+            row.box.deleteLater()
+
+    def _move_section(self, row: SectionRow, delta: int) -> None:
+        if row not in self.section_rows:
+            return
+        idx = self.section_rows.index(row)
+        new = idx + delta
+        if new < 0 or new >= len(self.section_rows):
+            return
+        self.section_rows[idx], self.section_rows[new] = (
+            self.section_rows[new],
+            self.section_rows[idx],
+        )
+        self.sections_layout.removeWidget(row.box)
+        self.sections_layout.insertWidget(new, row.box)
+
+    def _update_section_hint(self, row: SectionRow) -> None:
+        exam_id = row.bank.currentData()
+        bank = self.state.banks.get(str(exam_id)) if exam_id else None
+        if bank is None:
+            row.hint.setText("请选择题库")
+            row.hint.setStyleSheet("color:#c04040;font-size:11px;")
+            return
+        available = sum(1 for q in bank.questions if q.difficulty == int(row.difficulty.value()))
+        row.count.setMaximum(max(1, len(bank.questions)))
+        if available < int(row.count.value()):
+            row.hint.setText(f"⚠ 难度 {row.difficulty.value()} 只有 {available} 题")
+            row.hint.setStyleSheet("color:#c04040;font-size:11px;")
+        else:
+            row.hint.setText(f"可用 {available} 题")
+            row.hint.setStyleSheet("color:#888;font-size:11px;")
+
+    def _refresh_section_banks(self) -> None:
+        for row in self.section_rows:
+            cur = row.bank.currentData()
+            row.bank.blockSignals(True)
+            row.bank.clear()
+            for exam_id, b in sorted(self.state.banks.items()):
+                row.bank.addItem(b.title, exam_id)
+            idx = row.bank.findData(cur)
+            row.bank.setCurrentIndex(max(0, idx))
+            row.bank.blockSignals(False)
+            self._update_section_hint(row)
+
+    def _collect_sections(self) -> list[Section] | None:
+        out: list[Section] = []
+        seen: set[str] = set()
+        for row in self.section_rows:
+            title = row.title.text().strip()
+            exam_id = str(row.bank.currentData() or "")
+            bank = self.state.banks.get(exam_id)
+            if not title or bank is None:
+                QMessageBox.warning(self, "大题不完整", "每个大题都要有标题并选择题库。")
+                return None
+            if row.section_id in seen:
+                QMessageBox.warning(self, "大题编号重复", row.section_id)
+                return None
+            seen.add(row.section_id)
+            available = sum(
+                1 for q in bank.questions if q.difficulty == int(row.difficulty.value())
+            )
+            if int(row.count.value()) > available:
+                QMessageBox.warning(
+                    self,
+                    "题数不足",
+                    f"「{title}」要抽 {row.count.value()} 题，但难度 "
+                    f"{row.difficulty.value()} 只有 {available} 题。",
+                )
+                return None
+            out.append(
+                Section(
+                    section_id=row.section_id,
+                    title=title,
+                    file=f"{exam_id}.json",
+                    count=int(row.count.value()),
+                    difficulty=int(row.difficulty.value()),
+                )
+            )
+        return out
 
     # ---------------------------------------------------------------- 刷新
 
@@ -356,6 +540,7 @@ class SessionsTab(QWidget):
                 r.dmin.setValue(lo)
                 r.dmax.setValue(hi)
 
+        self._refresh_section_banks()
         self.refresh()
         self._sync_roster()
 
@@ -479,6 +664,16 @@ class SessionsTab(QWidget):
                     # 没有区间时重置为默认，避免沿用上一场的值
                     r.dmin.setValue(1)
                     r.dmax.setValue(5)
+
+        # 大题模式
+        for row in list(self.section_rows):
+            self._remove_section_row(row)
+        for sec in s.sections:
+            self._add_section_row(sec)
+        self.chk_sections.blockSignals(True)
+        self.chk_sections.setChecked(bool(s.sections))
+        self.chk_sections.blockSignals(False)
+        self._on_sections_toggle(bool(s.sections))
 
     def _sync_roster(self) -> None:
         """学生名单变化后，把「使用全部学生」的显示刷新成最新名单。"""
@@ -614,30 +809,40 @@ class SessionsTab(QWidget):
                     QMessageBox.warning(self, "学号非法", f"无法识别: {tok!r}")
                     return
 
-        # 科目
-        exams: list[SessionExam] = []
-        for r in self.checks:
-            if not r.cb.isChecked():
-                continue
-            lo = hi = None
-            if r.limit.isChecked():
-                lo, hi = int(r.dmin.value()), int(r.dmax.value())
-                bank = self.state.banks.get(r.exam_id)
-                if bank is None:
-                    QMessageBox.critical(self, "题库缺失", f"题库 {r.exam_id} 不在当前工程里。")
-                    return
-                problems = check_difficulty_range(bank, int(r.pick.value()), lo, hi)
-                if problems:
-                    QMessageBox.critical(self, "平均难度不可行", "\n".join(problems))
-                    return
-            exams.append(
-                SessionExam(
-                    file=f"{r.exam_id}.json",
-                    pick=int(r.pick.value()),
-                    difficulty_min=lo,
-                    difficulty_max=hi,
+        # 科目 / 大题
+        examples: list[SessionExam] = []
+        sections: list[Section] = []
+        if self.chk_sections.isChecked():
+            collected = self._collect_sections()
+            if collected is None:
+                return
+            if not collected:
+                QMessageBox.warning(self, "没有大题", "按大题模式至少需要一个大题。")
+                return
+            sections = collected
+        else:
+            for r in self.checks:
+                if not r.cb.isChecked():
+                    continue
+                lo = hi = None
+                if r.limit.isChecked():
+                    lo, hi = int(r.dmin.value()), int(r.dmax.value())
+                    bank = self.state.banks.get(r.exam_id)
+                    if bank is None:
+                        QMessageBox.critical(self, "题库缺失", f"题库 {r.exam_id} 不在当前工程里。")
+                        return
+                    problems = check_difficulty_range(bank, int(r.pick.value()), lo, hi)
+                    if problems:
+                        QMessageBox.critical(self, "平均难度不可行", "\n".join(problems))
+                        return
+                examples.append(
+                    SessionExam(
+                        file=f"{r.exam_id}.json",
+                        pick=int(r.pick.value()),
+                        difficulty_min=lo,
+                        difficulty_max=hi,
+                    )
                 )
-            )
 
         try:
             s = Session(
@@ -645,7 +850,8 @@ class SessionsTab(QWidget):
                 start=local_to_rfc3339(self.dt_start.dateTime().toString("yyyy-MM-dd HH:mm")),
                 end=local_to_rfc3339(self.dt_end.dateTime().toString("yyyy-MM-dd HH:mm")),
                 students=students,
-                exams=exams,
+                exams=examples,
+                sections=sections,
             )
         except Exception as e:  # noqa: BLE001 - pydantic 校验错误原样展示
             QMessageBox.critical(self, "场次校验失败", str(e))

@@ -537,7 +537,12 @@ fn build(req: BuildRequest) -> Result<()> {
     let mut files: Vec<String> = manifest
         .sessions
         .iter()
-        .flat_map(|s| s.exams.iter().map(|e| e.file.clone()))
+        .flat_map(|s| {
+            s.exams
+                .iter()
+                .map(|e| e.file.clone())
+                .chain(s.sections.iter().map(|sec| sec.file.clone()))
+        })
         .collect();
     files.sort();
     files.dedup();
@@ -566,6 +571,30 @@ fn build(req: BuildRequest) -> Result<()> {
                 s.session_id,
                 e.file,
                 bank.questions.len()
+            );
+        }
+        for sec in &s.sections {
+            let bank = container::match_bank(&sec.file, &banks).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "场次 {} 的大题 {} 引用的题库 {} 匹配不到",
+                    s.session_id,
+                    sec.title,
+                    sec.file
+                )
+            })?;
+            let available = bank
+                .questions
+                .iter()
+                .filter(|q| q.difficulty == Some(sec.difficulty))
+                .count();
+            anyhow::ensure!(
+                available >= sec.count as usize,
+                "场次 {} 的大题 {} 要抽 {} 题，但难度 {} 只有 {} 题",
+                s.session_id,
+                sec.title,
+                sec.count,
+                sec.difficulty,
+                available
             );
         }
     }

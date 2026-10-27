@@ -172,6 +172,16 @@ pub enum PickError {
         lo: u8,
         hi: u8,
     },
+    #[error("大题 {title} 引用的题库 {file} 不存在")]
+    SectionBankMissing { title: String, file: String },
+    #[error("大题 {title} 要抽 {want} 题，但题库 {file} 难度 {difficulty} 只有 {available} 题")]
+    SectionNotEnough {
+        title: String,
+        file: String,
+        want: u32,
+        difficulty: u8,
+        available: usize,
+    },
 }
 
 /// 从题库中确定性抽取 `pick` 道题，返回题目 id。
@@ -524,6 +534,86 @@ where
     })
 }
 
+fn bank_for_file<'a>(banks: &'a [ExamBank], file: &str) -> Option<&'a ExamBank> {
+    let base = file.rsplit('/').next().unwrap_or(file);
+    let stem = base.strip_suffix(".json").unwrap_or(base);
+    let full = file
+        .strip_suffix(".json")
+        .unwrap_or(file)
+        .replace(['/', '_'], "-");
+    banks.iter().find(|b| {
+        b.exam_id == stem
+            || b.exam_id == base
+            || b.exam_id == full
+            || format!("{}.json", b.exam_id) == base
+    })
+}
+
+/// 按“大题”生成试卷：每个 section 固定题库、题数、精确难度，顺序即卷面顺序。
+pub fn generate_paper_sections(
+    student_id: u64,
+    session_id: u32,
+    salt: &[u8],
+    banks: &[ExamBank],
+    sections: &[crate::model::Section],
+) -> Result<Paper, PickError> {
+    let mut rng = make_rng(student_id, session_id, salt);
+    let mut used: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(sections.len());
+    for sec in sections {
+        let bank =
+            bank_for_file(banks, &sec.file).ok_or_else(|| PickError::SectionBankMissing {
+                title: sec.title.clone(),
+                file: sec.file.clone(),
+            })?;
+        let mut candidates: Vec<usize> = bank
+            .questions
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| q.difficulty == Some(sec.difficulty))
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.len() < sec.count as usize {
+            return Err(PickError::SectionNotEnough {
+                title: sec.title.clone(),
+                file: sec.file.clone(),
+                want: sec.count,
+                difficulty: sec.difficulty,
+                available: candidates.len(),
+            });
+        }
+        fisher_yates_shuffle(&mut candidates, &mut rng);
+        let mut items = Vec::with_capacity(sec.count as usize);
+        for &i in &candidates {
+            if used.insert((bank.exam_id.clone(), bank.questions[i].id.clone())) {
+                items.push(PaperItem::from(&bank.questions[i]));
+                if items.len() == sec.count as usize {
+                    break;
+                }
+            }
+        }
+        if items.len() != sec.count as usize {
+            return Err(PickError::SectionNotEnough {
+                title: sec.title.clone(),
+                file: sec.file.clone(),
+                want: sec.count,
+                difficulty: sec.difficulty,
+                available: items.len(),
+            });
+        }
+        out.push(PaperSection {
+            exam_id: sec.section_id.clone(),
+            title: sec.title.clone(),
+            items,
+        });
+    }
+    Ok(Paper {
+        student_id,
+        session_id,
+        sections: out,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +638,47 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn difficulty_bank() -> ExamBank {
+        let mut b = demo_bank("math", 12, 1);
+        for (i, q) in b.questions.iter_mut().enumerate() {
+            q.difficulty = Some((i % 3 + 1) as u8);
+        }
+        b
+    }
+
+    #[test]
+    fn sections_keep_order_title_and_exact_difficulty() {
+        let bank = difficulty_bank();
+        let sections = vec![
+            crate::model::Section {
+                section_id: "s1".into(),
+                title: "第1大题".into(),
+                file: "math.json".into(),
+                count: 2,
+                difficulty: 1,
+            },
+            crate::model::Section {
+                section_id: "s2".into(),
+                title: "第2大题".into(),
+                file: "math.json".into(),
+                count: 2,
+                difficulty: 1,
+            },
+        ];
+        let paper =
+            generate_paper_sections(1, 1, b"salt", std::slice::from_ref(&bank), &sections).unwrap();
+        assert_eq!(paper.sections.len(), 2);
+        assert_eq!(paper.sections[0].exam_id, "s1");
+        assert_eq!(paper.sections[1].title, "第2大题");
+        let mut ids = std::collections::HashSet::new();
+        for sec in &paper.sections {
+            for item in &sec.items {
+                assert!(ids.insert(item.id.clone()), "同一题不能出现在两个大题");
+            }
+        }
+        assert_eq!(paper.sections[0].items.len(), 2);
     }
 
     /// 旧题库只有 `options: ["A","B",…]`，没有 body。

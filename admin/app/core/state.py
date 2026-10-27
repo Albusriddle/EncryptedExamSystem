@@ -308,8 +308,8 @@ class ProjectState:
 
         # 场次必须至少有一门科目、至少一名学生（与 Rust 端一致）
         for s in self.sessions:
-            if not s.exams:
-                problems.append(f"场次 {s.session_id} 还没有选择任何考试科目")
+            if not s.exams and not s.sections:
+                problems.append(f"场次 {s.session_id} 还没有选择任何考试科目/大题")
             if not s.students:
                 problems.append(f"场次 {s.session_id} 的学号名单为空")
 
@@ -340,9 +340,11 @@ class ProjectState:
                 if match_bank_exam_id(e.file, self.banks) is None:
                     problems.append(f"场次 {s.session_id} 引用了不存在的题库 {e.file}")
 
-        # 同一场次不得重复引用同一题库（与 Rust 的 seen_exams 一致）。
-        # 否则试卷里会出现两个同名科目，抽题数按 max 取值，学生拿到重复的卷子。
+        # 同一场次不得重复引用同一题库（旧“按题库”模式；大题模式允许
+        # 同一题库拆成多个大题，因此只在没有 sections 时检查）。
         for s in self.sessions:
+            if s.sections:
+                continue
             seen: dict[str, str] = {}
             for e in s.exams:
                 key = match_bank_exam_id(e.file, self.banks) or e.file
@@ -352,6 +354,36 @@ class ProjectState:
                     )
                 else:
                     seen[key] = e.file
+
+        # 大题模式：编号唯一、题库存在、题数不超过该难度可用题数
+        for s in self.sessions:
+            seen_sections: set[str] = set()
+            per_bank: dict[str, int] = {}
+            for sec in s.sections:
+                if sec.section_id in seen_sections:
+                    problems.append(f"场次 {s.session_id}: 大题编号 {sec.section_id} 重复")
+                seen_sections.add(sec.section_id)
+                key = match_bank_exam_id(sec.file, self.banks)
+                if key is None:
+                    problems.append(
+                        f"场次 {s.session_id}: 大题 {sec.title} 引用了不存在的题库 {sec.file}"
+                    )
+                    continue
+                bank = self.banks[key]
+                available = sum(1 for q in bank.questions if q.difficulty == sec.difficulty)
+                if sec.count > available:
+                    problems.append(
+                        f"场次 {s.session_id}: 大题 {sec.title} 要抽 {sec.count} 题，"
+                        f"但题库 {bank.title} 难度 {sec.difficulty} 只有 {available} 题"
+                    )
+                per_bank[key] = per_bank.get(key, 0) + sec.count
+            for key, need in per_bank.items():
+                bank = self.banks[key]
+                if need > len(bank.questions):
+                    problems.append(
+                        f"场次 {s.session_id}: 题库 {bank.title} 多个大题共需 {need} 题，"
+                        f"但只有 {len(bank.questions)} 题"
+                    )
 
         # 同一学生跨重叠场次（与 Rust 端 check_student_overlap 对齐）
         problems.extend(self._check_student_overlap())

@@ -404,7 +404,7 @@ class BuildTab(QWidget):
 
         self.chk_pin_login = QCheckBox("每生 PIN 登录（生成 6 位 PIN，导出 CSV 发给学生）")
         self.chk_pin_login.setToolTip(
-            "包内不存 PIN 表；PIN 只写进教师保存的 CSV，学生凭学号+PIN 解锁"
+            "包内不存 PIN 表；打包成功后选择 CSV 保存文件夹，学生凭学号+PIN 解锁"
         )
         form.addRow("登录方式", self.chk_pin_login)
 
@@ -829,19 +829,14 @@ class BuildTab(QWidget):
 
         pin_login = self.chk_pin_login.isChecked()
         self._pin_path: Path | None = None
+        self._pin_temp: Path | None = None
+        self._pin_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         emit_pins = None
         if pin_login:
-            from app.ui.app_settings import project_dir_display, settings_path
-
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            safe_dir, blocked = safe_pin_dir(
-                project_dir_display(), out, settings_path().parent / "projects"
-            )
-            emit_pins = safe_dir / f"登录PIN-{out.stem}-{stamp}.csv"
-            self._pin_path = emit_pins
-            if blocked:
-                self._append("⚠ 工程位置在考试包目录内，PIN 表已改存到默认目录")
-            self._append(f"PIN 表将导出到：{emit_pins}")
+            # 先写到临时目录；打包成功后由老师选择保存文件夹，再复制出去。
+            emit_pins = tmpdir / "pins.csv"
+            self._pin_temp = emit_pins
+            self._append("PIN 表将在打包成功后询问保存文件夹")
         self.worker = BuildWorker(
             manifest_path, tmpdir, stub, out, master, keyfile, pin_login, emit_pins
         )
@@ -943,8 +938,50 @@ class BuildTab(QWidget):
     def _append(self, line: str) -> None:
         self.log_view.appendPlainText(line)
 
+    def _save_pin_csv(self, out: Path) -> Path | None:
+        """把临时 PIN 表复制到老师选择的文件夹；取消/失败则回退默认目录。"""
+        src = getattr(self, "_pin_temp", None)
+        if src is None or not Path(src).is_file():
+            return None
+        from app.ui.app_settings import project_dir_display, settings_path
+
+        default_dir, _ = safe_pin_dir(
+            project_dir_display(), out, settings_path().parent / "projects"
+        )
+        chosen = QFileDialog.getExistingDirectory(self, "选择 PIN 表保存文件夹", str(default_dir))
+        target_dir = Path(chosen) if chosen else default_dir
+        # 绝不允许把 PIN 表放进考试包目录/其子目录
+        try:
+            out_resolved = out.resolve()
+            tgt = target_dir.resolve()
+            if tgt == out_resolved.parent or out_resolved.parent in tgt.parents:
+                QMessageBox.warning(
+                    self,
+                    "不能保存到考试包目录",
+                    "PIN 表不能放在考试包目录（会被学生看到），已改存到默认目录。",
+                )
+                target_dir = default_dir
+        except OSError:
+            target_dir = default_dir
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            base = f"登录PIN-{out.stem}-{getattr(self, '_pin_stamp', '')}"
+            dest = target_dir / f"{base}.csv"
+            n = 2
+            while dest.exists():
+                dest = target_dir / f"{base}-{n}.csv"
+                n += 1
+            shutil.copy2(src, dest)
+            return dest
+        except OSError as e:
+            QMessageBox.critical(
+                self,
+                "PIN 表保存失败",
+                f"临时 PIN 表仍在：\n{src}\n\n{e}",
+            )
+            return Path(src)
+
     def _on_done(self, ok: bool, info: str) -> None:
-        self._cleanup_tmp()
         self.btn_build.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self.progress.setVisible(False)
@@ -960,9 +997,11 @@ class BuildTab(QWidget):
                     "已取消打包，没有生成文件。\n如需重试，改好参数后再点【开始打包】。",
                 )
                 self._cancelled = False
+                self._cleanup_tmp()
                 return
             self._append(f"✗ 失败：{info}")
             QMessageBox.critical(self, "打包失败", info)
+            self._cleanup_tmp()
             return
 
         out = Path(info)
@@ -975,6 +1014,9 @@ class BuildTab(QWidget):
             self._append(f"  SHA-256 {digest}")
         except OSError:
             pass
+        self._pin_path = self._save_pin_csv(out)
+        if self._pin_path is None or self._pin_path != self._pin_temp:
+            self._cleanup_tmp()
         pin_note = ""
         if getattr(self, "_pin_path", None) is not None and self._pin_path.exists():
             pin_note = f"\n\nPIN 表：\n{self._pin_path}"
