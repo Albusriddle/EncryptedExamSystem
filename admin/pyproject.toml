@@ -1,6 +1,6 @@
 [project]
 name = "exam-admin"
-version = "0.15.2"
+version = "0.15.3"
 license = { text = "Apache-2.0" }
 description = "保密考试系统管理端"
 requires-python = ">=3.11"

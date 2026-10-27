@@ -726,8 +726,13 @@ fn build(req: BuildRequest) -> Result<()> {
 
         // Windows 上 rename 到已存在的文件会失败，先删掉目标。
         if out_path.exists() {
-            std::fs::remove_file(&out_path)
-                .with_context(|| format!("删除旧的 {}", out_path.display()))?;
+            std::fs::remove_file(&out_path).with_context(|| {
+                format!(
+                    "无法替换输出文件 {}（可能正在运行、被杀毒软件/OneDrive 占用或只读）。\
+                     请关闭正在运行的学生端，或另存为新文件名。",
+                    out_path.display()
+                )
+            })?;
         }
         std::fs::rename(&tmp_path, &out_path)
             .with_context(|| format!("移动到 {}", out_path.display()))?;

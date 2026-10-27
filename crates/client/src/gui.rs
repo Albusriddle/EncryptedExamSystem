@@ -567,14 +567,8 @@ impl eframe::App for ExamApp {
                 .sections
                 .iter()
                 .map(|s| {
-                    let parts = if s.parts.is_empty() {
-                        vec![(String::new(), s.items.len())]
-                    } else {
-                        s.parts
-                            .iter()
-                            .map(|p| (p.title.clone(), p.items.len()))
-                            .collect()
-                    };
+                    // 学生端只按大题分块：部分仅用于抽题，不在 UI 展示
+                    let parts = vec![(String::new(), s.items.len())];
                     (s.title.clone(), parts)
                 })
                 .collect();
@@ -1528,50 +1522,32 @@ fn render_paper(
                 .strong(),
             );
             ui.add_space(6.0);
-            let part_views: Vec<(String, &[common::picker::PaperItem])> = if sec.parts.is_empty() {
-                vec![(String::new(), sec.items.as_slice())]
-            } else {
-                sec.parts
-                    .iter()
-                    .map(|p| (p.title.clone(), p.items.as_slice()))
-                    .collect()
-            };
-            for (part_title, part_items) in part_views {
-                if !part_title.is_empty() {
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(part_title.clone())
-                            .size(14.0)
-                            .color(egui::Color32::from_rgb(120, 150, 180)),
-                    );
-                }
-                for item in part_items {
-                    seq += 1;
-                    let this_index = qidx;
-                    qidx += 1;
-                    // 记录整道题（题干 + 选项）的矩形，供题号卡跳转用。
-                    let resp = ui
-                        .push_id(format!("item{seq}"), |ui| {
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("{seq}. ({}分)", item.score))
-                                        .size(15.0),
-                                );
-                                render_stem(ui, &item.stem);
-                                ui.indent(format!("q{seq}"), |ui| {
-                                    render_body(ui, item);
-                                    if render_answer_inputs(
-                                        ui, item, sheet, this_index, editable, now_unix,
-                                    ) {
-                                        changed = true;
-                                    }
-                                });
-                            })
+            for item in &sec.items {
+                seq += 1;
+                let this_index = qidx;
+                qidx += 1;
+                // 记录整道题（题干 + 选项）的矩形，供题号卡跳转用。
+                let resp = ui
+                    .push_id(format!("item{seq}"), |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{seq}. ({}分)", item.score))
+                                    .size(15.0),
+                            );
+                            render_stem(ui, &item.stem);
+                            ui.indent(format!("q{seq}"), |ui| {
+                                render_body(ui, item);
+                                if render_answer_inputs(
+                                    ui, item, sheet, this_index, editable, now_unix,
+                                ) {
+                                    changed = true;
+                                }
+                            });
                         })
-                        .response;
-                    nav.record(seq, resp.rect);
-                    ui.add_space(8.0);
-                }
+                    })
+                    .response;
+                nav.record(seq, resp.rect);
+                ui.add_space(8.0);
             }
         }
         // 底部留白：让**最后一题也能真正置顶**。

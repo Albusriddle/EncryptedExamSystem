@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QVBoxLayout,
@@ -305,7 +306,13 @@ class SessionsTab(QWidget):
         rl.addWidget(self.problems_label)
         rl.addStretch(1)
 
-        split.addWidget(right)
+        # 右侧表单可滚动：大题/部分一多，窗口不应被无限撑长。
+        right.setMinimumWidth(620)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(right)
+        split.addWidget(scroll)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)
         lay.addWidget(split, 3)

@@ -766,6 +766,24 @@ class BuildTab(QWidget):
             return
 
         out = Path(self.edit_out.text())
+        # 输出文件预检：Windows 上正在运行/被杀毒软件/OneDrive 占用的 exe
+        # 无法删除，Builder 会在最后一步报 os error 5。提前发现并让老师另存。
+        if out.exists() and not self._can_write_existing(out):
+            suggested = out.with_name(f"{out.stem}-{datetime.now():%Y%m%d-%H%M%S}{out.suffix}")
+            QMessageBox.warning(
+                self,
+                "输出文件被占用",
+                f"{out}\n\n"
+                "这个文件当前无法覆盖（可能正在运行、被占用或只读）。\n"
+                "请先关闭正在运行的学生端；也可以直接另存为新文件。",
+            )
+            new_path, _ = QFileDialog.getSaveFileName(
+                self, "另存学生端", str(suggested), "EXE (*.exe)"
+            )
+            if not new_path:
+                return
+            out = Path(new_path)
+            self.edit_out.setText(str(out))
         # 覆盖确认：builder 默认拒绝覆盖，这里先问清楚再放行。
         if out.exists():
             ret = QMessageBox.question(
@@ -937,6 +955,14 @@ class BuildTab(QWidget):
 
     def _append(self, line: str) -> None:
         self.log_view.appendPlainText(line)
+
+    @staticmethod
+    def _can_write_existing(path: Path) -> bool:
+        try:
+            with path.open("r+b"):
+                return True
+        except OSError:
+            return False
 
     def _save_pin_csv(self, out: Path) -> Path | None:
         """把临时 PIN 表复制到老师选择的文件夹；取消/失败则回退默认目录。"""

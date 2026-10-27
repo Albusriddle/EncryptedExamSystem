@@ -197,22 +197,8 @@ fn print_result(unlocked: &Unlocked) {
             sec.items.len(),
             sec.total_score()
         );
-        for part in &sec.parts {
-            println!("  [{}] {} 题", part.title, part.items.len());
-        }
-        if sec.parts.is_empty() {
-            for (n, item) in sec.items.iter().enumerate() {
-                print_paper_item(n + 1, item);
-            }
-        } else {
-            let mut n = 0usize;
-            for part in &sec.parts {
-                println!("  [{}] {} 题", part.title, part.items.len());
-                for item in &part.items {
-                    n += 1;
-                    print_paper_item(n, item);
-                }
-            }
+        for (n, item) in sec.items.iter().enumerate() {
+            print_paper_item(n + 1, item);
         }
         println!();
     }
