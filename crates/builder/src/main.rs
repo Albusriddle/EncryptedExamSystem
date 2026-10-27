@@ -297,14 +297,38 @@ fn check_binding(
     })?;
     let data = container::decrypt_data(&unlocked.session_secret, &salt, &unlocked.data_ct)
         .context("解密题库失败")?;
-    let paper = picker::generate_paper_ranged(
-        sheet.student_id,
-        unlocked.session_id,
-        &salt,
-        &data.banks,
-        |exam_id, fallback| (data.pick_for(exam_id, fallback), data.range_for(exam_id)),
-    )
-    .context("重新生成试卷失败")?;
+    // 必须与学生端完全一致：旧包（无 sections）走平均难度；
+    // v6 单层大题走 sections；v7 两层大题走 parts。
+    // 之前这里固定用 generate_paper_ranged，导致所有 v0.15 大题包
+    // 的答题卡都被误判为“指纹不一致”。
+    let paper = if unlocked.sections.is_empty() {
+        picker::generate_paper_ranged(
+            sheet.student_id,
+            unlocked.session_id,
+            &salt,
+            &data.banks,
+            |exam_id, fallback| (data.pick_for(exam_id, fallback), data.range_for(exam_id)),
+        )
+        .context("重新生成试卷失败")?
+    } else if unlocked.sections.iter().any(|s| !s.parts.is_empty()) {
+        picker::generate_paper_parts(
+            sheet.student_id,
+            unlocked.session_id,
+            &salt,
+            &data.banks,
+            &unlocked.sections,
+        )
+        .context("按大题部分重新生成试卷失败")?
+    } else {
+        picker::generate_paper_sections(
+            sheet.student_id,
+            unlocked.session_id,
+            &salt,
+            &data.banks,
+            &unlocked.sections,
+        )
+        .context("按大题重新生成试卷失败")?
+    };
 
     if paper.fingerprint() != sheet.paper_fingerprint {
         return Ok(false);
