@@ -975,12 +975,17 @@ class BuildTab(QWidget):
             return dest
         except OSError as e:
             stashed = self._stash_pin_temp(src)
-            QMessageBox.critical(
-                self,
-                "PIN 表保存失败",
-                f"PIN 表已临时保存到：\n{stashed}\n\n{e}\n\n"
-                "请把这个文件手动复制到安全位置；题库临时目录会自动清理。",
-            )
+            if stashed == src:
+                detail = (
+                    f"PIN 表仍在打包临时目录：\n{src}\n\n"
+                    "题库临时目录**未能自动清理**，请手动删除该目录。"
+                )
+            else:
+                detail = (
+                    f"PIN 表已临时保存到：\n{stashed}\n\n"
+                    "请把这个文件手动复制到安全位置；题库临时目录会自动清理。"
+                )
+            QMessageBox.critical(self, "PIN 表保存失败", f"{detail}\n\n{e}")
             return stashed
 
     def _stash_pin_temp(self, src: Path) -> Path:

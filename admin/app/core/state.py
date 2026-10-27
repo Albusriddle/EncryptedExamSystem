@@ -358,11 +358,16 @@ class ProjectState:
         # 大题模式：编号唯一、题库存在、题数不超过该难度可用题数
         for s in self.sessions:
             seen_sections: set[str] = set()
+            seen_titles: set[str] = set()
             per_bank: dict[str, int] = {}
+            per_diff: dict[tuple[str, int], int] = {}
             for sec in s.sections:
                 if sec.section_id in seen_sections:
                     problems.append(f"场次 {s.session_id}: 大题编号 {sec.section_id} 重复")
                 seen_sections.add(sec.section_id)
+                if sec.title in seen_titles:
+                    problems.append(f"场次 {s.session_id}: 大题标题 {sec.title} 重复")
+                seen_titles.add(sec.title)
                 key = match_bank_exam_id(sec.file, self.banks)
                 if key is None:
                     problems.append(
@@ -377,12 +382,21 @@ class ProjectState:
                         f"但题库 {bank.title} 难度 {sec.difficulty} 只有 {available} 题"
                     )
                 per_bank[key] = per_bank.get(key, 0) + sec.count
+                per_diff[(key, sec.difficulty)] = per_diff.get((key, sec.difficulty), 0) + sec.count
             for key, need in per_bank.items():
                 bank = self.banks[key]
                 if need > len(bank.questions):
                     problems.append(
                         f"场次 {s.session_id}: 题库 {bank.title} 多个大题共需 {need} 题，"
                         f"但只有 {len(bank.questions)} 题"
+                    )
+            for (key, diff), need in per_diff.items():
+                bank = self.banks[key]
+                available = sum(1 for q in bank.questions if q.difficulty == diff)
+                if need > available:
+                    problems.append(
+                        f"场次 {s.session_id}: 题库 {bank.title} 难度 {diff} 多个大题"
+                        f"共需 {need} 题，但只有 {available} 题"
                     )
 
         # 同一学生跨重叠场次（与 Rust 端 check_student_overlap 对齐）
