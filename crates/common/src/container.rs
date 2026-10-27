@@ -40,9 +40,9 @@ use crate::model::Session;
 pub const MAGIC: &[u8; 8] = b"EXAMPKG3";
 /// 尾部魔数，用于从 exe 末尾定位 payload。
 pub const MAGIC_TAIL: &[u8; 8] = b"EXAMTAIL";
-/// 当前格式版本。v5 时间令牌、v6 大题；普通包仍写 v4。
-pub const VERSION: u32 = 6;
-/// v3–v6 可读；v6 仅用于 sections 非空的包（旧客户端最高 v5）。
+/// 当前格式版本。v5 时间令牌、v6 大题、v7 大题下的部分。
+pub const VERSION: u32 = 7;
+/// v3–v7 可读；v7 仅用于 parts 非空的包（旧客户端最高 v6）。
 pub const MIN_SUPPORTED_VERSION: u32 = 3;
 
 /// 密钥区魔数：标记"这个包内嵌了 K_manifest"。
@@ -397,30 +397,32 @@ pub fn build_payload_with_options(
                     s.session_id, sec.title, sec.file
                 ))
             })?;
-            let available = bank
-                .questions
-                .iter()
-                .filter(|q| q.difficulty == Some(sec.difficulty))
-                .count();
-            let key = (bank.exam_id.clone(), sec.difficulty);
-            let need = section_need.entry(key).or_insert(0);
-            *need += sec.count;
-            let bank_total = bank_need.entry(bank.exam_id.clone()).or_insert(0);
-            *bank_total += sec.count;
-            if *need as usize > available {
-                return Err(ContainerError::Format(format!(
-                    "场次 {} 的题库 {} 难度 {} 多个大题共需 {} 题，只有 {} 题",
-                    s.session_id, bank.exam_id, sec.difficulty, need, available
-                )));
-            }
-            if *bank_total as usize > bank.questions.len() {
-                return Err(ContainerError::Format(format!(
-                    "场次 {} 的题库 {} 多个大题共需 {} 题，题库只有 {} 题",
-                    s.session_id,
-                    bank.exam_id,
-                    bank_total,
-                    bank.questions.len()
-                )));
+            for part in sec.effective_parts() {
+                let available = bank
+                    .questions
+                    .iter()
+                    .filter(|q| q.difficulty == Some(part.difficulty))
+                    .count();
+                let key = (bank.exam_id.clone(), part.difficulty);
+                let need = section_need.entry(key).or_insert(0);
+                *need += part.count;
+                let bank_total = bank_need.entry(bank.exam_id.clone()).or_insert(0);
+                *bank_total += part.count;
+                if *need as usize > available {
+                    return Err(ContainerError::Format(format!(
+                        "场次 {} 的题库 {} 难度 {} 多个部分共需 {} 题，只有 {} 题",
+                        s.session_id, bank.exam_id, part.difficulty, need, available
+                    )));
+                }
+                if *bank_total as usize > bank.questions.len() {
+                    return Err(ContainerError::Format(format!(
+                        "场次 {} 的题库 {} 多个部分共需 {} 题，题库只有 {} 题",
+                        s.session_id,
+                        bank.exam_id,
+                        bank_total,
+                        bank.questions.len()
+                    )));
+                }
             }
             if !session_banks.iter().any(|b| b.exam_id == bank.exam_id) {
                 session_banks.push(bank.clone());
@@ -505,8 +507,13 @@ pub fn build_payload_with_options(
     // 普通包继续写 v4，避免无谓地把旧学生端全部挡在门外。
     // 时间令牌需要 v5，大题需要 v6；旧客户端看到高版本会明确报错。
     let has_sections = sessions.iter().any(|s| !s.sections.is_empty());
-    let version = if has_sections {
+    let has_parts = sessions
+        .iter()
+        .any(|s| s.sections.iter().any(|sec| !sec.parts.is_empty()));
+    let version = if has_parts {
         VERSION
+    } else if has_sections {
+        6
     } else if time.is_some_and(|t| t.mode != "off") {
         5
     } else {
@@ -745,11 +752,35 @@ fn validate_sessions_impl(sessions: &[Session], emit_warnings: bool) -> Result<(
                         s.session_id, sec.title
                     )));
                 }
-                if sec.count == 0 || !(1..=255).contains(&sec.difficulty) {
-                    return Err(ContainerError::Format(format!(
-                        "场次 {} 的大题 {} 题数/难度非法",
-                        s.session_id, sec.title
-                    )));
+                if sec.parts.is_empty() {
+                    if sec.count == 0 || !(1..=255).contains(&sec.difficulty) {
+                        return Err(ContainerError::Format(format!(
+                            "场次 {} 的大题 {} 题数/难度非法",
+                            s.session_id, sec.title
+                        )));
+                    }
+                } else {
+                    let mut seen_parts = std::collections::HashSet::new();
+                    for part in &sec.parts {
+                        if part.part_id.trim().is_empty() || part.title.trim().is_empty() {
+                            return Err(ContainerError::Format(format!(
+                                "场次 {} 的大题 {} 有部分缺少编号/标题",
+                                s.session_id, sec.title
+                            )));
+                        }
+                        if !seen_parts.insert(part.part_id.clone()) {
+                            return Err(ContainerError::Format(format!(
+                                "场次 {} 的大题 {} 部分编号 {} 重复",
+                                s.session_id, sec.title, part.part_id
+                            )));
+                        }
+                        if part.count == 0 || !(1..=255).contains(&part.difficulty) {
+                            return Err(ContainerError::Format(format!(
+                                "场次 {} 的大题 {} 的部分 {} 题数/难度非法",
+                                s.session_id, sec.title, part.title
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -1326,6 +1357,7 @@ mod tests {
                 file: "math.json".into(),
                 count: 2,
                 difficulty: 1,
+                parts: vec![],
             }],
         };
         let payload = build_payload(&master(), &[bank], &[s], SALT, kdf(), true).unwrap();

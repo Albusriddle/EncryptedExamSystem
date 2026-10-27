@@ -164,14 +164,43 @@ pub struct SessionExam {
     pub difficulty_max: Option<u8>,
 }
 
-/// 场次里的一个大题：固定题库、题数、精确难度。
+/// 大题下的一个部分：固定题数、精确难度。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SectionPart {
+    pub part_id: String,
+    pub title: String,
+    pub count: u32,
+    pub difficulty: u8,
+}
+
+/// 场次里的一个大题：固定题库；可再分若干部分。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Section {
     pub section_id: String,
     pub title: String,
     pub file: String,
+    /// 旧格式汇总题数；新格式由 parts 汇总。
     pub count: u32,
+    /// 旧格式难度；新格式取第一个部分的难度。
     pub difficulty: u8,
+    #[serde(default)]
+    pub parts: Vec<SectionPart>,
+}
+
+impl Section {
+    /// 统一取部分列表：旧单层配置视为“只有一个部分”。
+    pub fn effective_parts(&self) -> Vec<SectionPart> {
+        if self.parts.is_empty() {
+            vec![SectionPart {
+                part_id: format!("{}p1", self.section_id),
+                title: format!("{} · 全部", self.title),
+                count: self.count,
+                difficulty: self.difficulty,
+            }]
+        } else {
+            self.parts.clone()
+        }
+    }
 }
 
 /// 一个考试场次。

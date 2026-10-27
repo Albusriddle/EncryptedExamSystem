@@ -23,7 +23,7 @@
       "type": "object"
     },
     "Section": {
-      "description": "场次里的一个“大题”：固定题库、固定题数、固定难度。",
+      "description": "场次里的一个“大题”：固定题库；可再分若干部分。",
       "properties": {
         "section_id": {
           "minLength": 1,
@@ -51,6 +51,13 @@
           "minimum": 1,
           "title": "Difficulty",
           "type": "integer"
+        },
+        "parts": {
+          "items": {
+            "$ref": "#/$defs/SectionPart"
+          },
+          "title": "Parts",
+          "type": "array"
         }
       },
       "required": [
@@ -61,6 +68,41 @@
         "difficulty"
       ],
       "title": "Section",
+      "type": "object"
+    },
+    "SectionPart": {
+      "description": "大题下的一个部分：固定题数、精确难度、顺序由数组决定。",
+      "properties": {
+        "part_id": {
+          "minLength": 1,
+          "title": "Part Id",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "count": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "difficulty": {
+          "maximum": 255,
+          "minimum": 1,
+          "title": "Difficulty",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "part_id",
+        "title",
+        "count",
+        "difficulty"
+      ],
+      "title": "SectionPart",
       "type": "object"
     },
     "Session": {

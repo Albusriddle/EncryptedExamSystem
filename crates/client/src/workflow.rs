@@ -130,6 +130,15 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
             |exam_id, fallback| (data.pick_for(exam_id, fallback), data.range_for(exam_id)),
         )
         .context("抽题失败")?
+    } else if unlocked.sections.iter().any(|s| !s.parts.is_empty()) {
+        picker::generate_paper_parts(
+            student_id,
+            unlocked.session_id,
+            &salt,
+            &data.banks,
+            &unlocked.sections,
+        )
+        .context("大题部分抽题失败")?
     } else {
         picker::generate_paper_sections(
             student_id,

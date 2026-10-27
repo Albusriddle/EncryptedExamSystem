@@ -586,33 +586,35 @@ fn build(req: BuildRequest) -> Result<()> {
                     sec.file
                 )
             })?;
-            let available = bank
-                .questions
-                .iter()
-                .filter(|q| q.difficulty == Some(sec.difficulty))
-                .count();
-            let key = (bank.exam_id.clone(), sec.difficulty);
-            let need = section_need.entry(key).or_insert(0);
-            *need += sec.count;
-            let bank_total = bank_need.entry(bank.exam_id.clone()).or_insert(0);
-            *bank_total += sec.count;
-            anyhow::ensure!(
-                (*need as usize) <= available,
-                "场次 {} 的题库 {} 难度 {} 多个大题共需 {} 题，只有 {} 题",
-                s.session_id,
-                bank.exam_id,
-                sec.difficulty,
-                need,
-                available
-            );
-            anyhow::ensure!(
-                (*bank_total as usize) <= bank.questions.len(),
-                "场次 {} 的题库 {} 多个大题共需 {} 题，题库只有 {} 题",
-                s.session_id,
-                bank.exam_id,
-                bank_total,
-                bank.questions.len()
-            );
+            for part in sec.effective_parts() {
+                let available = bank
+                    .questions
+                    .iter()
+                    .filter(|q| q.difficulty == Some(part.difficulty))
+                    .count();
+                let key = (bank.exam_id.clone(), part.difficulty);
+                let need = section_need.entry(key).or_insert(0);
+                *need += part.count;
+                let bank_total = bank_need.entry(bank.exam_id.clone()).or_insert(0);
+                *bank_total += part.count;
+                anyhow::ensure!(
+                    (*need as usize) <= available,
+                    "场次 {} 的题库 {} 难度 {} 多个部分共需 {} 题，只有 {} 题",
+                    s.session_id,
+                    bank.exam_id,
+                    part.difficulty,
+                    need,
+                    available
+                );
+                anyhow::ensure!(
+                    (*bank_total as usize) <= bank.questions.len(),
+                    "场次 {} 的题库 {} 多个部分共需 {} 题，题库只有 {} 题",
+                    s.session_id,
+                    bank.exam_id,
+                    bank_total,
+                    bank.questions.len()
+                );
+            }
         }
     }
 

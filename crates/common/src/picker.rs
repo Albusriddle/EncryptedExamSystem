@@ -64,16 +64,27 @@ impl From<&crate::model::Question> for PaperItem {
     }
 }
 
-/// 试卷的一个科目部分。
+/// 一个大题下的一个部分。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct PaperPart {
+    pub part_id: String,
+    pub title: String,
+    pub items: Vec<PaperItem>,
+}
+
+/// 试卷的一个大题（含可选的部分）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PaperSection {
     /// 内部稳定标识（用于指纹）。**不要用 title 做指纹**——
     /// title 是给人看的，改名不应让已发试卷的溯源记录失效。
     pub exam_id: String,
-    /// 学生可见的科目名（如「高等数学」）。
+    /// 学生可见的大题名（如「第1大题」）。
     pub title: String,
-    /// 本部分抽中的题目。
+    /// 扁平题列表（兼容旧 GUI/CLI；等于 parts 的拼接）。
     pub items: Vec<PaperItem>,
+    /// 新两层模式：部分列表；旧包为空。
+    #[serde(default)]
+    pub parts: Vec<PaperPart>,
 }
 
 impl PaperSection {
@@ -106,6 +117,17 @@ impl Paper {
             // 用 exam_id 而非 title：title 可能被改写（如加「A卷」后缀），
             // 而指纹必须锚定稳定标识。
             write_len_prefixed(&mut h, sec.exam_id.as_bytes());
+            // 新两层模式把部分 ID 也纳入指纹；旧包 parts 为空，指纹不变。
+            if !sec.parts.is_empty() {
+                h.update(b"parts");
+                for part in &sec.parts {
+                    write_len_prefixed(&mut h, part.part_id.as_bytes());
+                    h.update(&(part.items.len() as u32).to_le_bytes());
+                    for item in &part.items {
+                        write_len_prefixed(&mut h, item.id.as_bytes());
+                    }
+                }
+            }
             h.update(&(sec.items.len() as u32).to_le_bytes());
             // 只哈希题目 ID：指纹语义是"选了哪几题"，
             // 题干错别字修正不应改变试卷指纹（否则溯源记录会失效）。
@@ -525,6 +547,7 @@ where
             exam_id: b.exam_id.clone(),
             title: b.title.clone(),
             items: ids,
+            parts: Vec::new(),
         });
     }
     Ok(Paper {
@@ -605,6 +628,74 @@ pub fn generate_paper_sections(
             exam_id: sec.section_id.clone(),
             title: sec.title.clone(),
             items,
+            parts: Vec::new(),
+        });
+    }
+    Ok(Paper {
+        student_id,
+        session_id,
+        sections: out,
+    })
+}
+
+/// 按“大题 → 部分”生成试卷：每个部分固定精确难度，顺序即卷面顺序。
+pub fn generate_paper_parts(
+    student_id: u64,
+    session_id: u32,
+    salt: &[u8],
+    banks: &[ExamBank],
+    sections: &[crate::model::Section],
+) -> Result<Paper, PickError> {
+    let mut rng = make_rng(student_id, session_id, salt);
+    let mut used: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(sections.len());
+    for sec in sections {
+        let bank =
+            bank_for_file(banks, &sec.file).ok_or_else(|| PickError::SectionBankMissing {
+                title: sec.title.clone(),
+                file: sec.file.clone(),
+            })?;
+        let mut parts = Vec::new();
+        let mut flat = Vec::new();
+        for part in sec.effective_parts() {
+            let mut candidates: Vec<usize> = bank
+                .questions
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| q.difficulty == Some(part.difficulty))
+                .map(|(i, _)| i)
+                .collect();
+            fisher_yates_shuffle(&mut candidates, &mut rng);
+            let mut items = Vec::with_capacity(part.count as usize);
+            for &i in &candidates {
+                if used.insert((bank.exam_id.clone(), bank.questions[i].id.clone())) {
+                    items.push(PaperItem::from(&bank.questions[i]));
+                    if items.len() == part.count as usize {
+                        break;
+                    }
+                }
+            }
+            if items.len() != part.count as usize {
+                return Err(PickError::SectionNotEnough {
+                    title: format!("{} / {}", sec.title, part.title),
+                    file: sec.file.clone(),
+                    want: part.count,
+                    difficulty: part.difficulty,
+                    available: items.len(),
+                });
+            }
+            flat.extend(items.clone());
+            parts.push(PaperPart {
+                part_id: part.part_id,
+                title: part.title,
+                items,
+            });
+        }
+        out.push(PaperSection {
+            exam_id: sec.section_id.clone(),
+            title: sec.title.clone(),
+            items: flat,
+            parts,
         });
     }
     Ok(Paper {
@@ -658,6 +749,7 @@ mod tests {
                 file: "math.json".into(),
                 count: 2,
                 difficulty: 1,
+                parts: vec![],
             },
             crate::model::Section {
                 section_id: "s2".into(),
@@ -665,6 +757,7 @@ mod tests {
                 file: "math.json".into(),
                 count: 2,
                 difficulty: 1,
+                parts: vec![],
             },
         ];
         let paper =
@@ -743,6 +836,7 @@ mod tests {
             exam_id: exam_id.into(),
             title: format!("{exam_id} 科目"),
             items,
+            parts: Vec::new(),
         }
     }
 

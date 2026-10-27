@@ -212,14 +212,25 @@ class SessionExam(BaseModel):
         return self
 
 
+class SectionPart(BaseModel):
+    """大题下的一个部分：固定题数、精确难度、顺序由数组决定。"""
+
+    part_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    count: int = Field(ge=1, le=2**32 - 1)
+    difficulty: int = Field(ge=1, le=255)
+
+
 class Section(BaseModel):
-    """场次里的一个“大题”：固定题库、固定题数、固定难度。"""
+    """场次里的一个“大题”：固定题库；可再分若干部分。"""
 
     section_id: str = Field(min_length=1)
     title: str = Field(min_length=1)
     file: str = Field(min_length=1)
+    # 旧格式（单层大题）；新格式使用 parts，这两个字段由 UI 设为汇总值。
     count: int = Field(ge=1, le=2**32 - 1)
     difficulty: int = Field(ge=1, le=255)
+    parts: list[SectionPart] = Field(default_factory=list)
 
 
 class Session(BaseModel):

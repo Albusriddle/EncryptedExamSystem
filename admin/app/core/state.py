@@ -375,14 +375,21 @@ class ProjectState:
                     )
                     continue
                 bank = self.banks[key]
-                available = sum(1 for q in bank.questions if q.difficulty == sec.difficulty)
-                if sec.count > available:
-                    problems.append(
-                        f"场次 {s.session_id}: 大题 {sec.title} 要抽 {sec.count} 题，"
-                        f"但题库 {bank.title} 难度 {sec.difficulty} 只有 {available} 题"
-                    )
-                per_bank[key] = per_bank.get(key, 0) + sec.count
-                per_diff[(key, sec.difficulty)] = per_diff.get((key, sec.difficulty), 0) + sec.count
+                parts = (
+                    [(sec.title, sec.count, sec.difficulty)]
+                    if not sec.parts
+                    else [(p.title, p.count, p.difficulty) for p in sec.parts]
+                )
+                for ptitle, pcount, pdiff in parts:
+                    available = sum(1 for q in bank.questions if q.difficulty == pdiff)
+                    if pcount > available:
+                        problems.append(
+                            f"场次 {s.session_id}: 部分 {sec.title}/{ptitle} 要抽 "
+                            f"{pcount} 题，但题库 {bank.title} 难度 {pdiff} 只有 "
+                            f"{available} 题"
+                        )
+                    per_bank[key] = per_bank.get(key, 0) + pcount
+                    per_diff[(key, pdiff)] = per_diff.get((key, pdiff), 0) + pcount
             for key, need in per_bank.items():
                 bank = self.banks[key]
                 if need > len(bank.questions):
