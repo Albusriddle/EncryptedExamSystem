@@ -179,9 +179,11 @@ pub struct Section {
     pub section_id: String,
     pub title: String,
     pub file: String,
-    /// 旧格式汇总题数；新格式由 parts 汇总。
+    /// 旧格式汇总题数；新格式由 parts 汇总（可省略）。
+    #[serde(default)]
     pub count: u32,
-    /// 旧格式难度；新格式取第一个部分的难度。
+    /// 旧格式难度；新格式取第一个部分的难度（可省略）。
+    #[serde(default)]
     pub difficulty: u8,
     #[serde(default)]
     pub parts: Vec<SectionPart>,

@@ -67,6 +67,9 @@ class SectionRow:
     up: QPushButton
     down: QPushButton
     add_part: QPushButton
+    #: 旧单层工程：未修改时保存仍写 parts=[]，不强制升级 v7。
+    legacy_flat: bool = False
+    was_legacy: bool = False
 
 
 @dataclass
@@ -373,7 +376,20 @@ class SessionsTab(QWidget):
 
         existing = {r.section_id for r in self.section_rows}
         sid = sec.section_id if sec else self._next_id(existing, "s")
-        row = SectionRow(box, title, bank, parts_layout, [], sid, up, down, add_part)
+        legacy = bool(sec and not sec.parts)
+        row = SectionRow(
+            box,
+            title,
+            bank,
+            parts_layout,
+            [],
+            sid,
+            up,
+            down,
+            add_part,
+            legacy_flat=legacy,
+            was_legacy=legacy,
+        )
         self.section_rows.append(row)
         self.sections_layout.addWidget(box)
 
@@ -392,7 +408,7 @@ class SessionsTab(QWidget):
                 row,
                 SectionPart(
                     part_id=f"{sid}p1",
-                    title=f"{sec.title} · 全部" if sec else "第1部分",
+                    title="全部题目" if sec else "第1部分",
                     count=sec.count if sec else 1,
                     difficulty=sec.difficulty if sec else 1,
                 )
@@ -432,14 +448,24 @@ class SessionsTab(QWidget):
 
         existing = {p.part_id for p in section_row.parts}
         pid = part.part_id if part else self._next_id(existing, f"{section_row.section_id}p")
+        if part is None:
+            # 新建部分才视为“升级为两层”；加载旧单层时补的隐式部分不算
+            self._mark_section_custom(section_row)
         prow = PartRow(box, title, count, diff, hint, pid, up, down)
         section_row.parts.append(prow)
         section_row.parts_layout.addWidget(box)
+        title.textChanged.connect(lambda _v, sec=section_row: self._mark_section_custom(sec))
         count.valueChanged.connect(
-            lambda _v, r=prow, sec=section_row: self._update_part_hint(sec, r)
+            lambda _v, r=prow, sec=section_row: (
+                self._mark_section_custom(sec),
+                self._update_part_hint(sec, r),
+            )
         )
         diff.valueChanged.connect(
-            lambda _v, r=prow, sec=section_row: self._update_part_hint(sec, r)
+            lambda _v, r=prow, sec=section_row: (
+                self._mark_section_custom(sec),
+                self._update_part_hint(sec, r),
+            )
         )
         up.clicked.connect(lambda _b=False, r=prow, sec=section_row: self._move_part(sec, r, -1))
         down.clicked.connect(lambda _b=False, r=prow, sec=section_row: self._move_part(sec, r, 1))
@@ -447,6 +473,9 @@ class SessionsTab(QWidget):
             lambda _b=False, r=prow, sec=section_row: self._remove_part_row(sec, r)
         )
         self._update_part_hint(section_row, prow)
+
+    def _mark_section_custom(self, section_row: SectionRow) -> None:
+        section_row.legacy_flat = False
 
     def _remove_part_row(self, section_row: SectionRow, row: PartRow) -> None:
         if row in section_row.parts:
@@ -598,6 +627,29 @@ class SessionsTab(QWidget):
                     )
                 )
             total = sum(p.count for p in parts)
+            if srow.legacy_flat and len(parts) == 1:
+                # 未改动的旧单层工程：继续写 parts=[]，保持 v6 兼容
+                out.append(
+                    Section(
+                        section_id=srow.section_id,
+                        title=title,
+                        file=f"{exam_id}.json",
+                        count=total,
+                        difficulty=parts[0].difficulty,
+                        parts=[],
+                    )
+                )
+                continue
+            if srow.was_legacy and not srow.legacy_flat:
+                answer = QMessageBox.question(
+                    self,
+                    "升级为两层大题",
+                    "这个场次原本是单层大题，保存后会升级为 v7；\n"
+                    "v0.14.x 及更早的学生端将无法打开新包。继续吗？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return None
             out.append(
                 Section(
                     section_id=srow.section_id,

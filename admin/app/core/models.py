@@ -227,10 +227,22 @@ class Section(BaseModel):
     section_id: str = Field(min_length=1)
     title: str = Field(min_length=1)
     file: str = Field(min_length=1)
-    # 旧格式（单层大题）；新格式使用 parts，这两个字段由 UI 设为汇总值。
-    count: int = Field(ge=1, le=2**32 - 1)
-    difficulty: int = Field(ge=1, le=255)
+    # 旧格式（单层大题）；新格式使用 parts，这两个字段可省略，
+    # 由下面的 validator 自动填成“题数之和 / 第一个部分的难度”。
+    count: int = Field(default=0, ge=0, le=2**32 - 1)
+    difficulty: int = Field(default=0, ge=0, le=255)
     parts: list[SectionPart] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _fill_legacy_summary(self) -> Section:
+        if self.parts:
+            if self.count == 0:
+                self.count = sum(p.count for p in self.parts)
+            if self.difficulty == 0:
+                self.difficulty = self.parts[0].difficulty
+        elif self.count < 1 or not (1 <= self.difficulty <= 255):
+            raise ValueError("单层大题必须设置 count（≥1）和 difficulty（1–255）")
+        return self
 
 
 class Session(BaseModel):

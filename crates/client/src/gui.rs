@@ -562,25 +562,20 @@ impl eframe::App for ExamApp {
                 return;
             }
 
-            let sections: Vec<(String, usize)> = unlocked
+            let sections: Vec<(String, Vec<(String, usize)>)> = unlocked
                 .paper
                 .sections
                 .iter()
                 .map(|s| {
-                    let title = if s.parts.is_empty() {
-                        s.title.clone()
+                    let parts = if s.parts.is_empty() {
+                        vec![(String::new(), s.items.len())]
                     } else {
-                        format!(
-                            "{}（{}）",
-                            s.title,
-                            s.parts
-                                .iter()
-                                .map(|p| p.title.clone())
-                                .collect::<Vec<_>>()
-                                .join(" / ")
-                        )
+                        s.parts
+                            .iter()
+                            .map(|p| (p.title.clone(), p.items.len()))
+                            .collect()
                     };
-                    (title, s.items.len())
+                    (s.title.clone(), parts)
                 })
                 .collect();
 

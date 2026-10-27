@@ -134,7 +134,7 @@ impl NavState {
         self.pending_retries = 0;
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, sections: &[(String, usize)]) {
+    pub fn show(&mut self, ctx: &egui::Context, sections: &[(String, Vec<(String, usize)>)]) {
         // 每帧重置：按钮矩形只反映本帧布局，否则多帧累积会让诊断失真。
         self.button_rects.clear();
         let width = if self.collapsed {
@@ -171,10 +171,7 @@ impl NavState {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let mut global = 0usize;
-                        for (title, count) in sections {
-                            if *count == 0 {
-                                continue;
-                            }
+                        for (title, parts) in sections {
                             ui.add_space(4.0);
                             ui.label(
                                 egui::RichText::new(title)
@@ -182,8 +179,20 @@ impl NavState {
                                     .color(ui.visuals().weak_text_color()),
                             );
                             ui.add_space(2.0);
-                            self.grid(ui, &mut global, *count);
-                            ui.add_space(2.0);
+                            for (part_title, count) in parts {
+                                if *count == 0 {
+                                    continue;
+                                }
+                                if !part_title.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(format!("  {part_title}"))
+                                            .size(11.0)
+                                            .color(ui.visuals().weak_text_color()),
+                                    );
+                                }
+                                self.grid(ui, &mut global, *count);
+                                ui.add_space(2.0);
+                            }
                         }
                     });
             });
@@ -207,11 +216,14 @@ impl NavState {
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub fn dump_debug(
         &self,
-        sections: &[(String, usize)],
+        sections: &[(String, Vec<(String, usize)>)],
         scroll_offset: egui::Vec2,
         path: &std::path::Path,
     ) {
-        let total: usize = sections.iter().map(|(_, n)| n).sum();
+        let total: usize = sections
+            .iter()
+            .flat_map(|(_, parts)| parts.iter().map(|(_, n)| *n))
+            .sum();
         let mut out = String::new();
         out.push_str(&format!("collapsed={}\n", self.collapsed));
         out.push_str(&format!("panel_width_pt={:.1}\n", expanded_width()));
@@ -243,8 +255,11 @@ impl NavState {
             None => out.push_str("last_scrolled=None\n"),
         }
         out.push_str("sections=\n");
-        for (t, n) in sections {
-            out.push_str(&format!("  {t}: {n}\n"));
+        for (t, parts) in sections {
+            out.push_str(&format!("  {t}:\n"));
+            for (pt, n) in parts {
+                out.push_str(&format!("    {pt}: {n}\n"));
+            }
         }
         out.push_str(&format!(
             "panel_inner_width={:.1}\n",

@@ -41,14 +41,16 @@
           "type": "string"
         },
         "count": {
+          "default": 0,
           "maximum": 4294967295,
-          "minimum": 1,
+          "minimum": 0,
           "title": "Count",
           "type": "integer"
         },
         "difficulty": {
+          "default": 0,
           "maximum": 255,
-          "minimum": 1,
+          "minimum": 0,
           "title": "Difficulty",
           "type": "integer"
         },
@@ -63,9 +65,7 @@
       "required": [
         "section_id",
         "title",
-        "file",
-        "count",
-        "difficulty"
+        "file"
       ],
       "title": "Section",
       "type": "object"
