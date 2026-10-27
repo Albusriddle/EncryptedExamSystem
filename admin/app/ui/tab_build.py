@@ -974,12 +974,25 @@ class BuildTab(QWidget):
             shutil.copy2(src, dest)
             return dest
         except OSError as e:
+            stashed = self._stash_pin_temp(src)
             QMessageBox.critical(
                 self,
                 "PIN 表保存失败",
-                f"临时 PIN 表仍在：\n{src}\n\n{e}",
+                f"PIN 表已临时保存到：\n{stashed}\n\n{e}\n\n"
+                "请把这个文件手动复制到安全位置；题库临时目录会自动清理。",
             )
-            return Path(src)
+            return stashed
+
+    def _stash_pin_temp(self, src: Path) -> Path:
+        """复制失败时只保留 PIN 文件，避免把整个题库临时目录留在磁盘。"""
+        import tempfile
+
+        dest = Path(tempfile.gettempdir()) / f"ees-pin-{getattr(self, '_pin_stamp', 'unknown')}.csv"
+        try:
+            shutil.copy2(src, dest)
+            return dest
+        except OSError:
+            return src
 
     def _on_done(self, ok: bool, info: str) -> None:
         self.btn_build.setEnabled(True)
@@ -1015,6 +1028,13 @@ class BuildTab(QWidget):
         except OSError:
             pass
         self._pin_path = self._save_pin_csv(out)
+        if self._pin_path is None and getattr(self, "_pin_temp", None) is not None:
+            QMessageBox.warning(
+                self,
+                "PIN 表未生成",
+                "打包成功，但没有找到 PIN 表文件。\n"
+                "请检查打包日志并重试；学生暂时无法用 PIN 登录。",
+            )
         if self._pin_path is None or self._pin_path != self._pin_temp:
             self._cleanup_tmp()
         pin_note = ""

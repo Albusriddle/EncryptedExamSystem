@@ -318,9 +318,13 @@ class SessionsTab(QWidget):
         for exam_id, b in sorted(self.state.banks.items()):
             bank.addItem(b.title, exam_id)
         if sec:
-            idx = bank.findData(match_bank_exam_id(sec.file, self.state.banks) or "")
+            desired = match_bank_exam_id(sec.file, self.state.banks) or ""
+            idx = bank.findData(desired)
             if idx >= 0:
                 bank.setCurrentIndex(idx)
+            else:
+                bank.addItem(f"⚠ 原题库已删除：{sec.file}", "")
+                bank.setCurrentIndex(bank.count() - 1)
         count = QSpinBox()
         count.setRange(1, 9999)
         count.setValue(sec.count if sec else 1)
@@ -409,6 +413,9 @@ class SessionsTab(QWidget):
             for exam_id, b in sorted(self.state.banks.items()):
                 row.bank.addItem(b.title, exam_id)
             idx = row.bank.findData(cur)
+            if idx < 0 and cur:
+                row.bank.addItem("⚠ 原题库已删除，请重新选择", "")
+                idx = row.bank.count() - 1
             row.bank.setCurrentIndex(max(0, idx))
             row.bank.blockSignals(False)
             self._update_section_hint(row)
@@ -416,6 +423,9 @@ class SessionsTab(QWidget):
     def _collect_sections(self) -> list[Section] | None:
         out: list[Section] = []
         seen: set[str] = set()
+        titles: set[str] = set()
+        per_key: dict[tuple[str, int], int] = {}
+        per_bank: dict[str, int] = {}
         for row in self.section_rows:
             title = row.title.text().strip()
             exam_id = str(row.bank.currentData() or "")
@@ -427,15 +437,29 @@ class SessionsTab(QWidget):
                 QMessageBox.warning(self, "大题编号重复", row.section_id)
                 return None
             seen.add(row.section_id)
-            available = sum(
-                1 for q in bank.questions if q.difficulty == int(row.difficulty.value())
-            )
-            if int(row.count.value()) > available:
+            if title in titles:
+                QMessageBox.warning(self, "大题标题重复", f"「{title}」出现了两次。")
+                return None
+            titles.add(title)
+            diff = int(row.difficulty.value())
+            available = sum(1 for q in bank.questions if q.difficulty == diff)
+            key = (exam_id, diff)
+            per_key[key] = per_key.get(key, 0) + int(row.count.value())
+            per_bank[exam_id] = per_bank.get(exam_id, 0) + int(row.count.value())
+            if per_key[key] > available:
                 QMessageBox.warning(
                     self,
                     "题数不足",
-                    f"「{title}」要抽 {row.count.value()} 题，但难度 "
-                    f"{row.difficulty.value()} 只有 {available} 题。",
+                    f"「{title}」所在题库的难度 {diff} 题数不足："
+                    f"多个大题共需 {per_key[key]} 题，可用 {available} 题。",
+                )
+                return None
+            if per_bank[exam_id] > len(bank.questions):
+                QMessageBox.warning(
+                    self,
+                    "题数不足",
+                    f"题库「{bank.title}」多个大题共需 {per_bank[exam_id]} 题，"
+                    f"但题库只有 {len(bank.questions)} 题。",
                 )
                 return None
             out.append(

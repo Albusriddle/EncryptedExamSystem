@@ -386,6 +386,10 @@ pub fn build_payload_with_options(
                 pick,
             });
         }
+        let mut section_need: std::collections::HashMap<(String, u8), u32> =
+            std::collections::HashMap::new();
+        let mut bank_need: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
         for sec in &s.sections {
             let bank = match_bank(&sec.file, &clean_banks).ok_or_else(|| {
                 ContainerError::Format(format!(
@@ -398,10 +402,24 @@ pub fn build_payload_with_options(
                 .iter()
                 .filter(|q| q.difficulty == Some(sec.difficulty))
                 .count();
-            if available < sec.count as usize {
+            let key = (bank.exam_id.clone(), sec.difficulty);
+            let need = section_need.entry(key).or_insert(0);
+            *need += sec.count;
+            let bank_total = bank_need.entry(bank.exam_id.clone()).or_insert(0);
+            *bank_total += sec.count;
+            if *need as usize > available {
                 return Err(ContainerError::Format(format!(
-                    "场次 {} 的大题 {} 要抽 {} 题，但题库 {} 难度 {} 只有 {} 题",
-                    s.session_id, sec.title, sec.count, bank.exam_id, sec.difficulty, available
+                    "场次 {} 的题库 {} 难度 {} 多个大题共需 {} 题，只有 {} 题",
+                    s.session_id, bank.exam_id, sec.difficulty, need, available
+                )));
+            }
+            if *bank_total as usize > bank.questions.len() {
+                return Err(ContainerError::Format(format!(
+                    "场次 {} 的题库 {} 多个大题共需 {} 题，题库只有 {} 题",
+                    s.session_id,
+                    bank.exam_id,
+                    bank_total,
+                    bank.questions.len()
                 )));
             }
             if !session_banks.iter().any(|b| b.exam_id == bank.exam_id) {

@@ -14,7 +14,7 @@
 
 ## 教师：下载这个
 
-**下载 `ExamAdmin-<版本>-windows.zip`**（约 57 MB，见本页底部 Assets）
+**下载 `ExamAdmin-<版本>-windows.zip`**（约 61 MB，见本页底部 Assets）
 
 下载 → 解压 → 进 `ExamAdmin` 文件夹 → 双击 `ExamAdmin.exe`。
 
