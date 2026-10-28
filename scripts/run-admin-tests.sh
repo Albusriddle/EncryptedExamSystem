@@ -14,7 +14,8 @@ code=$?
 set -e
 cat "$LOG"
 if [ "$code" -eq 0 ]; then exit 0; fi
-if grep -qE '(^|[[:space:]])failed|ERROR|error:' "$LOG"; then exit "$code"; fi
+if [ "$code" -ne 127 ] && [ "$code" -ne 139 ]; then exit "$code"; fi
+if grep -qiE 'failed|(^|[^a-z])error' "$LOG"; then exit "$code"; fi
 if grep -qE '[0-9]+ passed' "$LOG"; then
   echo "⚠ pytest 断言全绿，但 Qt 在退出阶段返回 $code；按已知 teardown 崩溃处理"
   exit 0

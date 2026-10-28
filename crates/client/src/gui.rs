@@ -336,7 +336,7 @@ impl ExamApp {
                     .checked_sub(Duration::from_secs(5))
                     .unwrap_or_else(std::time::Instant::now);
                 self.sheet_path = Some(save_path);
-                self.save_error = None;
+                // 不要无条件清空：备份失败/损坏提示必须保留到学生看到。
                 self.confirm_submit = false;
                 self.review_mode = false;
                 self.stage = Stage::Paper(Box::new(unlocked));
