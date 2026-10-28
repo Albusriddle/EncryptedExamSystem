@@ -66,7 +66,7 @@ jobs:
           uv sync --locked --extra gui --group dev
           uv run ruff check .
           uv run ruff format --check .
-          uv run pytest -q
+          bash ../scripts/run-admin-tests.sh
 
       - name: 全量测试（发布前必须全绿）
         shell: bash
