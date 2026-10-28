@@ -585,7 +585,30 @@ impl eframe::App for ExamApp {
                 flags.extend(sheet.answers.iter().map(|a| a.is_some()));
             }
             self.nav.set_answered(flags);
-            self.nav.show(ctx, &sections);
+            let nav_submitted = self.sheet.as_ref().is_some_and(|s| s.submitted);
+            let nav_can_submit = self.sheet.as_ref().is_some_and(|s| !s.submitted) && !self.expired;
+            self.nav.show(
+                ctx,
+                &sections,
+                nav_can_submit,
+                nav_submitted,
+                self.confirm_submit,
+            );
+            #[allow(clippy::collapsible_if)]
+            if self.nav.take_submit_requested() {
+                if let Some(sheet) = self.sheet.as_mut() {
+                    if !sheet.submitted && !self.expired {
+                        if self.confirm_submit {
+                            sheet.freeze(now_or_wall_clock(now));
+                            self.confirm_submit = false;
+                            self.sheet_dirty = true;
+                            self.last_edit = std::time::Instant::now();
+                        } else {
+                            self.confirm_submit = true;
+                        }
+                    }
+                }
+            }
 
             // ② 试卷：逐题记录矩形；渲染完成后在同一个 Ui 里消费 pending。
             //    必须同一个 CentralPanel：一个 pass 只能有一个 CentralPanel。

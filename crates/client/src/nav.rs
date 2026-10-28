@@ -66,6 +66,8 @@ pub struct NavState {
     panel_inner_width: f32,
     /// 诊断：面板内区域的左边界（屏幕坐标）。
     panel_left: f32,
+    /// 题号栏底部“交卷”按钮被点击；由 MainApp 消费并走统一的二次确认。
+    submit_requested: bool,
 }
 
 impl NavState {
@@ -84,6 +86,11 @@ impl NavState {
     /// 折叠状态要保留（那是用户偏好，不是试卷状态）。
     /// 不重置的话，上一份试卷的 rects 会残留：若恰有一个未消费的
     /// pending，新试卷会按旧坐标滚动，甚至滚到错误位置。
+    /// 消费题号栏交卷请求。
+    pub fn take_submit_requested(&mut self) -> bool {
+        std::mem::take(&mut self.submit_requested)
+    }
+
     pub fn reset_for_new_paper(&mut self) {
         self.pending = None;
         self.pending_retries = 0;
@@ -134,7 +141,14 @@ impl NavState {
         self.pending_retries = 0;
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, sections: &[(String, Vec<(String, usize)>)]) {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        sections: &[(String, Vec<(String, usize)>)],
+        can_submit: bool,
+        submitted: bool,
+        confirm: bool,
+    ) {
         // 每帧重置：按钮矩形只反映本帧布局，否则多帧累积会让诊断失真。
         self.button_rects.clear();
         let width = if self.collapsed {
@@ -166,9 +180,12 @@ impl NavState {
                 self.panel_inner_width = ui.available_width();
                 self.panel_left = ui.min_rect().left();
 
-                // 题目多时卡片自身也要能滚（行数不限）
+                // 题目多时卡片自身也要能滚（行数不限）；底部固定留出交卷按钮。
+                let bottom_h = 48.0;
+                let scroll_h = (ui.available_height() - bottom_h).max(80.0);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    .max_height(scroll_h)
                     .show(ui, |ui| {
                         let mut global = 0usize;
                         for (title, parts) in sections {
@@ -195,6 +212,26 @@ impl NavState {
                             }
                         }
                     });
+
+                ui.add_space(4.0);
+                ui.separator();
+                let label = if submitted {
+                    "✔ 已交卷"
+                } else if confirm {
+                    "确认交卷（不可再修改）"
+                } else {
+                    "交卷"
+                };
+                let enabled = can_submit && !submitted;
+                if ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(label).min_size(egui::vec2(ui.available_width(), 28.0)),
+                    )
+                    .clicked()
+                {
+                    self.submit_requested = true;
+                }
             });
     }
 

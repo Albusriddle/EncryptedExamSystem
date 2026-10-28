@@ -208,26 +208,39 @@ class AnswersTab(QWidget):
         self.btn_absent.setEnabled(False)
         self.btn_absent.clicked.connect(self._show_attendance)
         btns.addWidget(self.btn_absent)
+        btns.addStretch(1)
+        lay.addLayout(btns)
+
+        # 第二行放“收据/导出”类长按钮，避免被压缩成“签发答题卡收据...”
+        btns2 = QHBoxLayout()
         self.btn_receipt = QPushButton("签发答题卡收据…")
         self.btn_receipt.setToolTip("用教师私钥对当前答题卡文件哈希签名，防止收卷后被改")
         self.btn_receipt.setEnabled(False)
         self.btn_receipt.clicked.connect(self._issue_receipt)
-        btns.addWidget(self.btn_receipt)
+        btns2.addWidget(self.btn_receipt)
         self.btn_verify_receipt = QPushButton("验证收据…")
         self.btn_verify_receipt.clicked.connect(self._verify_receipt)
-        btns.addWidget(self.btn_verify_receipt)
+        btns2.addWidget(self.btn_verify_receipt)
         self.btn_receipt_key = QPushButton("备份收据私钥…")
         self.btn_receipt_key.setToolTip(
             "把 receipt-key.pem 导出到安全位置（换机/重装后验证旧收据用）"
         )
         self.btn_receipt_key.clicked.connect(self._backup_receipt_key)
-        btns.addWidget(self.btn_receipt_key)
+        btns2.addWidget(self.btn_receipt_key)
         self.btn_csv = QPushButton("导出原始作答 CSV")
         self.btn_csv.setToolTip("只导出学生原始作答，不含分数；判分请用下方「导出判分结果…」")
         self.btn_csv.clicked.connect(self._export_csv)
         self.btn_csv.setEnabled(False)
-        btns.addWidget(self.btn_csv)
-        lay.addLayout(btns)
+        btns2.addWidget(self.btn_csv)
+        btns2.addStretch(1)
+        for btn in (
+            self.btn_receipt,
+            self.btn_verify_receipt,
+            self.btn_receipt_key,
+            self.btn_csv,
+        ):
+            btn.setMinimumWidth(btn.sizeHint().width())
+        lay.addLayout(btns2)
 
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setHorizontalHeaderLabels(COLUMNS)
@@ -519,7 +532,11 @@ class AnswersTab(QWidget):
             return
         try:
             key = load_or_create_key()
-            data = build_receipt(files, package=str(self.package or ""), signer=key)
+            pkg_text = self.pkg.text().strip()
+            if pkg_text and not Path(pkg_text).is_file():
+                QMessageBox.warning(self, "找不到包", f"学生端包不存在：{pkg_text}")
+                return
+            data = build_receipt(files, package=pkg_text, signer=key)
             Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             self._audit(
                 "receipt_issued",
