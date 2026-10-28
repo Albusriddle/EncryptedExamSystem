@@ -964,8 +964,37 @@ class BuildTab(QWidget):
         except OSError:
             return False
 
+    @staticmethod
+    def _pin_target_error(out: Path, target: Path) -> str | None:
+        """校验 PIN 表保存路径；返回 None 表示可用，否则返回给老师看的原因。"""
+        try:
+            out_dir = out.resolve().parent
+            tgt = target.resolve()
+        except OSError:
+            return "路径无法解析，请换一个位置。"
+        if target.exists() and target.is_dir():
+            return "这是目录，不是 CSV 文件。"
+        if tgt == out_dir or out_dir in tgt.parents:
+            return "PIN 表不能放在学生端 exe 所在目录或其子目录，学生能看到。"
+        if os.path.normcase(str(tgt)) == os.path.normcase(str(out_dir)):
+            return "PIN 表不能放在学生端 exe 所在目录。"
+        if target.exists() and not BuildTab._can_write_existing(target):
+            return "目标文件正在使用或只读，请关闭占用它的程序或换一个文件名。"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            probe = target.parent / f".ees-pin-write-test-{os.getpid()}"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink()
+        except OSError as e:
+            return f"该目录不可写：{e}"
+        return None
+
     def _save_pin_csv(self, out: Path) -> Path | None:
-        """把临时 PIN 表复制到老师选择的文件夹；取消/失败则回退默认目录。"""
+        """把临时 PIN 表保存到老师选择的位置。
+
+        不再静默回退到默认目录：选错/不可写就提示并重新选择；
+        老师取消时暂存到系统临时目录，并明确显示路径。
+        """
         src = getattr(self, "_pin_temp", None)
         if src is None or not Path(src).is_file():
             return None
@@ -974,45 +1003,49 @@ class BuildTab(QWidget):
         default_dir, _ = safe_pin_dir(
             project_dir_display(), out, settings_path().parent / "projects"
         )
-        chosen = QFileDialog.getExistingDirectory(self, "选择 PIN 表保存文件夹", str(default_dir))
-        target_dir = Path(chosen) if chosen else default_dir
-        # 绝不允许把 PIN 表放进考试包目录/其子目录
-        try:
-            out_resolved = out.resolve()
-            tgt = target_dir.resolve()
-            if tgt == out_resolved.parent or out_resolved.parent in tgt.parents:
+        stamp = getattr(self, "_pin_stamp", "")
+        default_file = default_dir / f"登录PIN-{out.stem}-{stamp}.csv"
+
+        while True:
+            chosen, _ = QFileDialog.getSaveFileName(
+                self,
+                "保存 PIN 表（不要放在考试包目录）",
+                str(default_file),
+                "CSV (*.csv)",
+            )
+            if not chosen:
+                stashed = self._stash_pin_temp(Path(src))
                 QMessageBox.warning(
                     self,
-                    "不能保存到考试包目录",
-                    "PIN 表不能放在考试包目录（会被学生看到），已改存到默认目录。",
+                    "PIN 表未保存",
+                    f"已暂存到：\n{stashed}\n\n请手动复制到安全位置；临时文件不会自动删除。",
                 )
-                target_dir = default_dir
-        except OSError:
-            target_dir = default_dir
-        try:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            base = f"登录PIN-{out.stem}-{getattr(self, '_pin_stamp', '')}"
-            dest = target_dir / f"{base}.csv"
-            n = 2
-            while dest.exists():
-                dest = target_dir / f"{base}-{n}.csv"
-                n += 1
-            shutil.copy2(src, dest)
-            return dest
-        except OSError as e:
-            stashed = self._stash_pin_temp(src)
-            if stashed == src:
-                detail = (
-                    f"PIN 表仍在打包临时目录：\n{src}\n\n"
-                    "题库临时目录**未能自动清理**，请手动删除该目录。"
+                return stashed
+
+            target = Path(chosen)
+            if target.suffix.lower() != ".csv":
+                target = target.with_suffix(".csv")
+            reason = self._pin_target_error(out, target)
+            if reason:
+                QMessageBox.warning(
+                    self,
+                    "不能保存到这个位置",
+                    f"{reason}\n\n请重新选择保存位置。\n建议保存到：\n{default_dir}",
                 )
-            else:
-                detail = (
-                    f"PIN 表已临时保存到：\n{stashed}\n\n"
-                    "请把这个文件手动复制到安全位置；题库临时目录会自动清理。"
+                continue
+
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, target)
+                return target
+            except OSError as e:
+                QMessageBox.critical(
+                    self,
+                    "PIN 表保存失败",
+                    f"{target}\n\n{e}\n\n请重新选择可写目录。",
                 )
-            QMessageBox.critical(self, "PIN 表保存失败", f"{detail}\n\n{e}")
-            return stashed
+                # 继续循环，让老师重新选；不静默改存默认目录
+                continue
 
     def _stash_pin_temp(self, src: Path) -> Path:
         """复制失败时只保留 PIN 文件，避免把整个题库临时目录留在磁盘。"""

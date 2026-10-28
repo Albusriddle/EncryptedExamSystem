@@ -670,7 +670,8 @@ fn build(req: BuildRequest) -> Result<()> {
         let mut map = std::collections::HashMap::new();
         for s in &manifest.sessions {
             for &sid in &s.students {
-                let pin = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
+                // 100000–999999：始终 6 位且无前导 0，避免 Excel/CSV 把 028879 显示成 28879。
+                let pin = format!("{:06}", rand::rng().random_range(100_000..1_000_000u32));
                 map.insert((s.session_id, sid), pin.clone());
             }
         }

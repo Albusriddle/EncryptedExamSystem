@@ -79,8 +79,27 @@ pub struct Unlocked {
 /// ```text
 /// 读 payload → 解 header → 【时间门禁】 → 解锁信封 → 解密题库 → 确定性抽题
 /// ```
+/// 统一 PIN 输入：去空格；1–5 位纯数字左补 0；其它原样。
+fn normalize_pin(raw: &str) -> String {
+    let t = raw.trim();
+    if (1..=5).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_digit()) {
+        format!("{t:0>6}")
+    } else {
+        t.to_string()
+    }
+}
+
 /// 带每生 PIN 的解锁；`pin=None` 等价于旧包（只凭学号）。
 pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) -> Result<Unlocked> {
+    // Excel/CSV 会把 028879 显示成 28879；这里统一按 6 位数字补前导 0。
+    let pin = pin.map(normalize_pin).filter(|p| !p.is_empty());
+    if let Some(p) = pin.as_deref() {
+        anyhow::ensure!(
+            p.len() == 6 && p.bytes().all(|b| b.is_ascii_digit()),
+            "PIN 格式不正确：请输入 6 位数字（不足 6 位会自动补 0）"
+        );
+    }
+
     // 1. 读自身 payload。
     let exe_path = match &opts.package {
         Some(p) => p.clone(),
@@ -109,12 +128,21 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
         .with_context(|| format!("内部错误：门禁返回了不存在的场次 {session_id}"))?;
 
     // 4. 解锁：Argon2id(学号, 场次, salt) → tag → 信封。
-    let unlocked =
-        container::try_unlock_session_with_pin(session, &header, blob_area, student_id, &salt, pin)
-            .context("解锁失败（包损坏或 KDF 参数异常）")?
-            .with_context(|| {
-                format!("学号或 PIN 不正确，或学号 {student_id} 不在场次 {session_id} 的名单中")
-            })?;
+    let unlocked = container::try_unlock_session_with_pin(
+        session,
+        &header,
+        blob_area,
+        student_id,
+        &salt,
+        pin.as_deref(),
+    )
+    .context("解锁失败（包损坏或 KDF 参数异常）")?
+    .with_context(|| {
+        format!(
+            "学号或 PIN 不正确，或学号 {student_id} 不在场次 {session_id} 的名单中。\n\
+                 请确认学生端 exe 与 PIN 表来自同一次打包。"
+        )
+    })?;
 
     // 5. 解密题库。
     let data = container::decrypt_data(&unlocked.session_secret, &salt, &unlocked.data_ct)
@@ -396,6 +424,16 @@ pub fn is_expired(now: u64, end: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pin_is_left_padded_and_trimmed() {
+        assert_eq!(normalize_pin(" 11125 "), "011125");
+        assert_eq!(normalize_pin("028879"), "028879");
+        assert_eq!(normalize_pin("550985"), "550985");
+        assert_eq!(normalize_pin(""), "");
+        assert_eq!(normalize_pin("1234567"), "1234567");
+        assert_eq!(normalize_pin("abc123"), "abc123");
+    }
 
     /// 收卷边界：now == end 必须算已结束（不能多给一秒）。
     #[test]
