@@ -232,6 +232,7 @@ class AnswersTab(QWidget):
         audit_menu.addAction("签发答题卡收据", self._issue_receipt)
         audit_menu.addAction("验证收据", self._verify_receipt)
         audit_menu.addAction("备份收据私钥", self._backup_receipt_key)
+        audit_menu.addAction("考后查看原卷", self._review_paper)
         self.btn_audit.setMenu(audit_menu)
         btns2.addWidget(self.btn_audit)
         self.btn_csv = QPushButton("导出原始作答 CSV")
@@ -570,6 +571,53 @@ class AnswersTab(QWidget):
             f"签名密钥指纹：{fingerprint(key)}\n"
             "请同时备份私钥（appdata 下 receipt-key.pem）。",
         )
+
+    def _review_paper(self) -> None:
+        """教师电脑上查看某学生原卷；不经过学生端时间门禁。"""
+        pkg_text = self.pkg.text().strip()
+        master = self.master.text().strip()
+        if not pkg_text or not Path(pkg_text).is_file():
+            QMessageBox.warning(self, "缺少学生端包", "请先选择学生端 exe。")
+            return
+        if len(master) != 64:
+            QMessageBox.warning(self, "缺少主密钥", "请先输入教师主密钥。")
+            return
+        student, ok = QInputDialog.getText(self, "考后查看原卷", "学号：")
+        if not ok or not student.strip().isdigit():
+            return
+        session, ok = QInputDialog.getText(self, "考后查看原卷", "场次编号：")
+        if not ok or not session.strip().isdigit():
+            return
+        out, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存原卷 JSON",
+            f"原卷-学号{student.strip()}-场次{session.strip()}.json",
+            "JSON (*.json)",
+        )
+        if not out:
+            return
+        cmd = [
+            str(builder_exe()),
+            "review-paper",
+            "--package",
+            pkg_text,
+            "--student",
+            student.strip(),
+            "--session",
+            session.strip(),
+        ]
+        env = dict(os.environ)
+        env["EXAM_MASTER"] = master
+        try:
+            stdout, stderr, code = run_tool(cmd, env)
+            if code != 0:
+                QMessageBox.critical(self, "查看原卷失败", (stderr or stdout).strip()[:1000])
+                return
+            Path(out).write_text(stdout, encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "查看原卷失败", str(e))
+            return
+        QMessageBox.information(self, "原卷已导出", f"已保存：\n{out}")
 
     def _backup_receipt_key(self) -> None:
         from app.core.receipt import export_key, fingerprint, load_or_create_key

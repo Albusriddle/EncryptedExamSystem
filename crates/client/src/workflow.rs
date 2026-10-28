@@ -71,6 +71,8 @@ pub struct Unlocked {
     pub key_source: KeySource,
     /// K_manifest：答题卡加密用（它本来就嵌在包里，不构成新暴露）
     pub k_manifest: [u8; 32],
+    /// 学生交卷后是否可免授权回看（教师端始终可 review-paper）。
+    pub student_review: common::model::StudentReviewPolicy,
 }
 
 /// 完整解锁流程。
@@ -193,6 +195,7 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
         paper,
         key_source,
         k_manifest,
+        student_review: header.student_review,
     })
 }
 

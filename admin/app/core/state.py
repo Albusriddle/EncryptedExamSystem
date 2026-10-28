@@ -82,6 +82,8 @@ class ProjectState:
     time_url: str = ""
     time_pubkey: str = ""
     time_max_skew: int = 300
+    #: none/free：学生交卷后（未到结束前）是否可免授权回看。
+    student_review: str = "none"
 
     def __post_init__(self) -> None:
         if not self.salt:
@@ -252,6 +254,7 @@ class ProjectState:
                 pubkey=self.time_pubkey,
                 max_skew=self.time_max_skew,
             ),
+            student_review=self.student_review,
         )
 
     def validate(self) -> list[str]:
@@ -479,6 +482,7 @@ class ProjectState:
                 "pubkey": self.time_pubkey,
                 "max_skew": self.time_max_skew,
             },
+            "student_review": self.student_review,
             "students": self.students,
             "classes": [c.model_dump() for c in self.classes],
             "sessions": [s.model_dump() for s in self.sessions],

@@ -265,6 +265,12 @@
     },
     "time": {
       "$ref": "#/$defs/TimeConfig"
+    },
+    "student_review": {
+      "default": "none",
+      "pattern": "^(none|free)$",
+      "title": "Student Review",
+      "type": "string"
     }
   },
   "required": [

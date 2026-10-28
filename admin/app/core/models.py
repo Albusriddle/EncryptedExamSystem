@@ -384,6 +384,8 @@ class Manifest(BaseModel):
     sessions: list[Session]
     kdf: KdfParams = Field(default_factory=KdfParams)
     time: TimeConfig = Field(default_factory=TimeConfig)
+    #: none = 学生端不可回看；free = 交卷后且未到结束时间可免授权回看。
+    student_review: str = Field(default="none", pattern="^(none|free)$")
 
     @field_validator("salt")
     @classmethod

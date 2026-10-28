@@ -281,6 +281,17 @@ impl TimeConfig {
     }
 }
 
+/// 学生交卷后是否允许免授权回看（教师端 review-paper 始终可用）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StudentReviewPolicy {
+    /// 学生端不显示回看；考后由教师端用 master 查看原卷。
+    #[default]
+    None,
+    /// 已交卷且未到结束时间时，学生可免授权只读回看。
+    Free,
+}
+
 /// 顶层构建清单（管理端产出，builder 消费）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
@@ -297,6 +308,8 @@ pub struct Manifest {
     pub kdf: crate::crypto::KdfParams,
     #[serde(default)]
     pub time: TimeConfig,
+    #[serde(default)]
+    pub student_review: StudentReviewPolicy,
 }
 
 /// 模型校验错误。

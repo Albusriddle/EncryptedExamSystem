@@ -159,6 +159,8 @@ pub struct Header {
     pub salt: String,
     pub kdf: KdfParams,
     pub sessions: Vec<SessionHeader>,
+    #[serde(default)]
+    pub student_review: crate::model::StudentReviewPolicy,
     /// 每生 PIN 表（用 master 派生的密钥加密）。学生端没有 master，
     /// 因此即使提取了 K_manifest 也读不到 PIN；教师校验时用 master 解。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -255,6 +257,7 @@ pub fn build_payload_with_pins(
         embed_k_manifest,
         pins,
         None,
+        crate::model::StudentReviewPolicy::None,
     )
 }
 
@@ -269,6 +272,7 @@ pub fn build_payload_with_options(
     embed_k_manifest: bool,
     pins: Option<&PinMap>,
     time: Option<&crate::model::TimeConfig>,
+    student_review: crate::model::StudentReviewPolicy,
 ) -> Result<Vec<u8>, ContainerError> {
     // 1. 剥离答案与判分材料。
     //
@@ -526,6 +530,7 @@ pub fn build_payload_with_options(
         sessions: session_headers,
         pins_ct,
         time: time.cloned().unwrap_or_default(),
+        student_review,
     };
     let header_plain = serde_json::to_vec(&header)?;
     let header_ct = crypto::encrypt(&k_manifest, &header_plain, b"header-v3")?;
@@ -1396,6 +1401,7 @@ mod tests {
             true,
             None,
             Some(&time),
+            crate::model::StudentReviewPolicy::None,
         )
         .unwrap();
         assert_eq!(u32::from_le_bytes(payload[8..12].try_into().unwrap()), 5);

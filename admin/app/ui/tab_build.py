@@ -409,6 +409,17 @@ class BuildTab(QWidget):
         )
         form.addRow("登录方式", self.chk_pin_login)
 
+        self.chk_student_review = QCheckBox("允许学生交卷后免授权回看（仅考试结束前有效）")
+        self.chk_student_review.setToolTip(
+            "不勾选：学生端无回看入口，考后由教师用 master 查看原卷；\n"
+            "勾选：学生已交卷且未到结束时间可只读回看。"
+        )
+        self.chk_student_review.setChecked(self.state.student_review == "free")
+        self.chk_student_review.toggled.connect(
+            lambda on: setattr(self.state, "student_review", "free" if on else "none")
+        )
+        form.addRow("学生回看", self.chk_student_review)
+
         from app.ui.app_settings import PROJECT_ENCRYPT, settings
 
         self.chk_encrypt = QCheckBox("加密保存工程（含标准答案，建议开启）")
@@ -742,6 +753,7 @@ class BuildTab(QWidget):
     # ---------------------------------------------------------------- 打包
 
     def _sync_time_config(self) -> None:
+        self.state.student_review = "free" if self.chk_student_review.isChecked() else "none"
         self.state.time_mode = str(self.cb_time_mode.currentData() or "off")
         self.state.time_url = self.edit_time_url.text().strip()
         self.state.time_pubkey = self.edit_time_pubkey.text().strip()
@@ -751,6 +763,7 @@ class BuildTab(QWidget):
         if self.worker is not None and self.worker.isRunning():
             return
 
+        self._sync_time_config()
         problems = self.state.validate()
         if problems:
             QMessageBox.critical(self, "配置有问题", "\n".join(f"· {p}" for p in problems))

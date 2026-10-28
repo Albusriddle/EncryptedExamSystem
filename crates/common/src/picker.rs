@@ -95,7 +95,7 @@ impl PaperSection {
 }
 
 /// 抽题结果：每门考试选中的题目（含题干）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Paper {
     pub student_id: u64,
     pub session_id: u32,

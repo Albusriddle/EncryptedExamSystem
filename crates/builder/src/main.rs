@@ -92,6 +92,22 @@ enum Cmd {
         #[arg(long)]
         master_file: Option<PathBuf>,
     },
+    /// 考后查看学生原卷（教师用，不过时间门禁）
+    ReviewPaper {
+        #[arg(long)]
+        package: PathBuf,
+        #[arg(long)]
+        student: u64,
+        #[arg(long)]
+        session: u32,
+        /// 可选：对应答题卡，用于核对题目/显示作答
+        #[arg(long)]
+        sheet: Option<PathBuf>,
+        #[arg(long, conflicts_with = "master_file")]
+        master: Option<String>,
+        #[arg(long)]
+        master_file: Option<PathBuf>,
+    },
     /// 从包里导出 PIN 表（需要 master）
     ExportPins {
         #[arg(long)]
@@ -252,6 +268,93 @@ fn verify_answer_sheet(
     Ok(0)
 }
 
+/// 考后查看原卷：教师工具，明确绕过时间门禁，但必须提供 master。
+fn review_paper(
+    package: &std::path::Path,
+    student_id: u64,
+    session_id: u32,
+    sheet_path: Option<&std::path::Path>,
+    master: Option<String>,
+    master_file: Option<PathBuf>,
+) -> Result<()> {
+    use common::picker;
+
+    let master_hex = resolve_master(master, master_file)?;
+    let master = crypto::master_from_hex(&master_hex).context("解析主密钥")?;
+    let k_manifest = container::manifest_key(&master);
+    let bytes =
+        std::fs::read(package).with_context(|| format!("读取包 {} 失败", package.display()))?;
+    let payload = container::extract_payload(&bytes).context("包里没有 payload")?;
+    let (header, blob) = container::parse_header(payload, &k_manifest)
+        .context("解析 header 失败（包与主密钥不匹配？）")?;
+    let salt = hex::decode(&header.salt).context("header.salt 不是 hex")?;
+    let session = header
+        .sessions
+        .iter()
+        .find(|s| s.session_id == session_id)
+        .with_context(|| format!("包内没有场次 {session_id}"))?;
+    let pins = container::decrypt_pins(&master, &header).context("解密 PIN 表")?;
+    let pin = pins
+        .as_ref()
+        .and_then(|m| m.get(&(session_id, student_id)))
+        .map(String::as_str);
+    let unlocked =
+        container::try_unlock_session_with_pin(session, &header, blob, student_id, &salt, pin)
+            .context("解锁信封失败")?
+            .with_context(|| format!("学号 {student_id} 不在场次 {session_id} 的名单中"))?;
+    let data = container::decrypt_data(&unlocked.session_secret, &salt, &unlocked.data_ct)
+        .context("解密题库失败")?;
+    let paper = if unlocked.sections.is_empty() {
+        picker::generate_paper_ranged(
+            student_id,
+            session_id,
+            &salt,
+            &data.banks,
+            |exam_id, fallback| (data.pick_for(exam_id, fallback), data.range_for(exam_id)),
+        )
+        .context("生成原卷失败")?
+    } else if unlocked.sections.iter().any(|s| !s.parts.is_empty()) {
+        picker::generate_paper_parts(
+            student_id,
+            session_id,
+            &salt,
+            &data.banks,
+            &unlocked.sections,
+        )
+        .context("生成原卷（大题部分）失败")?
+    } else {
+        picker::generate_paper_sections(
+            student_id,
+            session_id,
+            &salt,
+            &data.banks,
+            &unlocked.sections,
+        )
+        .context("生成原卷（大题）失败")?
+    };
+    if let Some(sheet_path) = sheet_path {
+        let sheet_bytes = std::fs::read(sheet_path)
+            .with_context(|| format!("读取答题卡 {}", sheet_path.display()))?;
+        let sheet = common::answer_sheet::open(&k_manifest, &sheet_bytes)
+            .context("解密答题卡失败（master 与答题卡不匹配？）")?;
+        anyhow::ensure!(
+            sheet.student_id == student_id
+                && sheet.session_id == session_id
+                && sheet.paper_fingerprint == paper.fingerprint(),
+            "答题卡与包内原卷不一致"
+        );
+        eprintln!(
+            "答题卡：学号 {} 场次 {} 已答 {}/{}",
+            sheet.student_id,
+            sheet.session_id,
+            sheet.answered(),
+            sheet.qids.len()
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&paper)?);
+    Ok(())
+}
+
 /// 用包内数据重算这名学生的试卷，核对指纹与题目列表。
 ///
 /// **不经过时间门禁**：教师校验发生在考试结束之后，门禁必然已经关闭。
@@ -407,6 +510,23 @@ fn main() -> Result<()> {
         } => {
             let code = verify_answer_sheet(&file, json, package.as_deref(), master, master_file)?;
             std::process::exit(code);
+        }
+        Cmd::ReviewPaper {
+            package,
+            student,
+            session,
+            sheet,
+            master,
+            master_file,
+        } => {
+            review_paper(
+                &package,
+                student,
+                session,
+                sheet.as_deref(),
+                master,
+                master_file,
+            )?;
         }
         Cmd::Build {
             manifest,
@@ -693,6 +813,7 @@ fn build(req: BuildRequest) -> Result<()> {
         embed_key,
         pins.as_ref(),
         Some(&manifest.time),
+        manifest.student_review,
     )
     .context("构建 payload")?;
     let stub =
