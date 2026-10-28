@@ -128,14 +128,16 @@ jobs:
           name: exam-tools-windows
           path: release/
 
-      - name: 生成发布说明（附带本版变更）
+      - name: 生成发布说明（仅当前版本）
         shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           set -euo pipefail
           # 上一个 tag（不含当前 tag），拿不到就当作首个版本
           PREV=$(git describe --tags --abbrev=0 --match 'v*' "${GITHUB_REF}^" 2>/dev/null || true)
           {
-            cat docs/release-notes.md
+            python scripts/release_body.py
             echo ""
             echo "---"
             echo ""

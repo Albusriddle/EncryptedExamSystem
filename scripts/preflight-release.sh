@@ -165,6 +165,25 @@ else
   echo "  （跳过：加 --full 启用，需要 PySide6）"
 fi
 
+# ---------------------------------------------------------------- 6. Release 说明
+
+head_ "6. Release 说明只包含当前版本"
+if [ -f "$ROOT/VERSION" ] && [ -f "$ROOT/docs/release-notes.md" ]; then
+  BODY="$(PYTHONIOENCODING=utf-8 python "$ROOT/scripts/release_body.py" 2>/dev/null || true)"
+  VER="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+  if [ -z "$BODY" ]; then
+    bad "无法提取当前版本 Release 说明"
+  elif printf '%s
+' "$BODY" | grep -q "## 更新摘要（v${VER}）"        && [ "$(printf '%s
+' "$BODY" | grep -c '^## 更新摘要（v')" = "1" ]; then
+    ok "Release 说明仅包含 v${VER}"
+  else
+    bad "Release 说明包含历史版本或缺少当前版本"
+  fi
+else
+  bad "缺少 VERSION 或 release-notes.md"
+fi
+
 # ---------------------------------------------------------------- 7. 许可证合规
 
 head_ "5. 许可证合规（Apache-2.0 分发 + PySide6 LGPL-3.0）"

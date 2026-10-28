@@ -47,6 +47,7 @@ from app.core.banks_io import write_temp_banks
 from app.core.buildcmd import build_command, build_env, safe_pin_dir
 from app.core.state import ProjectState
 from app.core.subproc import no_window_kwargs
+from app.ui.widgets import fit_button_text
 
 
 def is_frozen() -> bool:
@@ -339,11 +340,11 @@ class BuildTab(QWidget):
         btn_copy.setToolTip("把主密钥复制到剪贴板，粘贴到密码管理器里保存")
         btn_copy.clicked.connect(self.copy_master)
         row.addWidget(btn_copy)
-        btn_backup = QPushButton("备份…")
+        btn_backup = QPushButton("备份")
         btn_backup.setToolTip("把主密钥加密备份成 .eekey 文件（建议存到密码管理器/U 盘）")
         btn_backup.clicked.connect(self.backup_master)
         row.addWidget(btn_backup)
-        btn_restore = QPushButton("恢复…")
+        btn_restore = QPushButton("恢复")
         btn_restore.setToolTip("从 .eekey 备份恢复主密钥")
         btn_restore.clicked.connect(self.restore_master)
         row.addWidget(btn_restore)
@@ -365,7 +366,7 @@ class BuildTab(QWidget):
         self.edit_stub = QLineEdit(self._default_stub())
         row2 = QHBoxLayout()
         row2.addWidget(self.edit_stub, 1)
-        btn_stub = QPushButton("选择…")
+        btn_stub = QPushButton("选择")
         btn_stub.clicked.connect(lambda: self._pick_file(self.edit_stub, "选择学生端 stub"))
         row2.addWidget(btn_stub)
         form.addRow("学生端 stub", row2)
@@ -373,7 +374,7 @@ class BuildTab(QWidget):
         self.edit_out = QLineEdit(str(self._default_out()))
         row3 = QHBoxLayout()
         row3.addWidget(self.edit_out, 1)
-        btn_out = QPushButton("另存为…")
+        btn_out = QPushButton("另存为")
         btn_out.clicked.connect(self._pick_save)
         row3.addWidget(btn_out)
         form.addRow("输出包", row3)
@@ -388,7 +389,7 @@ class BuildTab(QWidget):
         self.edit_projdir.editingFinished.connect(self._apply_project_dir)
         row_pd = QHBoxLayout()
         row_pd.addWidget(self.edit_projdir, 1)
-        btn_pd = QPushButton("浏览…")
+        btn_pd = QPushButton("浏览")
         btn_pd.clicked.connect(self._browse_project_dir)
         row_pd.addWidget(btn_pd)
         btn_pd_reset = QPushButton("默认")
@@ -448,12 +449,22 @@ class BuildTab(QWidget):
         self.edit_keyfile.setPlaceholderText("留空则不导出 K_manifest")
         row4 = QHBoxLayout()
         row4.addWidget(self.edit_keyfile, 1)
-        btn_kf = QPushButton("选择…")
+        btn_kf = QPushButton("选择")
         btn_kf.clicked.connect(
             lambda: self._pick_file(self.edit_keyfile, "K_manifest 保存位置", save=True)
         )
         row4.addWidget(btn_kf)
         form.addRow("导出 K_manifest", row4)
+        for btn in (
+            btn_copy,
+            btn_backup,
+            btn_restore,
+            btn_stub,
+            btn_out,
+            btn_pd,
+            btn_kf,
+        ):
+            fit_button_text(btn)
 
         lay.addWidget(box)
 

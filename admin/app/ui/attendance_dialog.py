@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from app.core.attendance import STATUS_LABELS, AttendanceResult, build_attendance, csv_rows
 from app.core.models import Session, StudentClass
+from app.ui.widgets import fit_button_text
 
 
 class AttendanceDialog(QDialog):
@@ -61,8 +62,9 @@ class AttendanceDialog(QDialog):
         self.btn_copy = QPushButton("复制本场缺考学号")
         self.btn_copy.clicked.connect(self._copy_missing)
         row.addWidget(self.btn_copy)
-        self.btn_export = QPushButton("导出缺考名单…")
+        self.btn_export = QPushButton("导出缺考名单")
         self.btn_export.clicked.connect(self._export)
+        fit_button_text(self.btn_export)
         row.addWidget(self.btn_export)
         row.addStretch(1)
         btn_close = QPushButton("关闭")

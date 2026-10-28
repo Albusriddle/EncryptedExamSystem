@@ -105,6 +105,22 @@ impl SyncedClock {
     }
 }
 
+/// 当前学生端包的指纹前 8 位；读不到时返回 unknown。
+fn package_fingerprint(opts: &UnlockOpts) -> String {
+    let path = opts
+        .package
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_exe().ok());
+    let Some(path) = path else {
+        return "unknown".into();
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => blake3::hash(&bytes).to_hex()[..8].to_string(),
+        Err(_) => "unknown".into(),
+    }
+}
+
 pub struct ExamApp {
     stage: Stage,
     opts: UnlockOpts,
@@ -114,6 +130,8 @@ pub struct ExamApp {
     watermark: String,
     /// 启动欢迎弹窗（含"不再提示"）
     welcome: Welcome,
+    /// 当前学生端包指纹前 8 位，登录页显示，便于核对 PIN 表/exe 是否同次打包。
+    package_id: String,
     /// 右侧题号导航卡
     nav: NavState,
     /// 诊断用：启动即自动解锁指定学号（`EES_AUTOLOGIN=<学号>`）。
@@ -161,6 +179,7 @@ impl ExamApp {
         // 否则界面上所有中文都是"□"。
         let cjk_ok = install_cjk_font(&cc.egui_ctx);
         let key_hint = workflow::peek_key_source(&opts);
+        let package_id = package_fingerprint(&opts);
         Self {
             stage: Stage::Idle {
                 input: String::new(),
@@ -171,6 +190,7 @@ impl ExamApp {
             key_hint,
             watermark: common::watermark(),
             welcome: Welcome::new(),
+            package_id,
             nav: NavState::default(),
             jump_once: diag_env::<usize>("EES_NAV_JUMP").filter(|v| *v > 0),
             autologin: diag_env::<u64>("EES_AUTOLOGIN").filter(|v| *v > 0),
@@ -396,6 +416,11 @@ impl eframe::App for ExamApp {
                         ui.add_space(10.0);
                     }
                     ui.label(egui::RichText::new("请输入学号").size(18.0));
+                    ui.label(
+                        egui::RichText::new(format!("考试包 {}", self.package_id))
+                            .size(10.0)
+                            .color(egui::Color32::GRAY),
+                    );
                     ui.add_space(12.0);
 
                     let resp = ui.add(

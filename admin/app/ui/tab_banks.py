@@ -23,6 +23,7 @@ from app.core.bank_import import load_paths
 from app.core.images import image_size, sanitize_alt, to_data_uri
 from app.core.state import ProjectState
 from app.ui.import_dialog import ImportConfirmDialog
+from app.ui.widgets import fit_button_text
 
 
 class BanksTab(QWidget):
@@ -38,16 +39,18 @@ class BanksTab(QWidget):
         lay = QVBoxLayout(self)
 
         bar = QHBoxLayout()
-        self.btn_add = QPushButton("导入题库…")
+        self.btn_add = QPushButton("导入题库")
         self.btn_add.clicked.connect(self.import_banks)
         self.btn_remove = QPushButton("移除选中")
         self.btn_remove.clicked.connect(self.remove_selected)
-        self.btn_image = QPushButton("插入图片…")
+        self.btn_image = QPushButton("插入图片")
         self.btn_image.setToolTip("选一张 PNG/JPEG，自动转成可粘进题干的 ![…](data:image/…) 片段")
         self.btn_image.clicked.connect(self.insert_image)
         bar.addWidget(self.btn_add)
         bar.addWidget(self.btn_remove)
         bar.addWidget(self.btn_image)
+        for btn in (self.btn_add, self.btn_remove, self.btn_image):
+            fit_button_text(btn)
         bar.addStretch(1)
         lay.addLayout(bar)
 

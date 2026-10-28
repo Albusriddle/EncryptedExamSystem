@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.state import ProjectState
+from app.ui.widgets import fit_button_text
 
 # 「未分班」在列表里的标识；None 表示「全部学生」
 UNASSIGNED = "\x00unassigned"
@@ -74,7 +75,7 @@ class StudentsTab(QWidget):
         self.list = QListWidget()
         self.list.currentItemChanged.connect(self._on_select)
         ll.addWidget(self.list, 1)
-        self.btn_new = QPushButton("新建班级…")
+        self.btn_new = QPushButton("新建班级")
         self.btn_new.clicked.connect(self.new_class)
         ll.addWidget(self.btn_new)
         split.addWidget(left)
@@ -99,11 +100,13 @@ class StudentsTab(QWidget):
         rl.addWidget(self.edit, 1)
 
         bar = QHBoxLayout()
-        self.btn_import = QPushButton("从 CSV 导入…")
+        self.btn_import = QPushButton("从 CSV 导入")
         self.btn_import.clicked.connect(self.import_csv)
         self.btn_apply = QPushButton("应用到名单")
         self.btn_apply.clicked.connect(self.apply_to_state)
         self.btn_delete = QPushButton("删除班级")
+        for btn in (self.btn_new, self.btn_import, self.btn_apply, self.btn_delete):
+            fit_button_text(btn)
         self.btn_delete.clicked.connect(self.delete_class)
         bar.addWidget(self.btn_import)
         bar.addWidget(self.btn_apply)
