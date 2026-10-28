@@ -47,6 +47,7 @@ from app.core.grading import (
 from app.core.state import ProjectState
 from app.core.subproc import no_window_kwargs
 from app.ui.tab_build import builder_exe
+from app.ui.widgets import fit_button_text
 
 COLUMNS = ["文件", "学号", "场次", "题数", "已答", "未答", "交卷时间", "状态", "说明"]
 
@@ -185,16 +186,16 @@ class AnswersTab(QWidget):
         self.pkg = QLineEdit()
         self.pkg.setPlaceholderText("用于绑定校验")
         row.addWidget(self.pkg, 1)
-        btn_pkg = QPushButton("选择…")
+        btn_pkg = QPushButton("选择")
         btn_pkg.clicked.connect(self._pick_package)
         row.addWidget(btn_pkg)
         lay.addLayout(row)
 
         btns = QHBoxLayout()
-        self.btn_add = QPushButton("添加文件…")
+        self.btn_add = QPushButton("添加文件")
         self.btn_add.clicked.connect(self._add_files)
         btns.addWidget(self.btn_add)
-        self.btn_dir = QPushButton("添加文件夹…")
+        self.btn_dir = QPushButton("添加文件夹")
         self.btn_dir.clicked.connect(self._add_dir)
         btns.addWidget(self.btn_dir)
         self.btn_clear = QPushButton("清空列表")
@@ -204,7 +205,7 @@ class AnswersTab(QWidget):
         self.btn_verify = QPushButton("开始校验")
         self.btn_verify.clicked.connect(self._start)
         btns.addWidget(self.btn_verify)
-        self.btn_absent = QPushButton("缺考名单…")
+        self.btn_absent = QPushButton("缺考名单")
         self.btn_absent.setEnabled(False)
         self.btn_absent.clicked.connect(self._show_attendance)
         btns.addWidget(self.btn_absent)
@@ -213,15 +214,15 @@ class AnswersTab(QWidget):
 
         # 第二行放“收据/导出”类长按钮，避免被压缩成“签发答题卡收据...”
         btns2 = QHBoxLayout()
-        self.btn_receipt = QPushButton("签发答题卡收据…")
+        self.btn_receipt = QPushButton("签发答题卡收据")
         self.btn_receipt.setToolTip("用教师私钥对当前答题卡文件哈希签名，防止收卷后被改")
         self.btn_receipt.setEnabled(False)
         self.btn_receipt.clicked.connect(self._issue_receipt)
         btns2.addWidget(self.btn_receipt)
-        self.btn_verify_receipt = QPushButton("验证收据…")
+        self.btn_verify_receipt = QPushButton("验证收据")
         self.btn_verify_receipt.clicked.connect(self._verify_receipt)
         btns2.addWidget(self.btn_verify_receipt)
-        self.btn_receipt_key = QPushButton("备份收据私钥…")
+        self.btn_receipt_key = QPushButton("备份收据私钥")
         self.btn_receipt_key.setToolTip(
             "把 receipt-key.pem 导出到安全位置（换机/重装后验证旧收据用）"
         )
@@ -234,12 +235,18 @@ class AnswersTab(QWidget):
         btns2.addWidget(self.btn_csv)
         btns2.addStretch(1)
         for btn in (
+            self.btn_add,
+            self.btn_dir,
+            self.btn_clear,
+            self.btn_verify,
+            self.btn_absent,
             self.btn_receipt,
             self.btn_verify_receipt,
             self.btn_receipt_key,
             self.btn_csv,
+            btn_pkg,
         ):
-            btn.setMinimumWidth(btn.sizeHint().width())
+            fit_button_text(btn)
         lay.addLayout(btns2)
 
         self.table = QTableWidget(0, len(COLUMNS))
@@ -294,13 +301,15 @@ class AnswersTab(QWidget):
         self.btn_precheck.clicked.connect(self._precheck)
         self.btn_grade = QPushButton("生成成绩")
         self.btn_grade.clicked.connect(self._grade)
-        self.btn_grade_csv = QPushButton("导出判分结果…")
+        self.btn_grade_csv = QPushButton("导出判分结果")
         self.btn_grade_csv.clicked.connect(self._export_grading)
         self.btn_grade_csv.setEnabled(False)
         gbtn.addWidget(self.btn_precheck)
         gbtn.addWidget(self.btn_grade)
         gbtn.addWidget(self.btn_grade_csv)
         gbtn.addStretch(1)
+        for btn in (self.btn_precheck, self.btn_grade, self.btn_grade_csv):
+            fit_button_text(btn)
         bl.addLayout(gbtn)
 
         self.grade_table = QTableWidget(0, len(GRADE_COLUMNS))
