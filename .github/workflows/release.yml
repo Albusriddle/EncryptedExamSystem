@@ -46,6 +46,16 @@ jobs:
           fi
           echo "✓ 版本号 $FILE_V 与 tag 一致"
 
+      - name: 校验三处版本一致
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(tr -d '[:space:]' < VERSION)
+          CV=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          PV=$(grep -m1 '^version = ' admin/pyproject.toml | cut -d'"' -f2)
+          test "$V" = "$CV" && test "$V" = "$PV"
+          echo "✓ VERSION/Cargo.toml/pyproject.toml 均为 $V"
+
       - name: 全量测试（发布前必须全绿）
         shell: bash
         # ci.yml 只监听 push(main) 与 PR，**不监听 tag**；

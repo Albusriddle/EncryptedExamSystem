@@ -110,13 +110,23 @@ class VerifyWorker(QThread):
         self.files = files
         self.master = master
         self.package = package
+        self._stop = False
+
+    def cancel(self) -> None:
+        self._stop = True
 
     def run(self) -> None:  # noqa: D102 - QThread 约定
-        for f in self.files:
-            # 用完整路径而不是文件名：不同机器会产出同名文件
-            # （同一学号同一场次），按名字索引会互相覆盖。
-            self.one_done.emit(str(f), self._verify_one(f))
-        self.all_done.emit()
+        try:
+            for f in self.files:
+                if self._stop:
+                    break
+                # 用完整路径而不是文件名：不同机器会产出同名文件
+                # （同一学号同一场次），按名字索引会互相覆盖。
+                self.one_done.emit(str(f), self._verify_one(f))
+            self.all_done.emit()
+        finally:
+            # master 不长期留在 worker 内
+            self.master = ""
 
     def _verify_one(self, path: Path) -> dict:
         cmd = [str(builder_exe()), "verify-answer-sheet", str(path), "--json"]
@@ -521,6 +531,11 @@ class AnswersTab(QWidget):
             self.btn_eye,
         ):
             w.setEnabled(on)
+
+    def shutdown(self) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(5000)
 
     def _on_all(self) -> None:
         self._set_editing_enabled(True)

@@ -27,6 +27,10 @@ HEADER_LEN = 1 + 2 + 4 + 1  # version + time + memory + parallel
 ARGON2_TIME = 3
 ARGON2_MEMORY = 65536
 ARGON2_PARALLEL = 1
+# 加密文件头来自外部输入，必须在调用 Argon2 前限幅，避免恶意工程/备份造成 OOM。
+MAX_KDF_TIME = 16
+MAX_KDF_MEMORY = 1_048_576  # KiB = 1 GiB
+MAX_KDF_PARALLEL = 8
 
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 
@@ -48,6 +52,12 @@ def _derive(passphrase: str, salt: bytes) -> bytes:
 def _derive_with(passphrase: str, salt: bytes, time_cost: int, memory: int, parallel: int) -> bytes:
     if not passphrase:
         raise ValueError("口令不能为空")
+    if not (1 <= time_cost <= MAX_KDF_TIME):
+        raise ValueError("加密文件头 KDF 时间参数异常")
+    if not (8 * 1024 <= memory <= MAX_KDF_MEMORY):
+        raise ValueError("加密文件头 KDF 内存参数异常")
+    if not (1 <= parallel <= MAX_KDF_PARALLEL):
+        raise ValueError("加密文件头 KDF 并行参数异常")
     return hash_secret_raw(
         secret=passphrase.encode("utf-8"),
         salt=salt,

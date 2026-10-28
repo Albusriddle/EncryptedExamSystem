@@ -1156,7 +1156,8 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
         return None;
     }
     let (y, mo, da): (i64, i64, i64) = (d[0].parse().ok()?, d[1].parse().ok()?, d[2].parse().ok()?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&da) {
+    // 与 Python datetime 对齐，避免 days_from_civil 的 i64 乘法溢出。
+    if !(1..=9999).contains(&y) || !(1..=12).contains(&mo) || !(1..=31).contains(&da) {
         return None;
     }
     // 日历合法性：只查 1..=31 会把 2026-02-31 静默算成 3 月 3 日。
@@ -1165,22 +1166,26 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
         return None;
     }
 
-    let (time_part, offset_secs) = if let Some(t) = rest.strip_suffix('Z') {
+    let (time_part, offset_secs) = if let Some(t) = rest.strip_suffix(['Z', 'z']) {
         (t, 0i64)
     } else if let Some(idx) = rest.rfind(['+', '-']) {
         let (t, off) = rest.split_at(idx);
         let sign = if off.starts_with('-') { -1 } else { 1 };
         let o = &off[1..];
-        // 同时接受 +08:00 与 +0800；后者不能把 "0800" 当成 800 小时。
+        // 同时接受 +08:00 与 +0800；先做 ASCII 检查，避免全角字符切片 panic。
         let (oh, om) = if let Some((h, m)) = o.split_once(':') {
             (h, m)
-        } else if o.len() == 4 {
+        } else if o.len() == 4 && o.is_ascii() {
             (&o[..2], &o[2..])
         } else {
             return None;
         };
+        if oh.len() != 2 || om.len() != 2 || !oh.is_ascii() || !om.is_ascii() {
+            return None;
+        }
         let (oh, om): (i64, i64) = (oh.parse().ok()?, om.parse().ok()?);
-        if !(0..=14).contains(&oh) || !(0..=59).contains(&om) {
+        // RFC3339 最大合法偏移是 +14:00。
+        if !(0..=14).contains(&oh) || !(0..=59).contains(&om) || (oh == 14 && om != 0) {
             return None;
         }
         let secs = sign * (oh * 3600 + om * 60);
@@ -1199,13 +1204,17 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
         Some(x) => x.split('.').next().unwrap_or("0").parse().ok()?,
         None => 0,
     };
-    if h > 23 || mi > 59 || se > 60 {
+    if !(0..=23).contains(&h) || !(0..=59).contains(&mi) || !(0..=60).contains(&se) {
         return None;
     }
 
     let days = days_from_civil(y, mo, da) as i64;
-    let local = days * 86400 + h * 3600 + mi * 60 + se;
-    let utc = local - offset_secs;
+    let local = days
+        .checked_mul(86400)?
+        .checked_add(h.checked_mul(3600)?)?
+        .checked_add(mi.checked_mul(60)?)?
+        .checked_add(se)?;
+    let utc = local.checked_sub(offset_secs)?;
     if utc < 0 { None } else { Some(utc as u64) }
 }
 
@@ -1343,6 +1352,11 @@ mod gate_tests {
         assert_eq!(parse_rfc3339("1994-11-06T08:49:37Z"), Some(784111777));
         assert!(parse_rfc3339("not-a-date").is_none());
         assert!(parse_rfc3339("2026-13-01T00:00:00Z").is_none());
+        assert_eq!(parse_rfc3339("2026-12-20T09:00:00+0800"), Some(T0900));
+        assert!(parse_rfc3339("2026-12-20T09:00:00+８0").is_none());
+        assert!(parse_rfc3339("2026-12-20T09:00:00+14:59").is_none());
+        assert!(parse_rfc3339("2026-12-20T09:00:00-1:00").is_none());
+        assert!(parse_rfc3339("99999-01-01T00:00:00Z").is_none());
     }
 }
 

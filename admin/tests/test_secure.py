@@ -41,3 +41,18 @@ def test_plain_project_still_loads(tmp_path: Path) -> None:
     st = ProjectState(students=[3])
     st.save(p)
     assert ProjectState.load(p).students == [3]
+
+
+def test_rejects_absurd_kdf_header_before_argon2() -> None:
+    blob = (
+        secure.MAGIC_PROJECT
+        + b"\x01"
+        + (65535).to_bytes(2, "big")
+        + (4_000_000).to_bytes(4, "big")
+        + b"\x08"
+        + b"0" * secure.SALT_LEN
+        + b"1" * secure.NONCE_LEN
+        + b"x" * 16
+    )
+    with pytest.raises(ValueError, match="KDF"):
+        secure.decrypt_project(blob, "pw")

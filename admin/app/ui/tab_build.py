@@ -927,6 +927,13 @@ class BuildTab(QWidget):
             self.worker.cancel()
             self._append("… 已请求取消")
 
+    def shutdown(self) -> None:
+        """Tab 销毁/窗口关闭前停止子进程，避免 QThread 析构崩溃。"""
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(5000)
+        self._cleanup_tmp()
+
     def log_line(self, line: str) -> None:
         """供主窗口写入打包日志（如"工程已保存"）。"""
         self._append(line)

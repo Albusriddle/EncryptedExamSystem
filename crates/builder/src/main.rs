@@ -337,10 +337,16 @@ fn review_paper(
             .with_context(|| format!("读取答题卡 {}", sheet_path.display()))?;
         let sheet = common::answer_sheet::open(&k_manifest, &sheet_bytes)
             .context("解密答题卡失败（master 与答题卡不匹配？）")?;
+        let paper_qids: Vec<String> = paper
+            .sections
+            .iter()
+            .flat_map(|sec| sec.items.iter().map(|it| it.id.clone()))
+            .collect();
         anyhow::ensure!(
             sheet.student_id == student_id
                 && sheet.session_id == session_id
-                && sheet.paper_fingerprint == paper.fingerprint(),
+                && sheet.paper_fingerprint == paper.fingerprint()
+                && sheet.qids == paper_qids,
             "答题卡与包内原卷不一致"
         );
         eprintln!(

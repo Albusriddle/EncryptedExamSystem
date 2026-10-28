@@ -600,6 +600,19 @@ class MainWindow(QMainWindow):
         )
         return ret == QMessageBox.StandardButton.Yes
 
+    def _shutdown_tabs(self) -> None:
+        for name in ("build_tab", "answers_tab"):
+            tab = getattr(self, name, None)
+            if tab is not None:
+                tab.shutdown()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt 约定
+        if not self._confirm_discard():
+            event.ignore()
+            return
+        self._shutdown_tabs()
+        event.accept()
+
     def _reload_tabs(self) -> None:
         """工程切换后重建全部 Tab。
 
@@ -607,6 +620,7 @@ class MainWindow(QMainWindow):
         旧实现连写四次 `removeTab(0)`，隐含依赖"当前共 5 个 Tab"，
         以后加一个 Tab 就会错位，而且占位页会被漏掉。
         """
+        self._shutdown_tabs()
         self._build_tabs()
         self._refresh_status()
 

@@ -135,6 +135,9 @@ class ProjectState:
         # 解析成 None，反而认不出哪些引用指向被删的题库。
         for s in self.sessions:
             s.exams = [e for e in s.exams if match_bank_exam_id(e.file, self.banks) != exam_id]
+            s.sections = [
+                sec for sec in s.sections if match_bank_exam_id(sec.file, self.banks) != exam_id
+            ]
         self.banks.pop(exam_id, None)
         self.bank_paths.pop(exam_id, None)
 
@@ -539,7 +542,10 @@ class ProjectState:
         st.time_url = str(t.get("url") or "")
         st.time_pubkey = str(t.get("pubkey") or "")
         st.time_max_skew = int(t.get("max_skew") or 300)
-        st.student_review = str(data.get("student_review") or "none")
+        review = str(data.get("student_review") or "none")
+        if review not in ("none", "free"):
+            raise ValueError("工程文件 student_review 非法，只能是 none 或 free")
+        st.student_review = review
 
         # 重新读取题库：源文件可能已被教师修改。
         #

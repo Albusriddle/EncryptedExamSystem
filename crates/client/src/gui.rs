@@ -262,13 +262,37 @@ impl ExamApp {
                 migrate_legacy_sheet(&path, &legacy);
 
                 // 已有答题卡且是同一份卷：恢复；否则新建
+                let expected_qids: Vec<String> = unlocked
+                    .paper
+                    .sections
+                    .iter()
+                    .flat_map(|sec| sec.items.iter().map(|it| it.id.clone()))
+                    .collect();
                 let restored = std::fs::read(&path)
                     .ok()
                     .and_then(|b| common::answer_sheet::open(&unlocked.k_manifest, &b).ok())
-                    .filter(|s| s.paper_fingerprint == unlocked.paper.fingerprint());
+                    .filter(|s| {
+                        s.paper_fingerprint == unlocked.paper.fingerprint()
+                            && s.student_id == unlocked.student_id
+                            && s.session_id == unlocked.session_id
+                            && s.qids == expected_qids
+                    });
                 if restored.is_none() && path.exists() {
-                    // 换卷/换包时旧卡不能默默丢掉：留一份 .bak，学生换回原包还能恢复
-                    let _ = std::fs::rename(&path, path.with_extension("eea.bak"));
+                    // 换卷/换包/损坏时旧卡不能默默丢掉：备份名唯一，绝不覆盖已有备份。
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let bak = path.with_extension(format!("eea.bak.{stamp}"));
+                    if let Err(e) = std::fs::rename(&path, &bak) {
+                        self.save_error = Some(format!(
+                            "原有答题卡无法读取，且备份失败：{e}\n原文件：{}",
+                            path.display()
+                        ));
+                    } else {
+                        self.save_error =
+                            Some(format!("原有答题卡无法读取，已备份到：{}", bak.display()));
+                    }
                 }
                 self.sheet = Some(match restored {
                     Some(s) => s,
@@ -784,7 +808,10 @@ fn render_locked(
         ui.vertical_centered(|ui| {
             let (title, tip) = match mode {
                 LockedMode::Expired => ("本场考试已结束", "时间到，试卷已关闭。"),
-                LockedMode::Submitted { .. } => ("已交卷", "答题卡已保存，可以离开考场。"),
+                LockedMode::Submitted { .. } => (
+                    "已交卷",
+                    "答题卡已提交；如顶部提示保存失败，请立即联系监考。",
+                ),
             };
             ui.heading(title);
             ui.add_space(6.0);
@@ -1570,7 +1597,7 @@ fn render_paper(
             );
             if sheet.submitted {
                 ui.label(
-                    egui::RichText::new("✔ 已交卷（答题卡已保存）")
+                    egui::RichText::new("✔ 已交卷")
                         .size(13.0)
                         .color(egui::Color32::from_rgb(60, 160, 90)),
                 );
