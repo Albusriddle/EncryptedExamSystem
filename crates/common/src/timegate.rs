@@ -1096,7 +1096,7 @@ pub fn decide_session(
     // 先算时间窗内的场次——这是所有分支的共同前提。
     let in_window: Vec<&SessionWindow> = sessions
         .iter()
-        .filter(|s| now >= s.start && now <= s.end)
+        .filter(|s| now >= s.start && now < s.end)
         .collect();
 
     // 指定了场次：必须在窗口内，否则拒绝。
@@ -1105,7 +1105,7 @@ pub fn decide_session(
             .iter()
             .find(|s| s.session_id == id)
             .ok_or(GateError::UnknownSession { id })?;
-        if now < target.start || now > target.end {
+        if now < target.start || now >= target.end {
             return Err(GateError::SessionOutOfWindow {
                 id,
                 start: format_unix_local_zoned(target.start),
@@ -1171,8 +1171,19 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
         let (t, off) = rest.split_at(idx);
         let sign = if off.starts_with('-') { -1 } else { 1 };
         let o = &off[1..];
-        let (oh, om) = o.split_once(':').unwrap_or((o, "0"));
-        let secs = sign * (oh.parse::<i64>().ok()? * 3600 + om.parse::<i64>().ok()? * 60);
+        // 同时接受 +08:00 与 +0800；后者不能把 "0800" 当成 800 小时。
+        let (oh, om) = if let Some((h, m)) = o.split_once(':') {
+            (h, m)
+        } else if o.len() == 4 {
+            (&o[..2], &o[2..])
+        } else {
+            return None;
+        };
+        let (oh, om): (i64, i64) = (oh.parse().ok()?, om.parse().ok()?);
+        if !(0..=14).contains(&oh) || !(0..=59).contains(&om) {
+            return None;
+        }
+        let secs = sign * (oh * 3600 + om * 60);
         (t, secs)
     } else {
         (rest, 0)
@@ -1309,10 +1320,10 @@ mod gate_tests {
     }
 
     #[test]
-    fn boundary_is_inclusive() {
+    fn boundary_start_inclusive_end_exclusive() {
         let s = [win(1, T0900, T1100)];
         assert!(decide_session(&s, None, T0900).is_ok(), "开始瞬间应放行");
-        assert!(decide_session(&s, None, T1100).is_ok(), "结束瞬间应放行");
+        assert!(decide_session(&s, None, T1100).is_err(), "结束瞬间应拒绝");
         assert!(
             decide_session(&s, None, T0900 - 1).is_err(),
             "开始前 1 秒应拒绝"
@@ -1326,6 +1337,7 @@ mod gate_tests {
     #[test]
     fn parse_rfc3339_offsets() {
         assert_eq!(parse_rfc3339("2026-12-20T09:00:00+08:00"), Some(T0900));
+        assert_eq!(parse_rfc3339("2026-12-20T09:00:00+0800"), Some(T0900));
         assert_eq!(parse_rfc3339("2026-12-20T01:00:00Z"), Some(T0900));
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("1994-11-06T08:49:37Z"), Some(784111777));

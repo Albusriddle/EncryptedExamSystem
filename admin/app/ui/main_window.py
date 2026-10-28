@@ -141,7 +141,12 @@ class MainWindow(QMainWindow):
         self.answers_tab = AnswersTab(self.state)
 
         # 任何 Tab 改了数据都刷新状态栏与其他 Tab 的联动视图
-        for tab in (self.banks_tab, self.students_tab, self.sessions_tab):
+        for tab in (
+            self.banks_tab,
+            self.students_tab,
+            self.sessions_tab,
+            self.build_tab,
+        ):
             tab.changed.connect(self._on_changed)
 
         self.tabs.addTab(self.banks_tab, "题库")

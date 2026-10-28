@@ -266,6 +266,7 @@ class BuildWorker(QThread):
                 **no_window_kwargs(),
             )
         except OSError as e:
+            self.master_hex = ""
             self.done.emit(False, f"无法启动打包程序：{e}")
             return
 
@@ -296,6 +297,8 @@ def _redact(text: str, secret: str) -> str:
 
 
 class BuildTab(QWidget):
+    #: 回看策略/配置变化，通知主窗口标记工程未保存
+    changed = Signal()
     #: 打包成功（参数为输出文件路径）——主窗口据此自动保存工程
     built = Signal(str)
 
@@ -415,9 +418,7 @@ class BuildTab(QWidget):
             "不勾选：学生已交卷且未到结束时间可免授权只读回看。"
         )
         self.chk_student_review.setChecked(self.state.student_review != "free")
-        self.chk_student_review.toggled.connect(
-            lambda on: setattr(self.state, "student_review", "none" if on else "free")
-        )
+        self.chk_student_review.toggled.connect(self._on_student_review_toggled)
         form.addRow("学生回看", self.chk_student_review)
 
         from app.ui.app_settings import PROJECT_ENCRYPT, settings
@@ -752,6 +753,10 @@ class BuildTab(QWidget):
 
     # ---------------------------------------------------------------- 打包
 
+    def _on_student_review_toggled(self, on: bool) -> None:
+        self.state.student_review = "none" if on else "free"
+        self.changed.emit()
+
     def _sync_time_config(self) -> None:
         self.state.student_review = "none" if self.chk_student_review.isChecked() else "free"
         self.state.time_mode = str(self.cb_time_mode.currentData() or "off")
@@ -989,7 +994,7 @@ class BuildTab(QWidget):
             return False
 
     @staticmethod
-    def _pin_target_error(out: Path, target: Path) -> str | None:
+    def _pin_target_error(out: Path, target: Path, tmpdir: Path | None = None) -> str | None:
         """校验 PIN 表保存路径；返回 None 表示可用，否则返回给老师看的原因。"""
         try:
             out_dir = out.resolve().parent
@@ -998,6 +1003,12 @@ class BuildTab(QWidget):
             return "路径无法解析，请换一个位置。"
         if target.exists() and target.is_dir():
             return "这是目录，不是 CSV 文件。"
+        if tmpdir is not None:
+            try:
+                if tgt.is_relative_to(tmpdir.resolve()):
+                    return "PIN 表不能放在打包临时目录，打包结束会被清理。"
+            except OSError:
+                pass
         if tgt == out_dir or out_dir in tgt.parents:
             return "PIN 表不能放在学生端 exe 所在目录或其子目录，学生能看到。"
         if os.path.normcase(str(tgt)) == os.path.normcase(str(out_dir)):
@@ -1049,7 +1060,7 @@ class BuildTab(QWidget):
             target = Path(chosen)
             if target.suffix.lower() != ".csv":
                 target = target.with_suffix(".csv")
-            reason = self._pin_target_error(out, target)
+            reason = self._pin_target_error(out, target, self._tmpdir)
             if reason:
                 QMessageBox.warning(
                     self,

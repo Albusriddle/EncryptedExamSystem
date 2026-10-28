@@ -1064,6 +1064,7 @@ class SessionsTab(QWidget):
                     )
                 )
 
+        old_id = self._current.session_id if self._current is not None else None
         try:
             s = Session(
                 session_id=int(self.spin_id.value()),
@@ -1094,6 +1095,9 @@ class SessionsTab(QWidget):
             self.state.sessions.append(s)
             # 注意：这里不设 _current，交给下面的 _load_into_form
         else:
+            # 编辑时若改了编号，先删旧编号，否则会新增一场并留下旧场次。
+            if old_id is not None and old_id != s.session_id:
+                self.state.remove_session(old_id)
             self.state.upsert_session(s)
         self.refresh()
         self._load_into_form(s)

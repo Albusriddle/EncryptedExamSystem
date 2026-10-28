@@ -142,6 +142,10 @@ impl AnswerSheet {
 
     /// 冻结（交卷）：之后不再接受修改。
     pub fn freeze(&mut self, now_unix: u64) {
+        // 幂等：到点自动收卷与手动交卷可能同时触发，不能改写首次交卷时间。
+        if self.submitted {
+            return;
+        }
         self.submitted = true;
         self.submitted_unix = Some(now_unix);
         self.updated_unix = now_unix;

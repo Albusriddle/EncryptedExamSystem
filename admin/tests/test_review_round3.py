@@ -41,6 +41,7 @@ def test_nonexistent_calendar_dates_are_rejected(bad: str) -> None:
 )
 def test_valid_calendar_dates_still_parse(good: str) -> None:
     assert parse_rfc3339(good) > 0
+    assert parse_rfc3339("2026-12-20T09:00:00+0800") == parse_rfc3339("2026-12-20T09:00:00+08:00")
 
 
 # ---------------------------------------------------------------- 工程文件缺 salt

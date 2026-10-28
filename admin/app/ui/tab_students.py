@@ -86,6 +86,7 @@ class StudentsTab(QWidget):
 
         form = QFormLayout()
         self.edit_name = QLineEdit()
+        self.edit_name.setMaxLength(40)
         self.edit_name.setPlaceholderText("例如：计算机 2021-1 班")
         self.edit_code = QLineEdit()
         self.edit_code.setPlaceholderText("可选，例如 CS2101")
@@ -319,6 +320,9 @@ class StudentsTab(QWidget):
         # **先**校验新名字，再保存成员：否则会出现"名字没改成、成员却已写进去"，
         # 老师会以为整页都没保存。
         new_name = self.edit_name.text().strip()
+        if len(new_name) > 40:
+            QMessageBox.warning(self, "无法保存", "班级名最多 40 个字符。")
+            return
         if new_name and new_name != c.name and self.state.class_by_name(new_name) is not None:
             QMessageBox.warning(
                 self, "无法保存", f"班级名重复：{new_name}\n本页没有保存，请换一个名字。"

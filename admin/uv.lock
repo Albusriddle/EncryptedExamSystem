@@ -261,7 +261,7 @@ wheels = [
 
 [[package]]
 name = "exam-admin"
-version = "0.15.12"
+version = "0.15.13"
 source = { virtual = "." }
 dependencies = [
     { name = "argon2-cffi" },

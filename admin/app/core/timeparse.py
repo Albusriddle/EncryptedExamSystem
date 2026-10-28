@@ -62,10 +62,15 @@ def parse_rfc3339(s: str) -> int:
             body = off[1:]
             if ":" in body:
                 oh, om = body.split(":", 1)
+            elif len(body) == 4:
+                oh, om = body[:2], body[2:]
             else:
-                oh, om = body, "0"
+                raise TimeParseError(f"时区偏移非法: {off!r}")
             try:
-                offset = sign * (int(oh) * 3600 + int(om or 0) * 60)
+                oh_i, om_i = int(oh), int(om or 0)
+                if not (0 <= oh_i <= 14 and 0 <= om_i <= 59):
+                    raise ValueError
+                offset = sign * (oh_i * 3600 + om_i * 60)
             except ValueError as exc:
                 raise TimeParseError(f"时区偏移非法: {off!r}") from exc
 

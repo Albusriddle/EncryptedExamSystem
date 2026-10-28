@@ -232,6 +232,7 @@ class AnswersTab(QWidget):
         audit_menu.addAction("签发答题卡收据", self._issue_receipt)
         audit_menu.addAction("验证收据", self._verify_receipt)
         audit_menu.addAction("备份收据私钥", self._backup_receipt_key)
+        audit_menu.addAction("恢复收据私钥", self._restore_receipt_key)
         audit_menu.addAction("考后查看原卷", self._review_paper)
         self.btn_audit.setMenu(audit_menu)
         btns2.addWidget(self.btn_audit)

@@ -661,3 +661,14 @@ def test_range_hint_shows_reachable_range(qapp, state_with_banks) -> None:
         assert "未标难度" in next(r for r in tab.checks if r.exam_id == "nolabel").hint.text()
     finally:
         tab.deleteLater()
+
+
+def test_student_review_checkbox_semantics(qapp, state_with_banks) -> None:
+    """默认勾选=仅教师（none）；取消勾选才允许学生免授权回看（free）。"""
+    from app.ui import tab_build
+
+    tab = tab_build.BuildTab(state_with_banks)
+    assert tab.chk_student_review.isChecked()
+    assert state_with_banks.student_review == "none"
+    tab.chk_student_review.setChecked(False)
+    assert state_with_banks.student_review == "free"

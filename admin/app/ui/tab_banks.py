@@ -113,10 +113,17 @@ class BanksTab(QWidget):
             )
             overwrite = ret == QMessageBox.StandardButton.Yes
 
+        before = set(self.state.banks)
         added, replaced, skipped = self.state.merge_banks(incoming, overwrite=overwrite)
+        # 只为真正写入的题库更新路径；跳过的题库必须保留旧路径。
+        accepted: dict[str, Path] = {}
         for item in loaded:
-            if item.bank.exam_id in self.state.banks:
-                self.state.bank_paths[item.bank.exam_id] = str(item.source.resolve())
+            eid = item.bank.exam_id
+            if overwrite or (eid not in before and eid not in accepted):
+                accepted[eid] = item.source
+        for eid, source in accepted.items():
+            if eid in self.state.banks:
+                self.state.bank_paths[eid] = str(source.resolve())
         ok = added + replaced
 
         self.refresh()
