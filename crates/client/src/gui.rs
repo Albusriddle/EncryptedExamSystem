@@ -254,6 +254,8 @@ impl ExamApp {
                     unlocked.session_id,
                     &unlocked.paper.fingerprint(),
                 );
+                // 若损坏卡备份失败，后续保存绝不能覆盖原文件。
+                let mut save_path = path.clone();
                 // v0.3.3 及更早的文件名没有指纹段：先迁移，再按新名字读
                 let legacy = path.with_file_name(format!(
                     "answers-{}-{}.eea",
@@ -279,14 +281,17 @@ impl ExamApp {
                     });
                 if restored.is_none() && path.exists() {
                     // 换卷/换包/损坏时旧卡不能默默丢掉：备份名唯一，绝不覆盖已有备份。
-                    let stamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let bak = path.with_extension(format!("eea.bak.{stamp}"));
+                    let mut bak = path.with_extension("eea.bak");
+                    let mut n = 0u32;
+                    while bak.exists() {
+                        n += 1;
+                        bak = path.with_extension(format!("eea.bak.{n}"));
+                    }
                     if let Err(e) = std::fs::rename(&path, &bak) {
+                        // 备份失败时不能再写回原路径，改用新文件保留原卡。
+                        save_path = path.with_extension(format!("eea.recovered.{n}"));
                         self.save_error = Some(format!(
-                            "原有答题卡无法读取，且备份失败：{e}\n原文件：{}",
+                            "原有答题卡无法读取，且备份失败：{e}\n原文件保持不动：{}",
                             path.display()
                         ));
                     } else {
@@ -330,7 +335,7 @@ impl ExamApp {
                 self.last_edit = std::time::Instant::now()
                     .checked_sub(Duration::from_secs(5))
                     .unwrap_or_else(std::time::Instant::now);
-                self.sheet_path = Some(path);
+                self.sheet_path = Some(save_path);
                 self.save_error = None;
                 self.confirm_submit = false;
                 self.review_mode = false;

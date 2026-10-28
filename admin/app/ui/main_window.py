@@ -395,6 +395,10 @@ class MainWindow(QMainWindow):
                 try:
                     state = ProjectState.load(path, pw)
                     break
+                except ValueError as e:
+                    # 解密成功但工程字段非法：不是口令错误，不能继续重试三次。
+                    QMessageBox.critical(self, "工程内容错误", f"{path}\n\n{e}")
+                    return False
                 except Exception as e:  # noqa: BLE001
                     if attempt == 2:
                         QMessageBox.critical(self, "打开失败", f"{path}\n\n{e}")

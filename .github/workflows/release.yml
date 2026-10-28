@@ -56,6 +56,18 @@ jobs:
           test "$V" = "$CV" && test "$V" = "$PV"
           echo "✓ VERSION/Cargo.toml/pyproject.toml 均为 $V"
 
+      - uses: astral-sh/setup-uv@v5
+
+      - name: 管理端测试（发布前必须全绿）
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd admin
+          uv sync --locked --extra gui --group dev
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run pytest -q
+
       - name: 全量测试（发布前必须全绿）
         shell: bash
         # ci.yml 只监听 push(main) 与 PR，**不监听 tag**；

@@ -758,11 +758,26 @@ class BuildTab(QWidget):
         self.changed.emit()
 
     def _sync_time_config(self) -> None:
+        old = (
+            self.state.student_review,
+            self.state.time_mode,
+            self.state.time_url,
+            self.state.time_pubkey,
+            self.state.time_max_skew,
+        )
         self.state.student_review = "none" if self.chk_student_review.isChecked() else "free"
         self.state.time_mode = str(self.cb_time_mode.currentData() or "off")
         self.state.time_url = self.edit_time_url.text().strip()
         self.state.time_pubkey = self.edit_time_pubkey.text().strip()
         self.state.time_max_skew = int(self.spin_time_skew.value())
+        if old != (
+            self.state.student_review,
+            self.state.time_mode,
+            self.state.time_url,
+            self.state.time_pubkey,
+            self.state.time_max_skew,
+        ):
+            self.changed.emit()
 
     def start_build(self) -> None:
         if self.worker is not None and self.worker.isRunning():
@@ -929,10 +944,19 @@ class BuildTab(QWidget):
 
     def shutdown(self) -> None:
         """Tab 销毁/窗口关闭前停止子进程，避免 QThread 析构崩溃。"""
+        keygen = getattr(self, "_keygen", None)
+        if keygen is not None and keygen.isRunning():
+            keygen.terminate()
+            keygen.wait(1000)
         if self.worker is not None and self.worker.isRunning():
+            self._cancelled = True
             self.worker.cancel()
-            self.worker.wait(5000)
-        self._cleanup_tmp()
+            if not self.worker.wait(5000):
+                # 兜底：不能让仍运行的 QThread 随 Tab 析构。
+                self.worker.terminate()
+                self.worker.wait(1000)
+        if self.worker is None or not self.worker.isRunning():
+            self._cleanup_tmp()
 
     def log_line(self, line: str) -> None:
         """供主窗口写入打包日志（如"工程已保存"）。"""

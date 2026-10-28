@@ -20,6 +20,8 @@ def parse_rfc3339(s: str) -> int:
     text = s.strip()
     if not text:
         raise TimeParseError("时间为空")
+    if not text.isascii():
+        raise TimeParseError("时间只能使用 ASCII 数字/符号")
 
     # 日期与时间分隔
     if "T" in text:
@@ -66,9 +68,13 @@ def parse_rfc3339(s: str) -> int:
                 oh, om = body[:2], body[2:]
             else:
                 raise TimeParseError(f"时区偏移非法: {off!r}")
+            if len(oh) != 2 or len(om) != 2:
+                raise TimeParseError(f"时区偏移非法: {off!r}")
             try:
                 oh_i, om_i = int(oh), int(om or 0)
                 if not (0 <= oh_i <= 14 and 0 <= om_i <= 59):
+                    raise ValueError
+                if oh_i == 14 and om_i != 0:
                     raise ValueError
                 offset = sign * (oh_i * 3600 + om_i * 60)
             except ValueError as exc:
@@ -83,7 +89,7 @@ def parse_rfc3339(s: str) -> int:
         second = int(t[2].split(".")[0]) if len(t) > 2 else 0
     except ValueError as exc:
         raise TimeParseError(f"时间含非数字: {time_part!r}") from exc
-    if hour > 23 or minute > 59 or second > 60:
+    if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 60):
         raise TimeParseError(f"时分秒超出范围: {time_part!r}")
 
     days = _days_from_civil(year, month, day)

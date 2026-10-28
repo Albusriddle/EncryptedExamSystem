@@ -474,6 +474,8 @@ class ProjectState:
         绝不写入 master：只存 salt、KDF、题库路径、学生、场次。
         题库内容也不存——教师会持续修改源文件，存路径更合理。
         """
+        if self.student_review not in ("none", "free"):
+            raise ValueError("student_review 只能是 none 或 free")
         data = {
             "version": PROJECT_VERSION,
             "salt": self.salt,

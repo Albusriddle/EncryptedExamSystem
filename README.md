@@ -160,7 +160,7 @@ MASTER=$(./target/release/exam-builder.exe keygen)
 
 | 保护什么 | 手段 |
 |---|---|
-| 题库明文不外泄 | 每场独立 `session_secret`，AES-256-GCM |
+| 未解锁时无明文题库 | 每场独立 `session_secret`，AES-256-GCM；同场学生解锁后可解本场题干（答案/judge 已剥离） |
 | 提前拿到卷子 | 包内没有明文题目，密钥靠学号派生 |
 | 提前/延后解锁 | 三个公共 HTTPS 时间源取中位数，失败即拒绝（fail-closed） |
 | 场次之间串卷 | 每场独立密钥与数据段，实测跨场解密失败 |

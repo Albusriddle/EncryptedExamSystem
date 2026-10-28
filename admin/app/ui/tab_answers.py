@@ -172,7 +172,7 @@ class AnswersTab(QWidget):
 
         tip = QLabel(
             "把学生交上来的 answers-<学号>-<场次>-<指纹8位>.eea 拖进来（或点【添加文件】）。\n"
-            "校验需要主密钥；指定学生端包后还会核对「这份答题卡是否属于这个包的这个学生」。"
+            "校验需要主密钥；指定学生端包后只核对原卷指纹/qids，不证明答题卡作者身份。"
         )
         tip.setWordWrap(True)
         lay.addWidget(tip)
@@ -535,7 +535,10 @@ class AnswersTab(QWidget):
     def shutdown(self) -> None:
         if self.worker is not None and self.worker.isRunning():
             self.worker.cancel()
-            self.worker.wait(5000)
+            if not self.worker.wait(5000):
+                # subprocess.run 本身不可中断；兜底终止线程，避免 Qt abort。
+                self.worker.terminate()
+                self.worker.wait(1000)
 
     def _on_all(self) -> None:
         self._set_editing_enabled(True)
