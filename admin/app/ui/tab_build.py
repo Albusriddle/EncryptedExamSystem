@@ -1123,10 +1123,12 @@ class BuildTab(QWidget):
             "✔ 密钥已内嵌在包内，学生双击即可使用（无需任何参数）。\n\n"
             "⚠ 请点上方【复制主密钥】保存到密码管理器——\n"
             "  它是重新打包本场考试的唯一凭据。\n\n"
-            "请核对日志里的 SHA-256。" + pin_note
+            "请核对日志里的 SHA-256。\n\n"
+            "注意：重新生成 exe 不会重置学生本机已交卷答题卡；\n"
+            "补考请新建场次/更换 salt。" + pin_note
         )
         if pin_note:
-            box.setInformativeText("PIN 表只发给教师，不在考试包目录里（故意）。")
+            box.setInformativeText("PIN 表只发给教师，未放进考试包目录。")
         open_out = box.addButton("打开输出目录", QMessageBox.ButtonRole.ActionRole)
         open_pin = None
         if pin_note:

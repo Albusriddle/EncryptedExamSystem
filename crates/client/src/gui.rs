@@ -165,6 +165,12 @@ pub struct ExamApp {
     clock: Option<SyncedClock>,
     /// 是否已到结束时刻（到点后锁定试卷）
     expired: bool,
+    /// 教师授权后进入“交卷后只读回看”模式。
+    review_mode: bool,
+    /// 是否打开教师授权回看窗口。
+    review_requested: bool,
+    review_input: String,
+    review_error: Option<String>,
     /// 是否需要在下一帧把焦点交给学号输入框。
     ///
     /// 只在**首次启动**与**从错误返回 Idle** 时置 `true`。
@@ -201,6 +207,10 @@ impl ExamApp {
             last_edit: std::time::Instant::now(),
             save_error: None,
             confirm_submit: false,
+            review_mode: false,
+            review_requested: false,
+            review_input: String::new(),
+            review_error: None,
             last_state_dump: None,
             #[cfg(debug_assertions)]
             last_locked_dump: None,
@@ -305,6 +315,10 @@ impl ExamApp {
                 self.sheet_path = Some(path);
                 self.save_error = None;
                 self.confirm_submit = false;
+                self.review_mode = false;
+                self.review_requested = false;
+                self.review_input.clear();
+                self.review_error = None;
                 self.stage = Stage::Paper(Box::new(unlocked));
                 true
             }
@@ -542,9 +556,11 @@ impl eframe::App for ExamApp {
                 // 到点收卷：直接关掉试卷与题号卡，避免"时间到了还能看题"。
                 let mut card_rect = egui::Rect::NOTHING;
                 let mut panel_rect = egui::Rect::NOTHING;
+                let mut no_review = false;
                 egui::CentralPanel::default().show(ctx, |ui| {
                     panel_rect = ui.max_rect();
-                    card_rect = render_locked(ui, unlocked, now, LockedMode::Expired);
+                    card_rect =
+                        render_locked(ui, unlocked, now, LockedMode::Expired, &mut no_review);
                 });
                 // 布局自检：卡片必须水平居中、且落在下半屏、且不被裁掉。
                 #[cfg(debug_assertions)]
@@ -570,21 +586,62 @@ impl eframe::App for ExamApp {
             }
 
             // 提前交卷：直接进"已交卷"页，不要让学生继续盯着试卷
+            #[allow(clippy::collapsible_if)]
             if let Some(at) = self
                 .sheet
                 .as_ref()
                 .filter(|s| s.submitted)
                 .and_then(|s| s.submitted_unix)
             {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                    "{} · 已交卷",
-                    common::branding().display_name()
-                )));
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    render_locked(ui, unlocked, now, LockedMode::Submitted { at });
-                });
-                self.maybe_save_sheet();
-                return;
+                if !self.review_mode {
+                    let mut review_requested = false;
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        render_locked(
+                            ui,
+                            unlocked,
+                            now,
+                            LockedMode::Submitted { at },
+                            &mut review_requested,
+                        );
+                    });
+                    if review_requested {
+                        self.review_requested = true;
+                    }
+                    if self.review_requested {
+                        let k_manifest = unlocked.k_manifest;
+                        let mut open = true;
+                        egui::Window::new("回看试卷（教师授权）")
+                            .collapsible(false)
+                            .resizable(false)
+                            .open(&mut open)
+                            .show(ctx, |ui| {
+                                ui.label("请输入教师主密钥；仅本次打开有效。");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.review_input)
+                                        .password(true)
+                                        .desired_width(320.0),
+                                );
+                                if ui.button("解锁回看").clicked() {
+                                    if review_master_ok(&self.review_input, &k_manifest) {
+                                        self.review_mode = true;
+                                        self.review_requested = false;
+                                        self.review_input.clear();
+                                        self.review_error = None;
+                                    } else {
+                                        self.review_error = Some("密钥不正确，无法回看。".into());
+                                    }
+                                }
+                                if let Some(e) = &self.review_error {
+                                    ui.colored_label(egui::Color32::RED, e);
+                                }
+                            });
+                        if !open {
+                            self.review_requested = false;
+                        }
+                    }
+                    self.maybe_save_sheet();
+                    return;
+                }
             }
 
             let sections: Vec<(String, Vec<(String, usize)>)> = unlocked
@@ -738,11 +795,18 @@ enum LockedMode {
     Submitted { at: u64 },
 }
 
+fn review_master_ok(master_hex: &str, k_manifest: &[u8; 32]) -> bool {
+    common::crypto::master_from_hex(master_hex.trim())
+        .map(|m| common::container::manifest_key(&m) == *k_manifest)
+        .unwrap_or(false)
+}
+
 fn render_locked(
     ui: &mut egui::Ui,
     unlocked: &Unlocked,
     now: Option<u64>,
     mode: LockedMode,
+    review_requested: &mut bool,
 ) -> egui::Rect {
     /// 卡片内容宽度的上限（不含内边距）
     const CARD_MAX_W: f32 = 380.0;
@@ -769,6 +833,10 @@ fn render_locked(
                     "交卷时间：{}",
                     common::timegate::format_unix_local_zoned(at)
                 ));
+                ui.add_space(8.0);
+                if ui.button("回看试卷（教师授权）").clicked() {
+                    *review_requested = true;
+                }
             }
             if let Some(n) = now {
                 ui.label(format!(

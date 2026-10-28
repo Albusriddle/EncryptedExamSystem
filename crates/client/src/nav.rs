@@ -223,13 +223,21 @@ impl NavState {
                     "交卷"
                 };
                 let enabled = can_submit && !submitted;
-                if ui
-                    .add_enabled(
-                        enabled,
-                        egui::Button::new(label).min_size(egui::vec2(ui.available_width(), 28.0)),
+                let width = ui.available_width().max(80.0);
+                let resp = ui
+                    .allocate_ui_with_layout(
+                        egui::vec2(width, 32.0),
+                        egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                        |ui| {
+                            ui.add_enabled(
+                                enabled,
+                                egui::Button::new(egui::RichText::new(label).size(13.0))
+                                    .min_size(egui::vec2(width, 28.0)),
+                            )
+                        },
                     )
-                    .clicked()
-                {
+                    .inner;
+                if resp.clicked() {
                     self.submit_requested = true;
                 }
             });

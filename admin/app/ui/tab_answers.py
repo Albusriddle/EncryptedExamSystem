@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -218,16 +219,21 @@ class AnswersTab(QWidget):
         self.btn_receipt.setToolTip("用教师私钥对当前答题卡文件哈希签名，防止收卷后被改")
         self.btn_receipt.setEnabled(False)
         self.btn_receipt.clicked.connect(self._issue_receipt)
-        btns2.addWidget(self.btn_receipt)
         self.btn_verify_receipt = QPushButton("验证收据")
         self.btn_verify_receipt.clicked.connect(self._verify_receipt)
-        btns2.addWidget(self.btn_verify_receipt)
         self.btn_receipt_key = QPushButton("备份收据私钥")
         self.btn_receipt_key.setToolTip(
             "把 receipt-key.pem 导出到安全位置（换机/重装后验证旧收据用）"
         )
         self.btn_receipt_key.clicked.connect(self._backup_receipt_key)
-        btns2.addWidget(self.btn_receipt_key)
+        # 收据是可选审计凭证，不放在主流程；收进“审计”菜单。
+        self.btn_audit = QPushButton("审计")
+        audit_menu = QMenu(self.btn_audit)
+        audit_menu.addAction("签发答题卡收据", self._issue_receipt)
+        audit_menu.addAction("验证收据", self._verify_receipt)
+        audit_menu.addAction("备份收据私钥", self._backup_receipt_key)
+        self.btn_audit.setMenu(audit_menu)
+        btns2.addWidget(self.btn_audit)
         self.btn_csv = QPushButton("导出原始作答 CSV")
         self.btn_csv.setToolTip("只导出学生原始作答，不含分数；判分请用下方「导出判分结果…」")
         self.btn_csv.clicked.connect(self._export_csv)
@@ -243,6 +249,7 @@ class AnswersTab(QWidget):
             self.btn_receipt,
             self.btn_verify_receipt,
             self.btn_receipt_key,
+            self.btn_audit,
             self.btn_csv,
             btn_pkg,
         ):
