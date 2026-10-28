@@ -539,6 +539,7 @@ class ProjectState:
         st.time_url = str(t.get("url") or "")
         st.time_pubkey = str(t.get("pubkey") or "")
         st.time_max_skew = int(t.get("max_skew") or 300)
+        st.student_review = str(data.get("student_review") or "none")
 
         # 重新读取题库：源文件可能已被教师修改。
         #

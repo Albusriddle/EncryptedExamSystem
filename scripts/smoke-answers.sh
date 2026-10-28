@@ -41,10 +41,19 @@ MASTER="$("$BUILDER" keygen 2>/dev/null)"
   --stub "$CLIENT" --out "$WORK/pkg.exe" --master "$MASTER" \
   --allow-weak-kdf --force >/dev/null
 
-# 启动 GUI 作答 6 秒后杀掉
+# 启动 GUI 作答，轮询答题卡直到两个答案都落盘，避免固定 sleep 截断。
 EES_AUTOLOGIN=2 EES_ANSWER="0=B,1=AC" "$WORK/pkg.exe" >"$WORK/gui.log" 2>&1 &
 pid=$!
-sleep 6
+SHEET=""
+for _ in $(seq 1 30); do
+  sleep 0.5
+  SHEET="$(find "$WORK" -maxdepth 1 -name 'answers-*.eea' | head -1)"
+  [ -n "$SHEET" ] || continue
+  OUT="$(EXAM_MASTER="$MASTER" "$BUILDER" verify-answer-sheet "$SHEET" --package "$WORK/pkg.exe" --json 2>/dev/null || true)"
+  if printf '%s' "$OUT" | python -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") and d.get("sheet",{}).get("answers")==["B","AC"]' 2>/dev/null; then
+    break
+  fi
+done
 kill "$pid" 2>/dev/null || true
 sleep 1
 

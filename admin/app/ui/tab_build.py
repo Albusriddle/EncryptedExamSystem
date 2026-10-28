@@ -409,14 +409,14 @@ class BuildTab(QWidget):
         )
         form.addRow("登录方式", self.chk_pin_login)
 
-        self.chk_student_review = QCheckBox("允许学生交卷后免授权回看（仅考试结束前有效）")
+        self.chk_student_review = QCheckBox("仅教师可查看原卷（学生端不提供免授权回看）")
         self.chk_student_review.setToolTip(
-            "不勾选：学生端无回看入口，考后由教师用 master 查看原卷；\n"
-            "勾选：学生已交卷且未到结束时间可只读回看。"
+            "勾选（默认）：学生端无回看入口，考后由教师用 master 查看原卷；\n"
+            "不勾选：学生已交卷且未到结束时间可免授权只读回看。"
         )
-        self.chk_student_review.setChecked(self.state.student_review == "free")
+        self.chk_student_review.setChecked(self.state.student_review != "free")
         self.chk_student_review.toggled.connect(
-            lambda on: setattr(self.state, "student_review", "free" if on else "none")
+            lambda on: setattr(self.state, "student_review", "none" if on else "free")
         )
         form.addRow("学生回看", self.chk_student_review)
 
@@ -753,7 +753,7 @@ class BuildTab(QWidget):
     # ---------------------------------------------------------------- 打包
 
     def _sync_time_config(self) -> None:
-        self.state.student_review = "free" if self.chk_student_review.isChecked() else "none"
+        self.state.student_review = "none" if self.chk_student_review.isChecked() else "free"
         self.state.time_mode = str(self.cb_time_mode.currentData() or "off")
         self.state.time_url = self.edit_time_url.text().strip()
         self.state.time_pubkey = self.edit_time_pubkey.text().strip()
