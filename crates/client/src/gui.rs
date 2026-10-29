@@ -288,8 +288,15 @@ impl ExamApp {
                         bak = path.with_extension(format!("eea.bak.{n}"));
                     }
                     if let Err(e) = std::fs::rename(&path, &bak) {
-                        // 备份失败时不能再写回原路径，改用新文件保留原卡。
-                        save_path = path.with_extension(format!("eea.recovered.{n}"));
+                        // 备份失败时不能再写回原路径，改用新文件保留原卡；
+                        // recovered 也必须递增，不能覆盖上次留下的文件。
+                        let mut recovered = path.with_extension("eea.recovered");
+                        let mut r = 0u32;
+                        while recovered.exists() {
+                            r += 1;
+                            recovered = path.with_extension(format!("eea.recovered.{r}"));
+                        }
+                        save_path = recovered;
                         self.save_error = Some(format!(
                             "原有答题卡无法读取，且备份失败：{e}\n原文件保持不动：{}",
                             path.display()
