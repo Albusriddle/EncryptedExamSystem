@@ -171,41 +171,41 @@ jobs:
           echo "  ✓ 无学号明文"
 
           echo "--- 2) 名单内 + 时间窗内 → 应解锁 ---"
-          ./StudentClient --student 2021001 --master "$MASTER" --package ./StudentClient \
+          EXAM_MASTER="$MASTER" ./StudentClient --student 2021001 --package ./StudentClient \
             | tee /tmp/ok.txt
           grep -q "解锁成功" /tmp/ok.txt || fail "名单内学生未能解锁"
           echo "  ✓ 解锁成功"
 
           echo "--- 3) 名单外 → 应拒绝 ---"
-          if ./StudentClient --student 9999999 --master "$MASTER" --package ./StudentClient; then
+          if EXAM_MASTER="$MASTER" ./StudentClient --student 9999999 --package ./StudentClient; then
             fail "名单外学生竟然解锁成功"
           fi
           echo "  ✓ 正确拒绝"
 
           echo "--- 4) 【P0-A 回归】--session 指定未来场次 → 必须拒绝 ---"
-          if ./StudentClient --student 2021001 --session 2 \
-               --master "$MASTER" --package ./StudentClient; then
+          if EXAM_MASTER="$MASTER" ./StudentClient --student 2021001 --session 2 \
+               --package ./StudentClient; then
             fail "显式指定场次绕过了时间门禁"
           fi
           echo "  ✓ 门禁未被 --session 绕过"
 
           echo "--- 5) 【P0-A 回归】--skip-timegate 在 release 中不存在 ---"
-          if ./StudentClient --student 2021001 --skip-timegate \
-               --master "$MASTER" --package ./StudentClient 2>/dev/null; then
+          if EXAM_MASTER="$MASTER" ./StudentClient --student 2021001 --skip-timegate \
+               --package ./StudentClient 2>/dev/null; then
             fail "release 构建仍接受 --skip-timegate"
           fi
           echo "  ✓ release 无跳过门禁的后门"
 
           echo "--- 6) 错误主密钥 → 应拒绝 ---"
           WRONG=$(printf 'ab%.0s' $(seq 1 32))
-          if ./StudentClient --student 2021001 --master "$WRONG" --package ./StudentClient; then
+          if EXAM_MASTER="$WRONG" ./StudentClient --student 2021001 --package ./StudentClient; then
             fail "错误主密钥竟然能解锁"
           fi
           echo "  ✓ 错误密钥被拒绝"
 
           echo "--- 7) 确定性：两次运行指纹一致 ---"
-          F1=$(./StudentClient --student 2021001 --master "$MASTER" --package ./StudentClient | grep 指纹)
-          F2=$(./StudentClient --student 2021001 --master "$MASTER" --package ./StudentClient | grep 指纹)
+          F1=$(EXAM_MASTER="$MASTER" ./StudentClient --student 2021001 --package ./StudentClient | grep 指纹)
+          F2=$(EXAM_MASTER="$MASTER" ./StudentClient --student 2021001 --package ./StudentClient | grep 指纹)
           [ "$F1" = "$F2" ] || fail "同一学生两次抽题结果不一致"
           echo "  ✓ $F1"
 
