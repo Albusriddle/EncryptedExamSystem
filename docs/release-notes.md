@@ -30,7 +30,7 @@
 - 关闭窗口/切换工程时取消并等待 Build/Verify worker；
 - 工程加载校验 student_review；删除题库同时摘除 sections 引用；
 - review-paper 校验答题卡 qids；preflight 增加三处版本一致检查；
-- 教师手册修正“看不到任何题目”的旧承诺。
+- 教师手册修正旧的安全承诺表述。
 
 ## 更新摘要（v0.15.13）
 

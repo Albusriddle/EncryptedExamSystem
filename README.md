@@ -98,8 +98,8 @@ docs/题库JSON规范.md  # 题库格式规范与可直接导入的样例
 examples/         # 可直接导入的示例题库（含图片题）
 licenses/         # LGPL/GPL 全文（PySide6 合规）
 tools/            # 辅助脚本（embed-image.py 等）
-docs/             # 教师手册、图片教程、架构方案、发布说明
-scripts/          # verify-embed.sh / preflight-release.sh / make-release-zip.sh
+docs/             # 教师手册、安全边界、风险接受记录、架构方案、发布说明
+scripts/          # verify-embed / preflight-release / release_body / run-admin-tests / smoke-answers
 .github/workflows # CI 与 Release
 ```
 
@@ -171,6 +171,8 @@ MASTER=$(./target/release/exam-builder.exe keygen)
 - **包内嵌入的是 `K_manifest`，不是 master**。泄漏后攻击者能读到场次时间与人数；有合法学号的学生可解密本场题库题干（不含答案/判分材料），不能读其他场次或标准答案。
 - 有逆向能力且知道合法学号的人，可以在时间窗内解锁——这是设计使然，无法用纯客户端方案消除。
 - 学生端必须有网（校时）；完全断网时会拒绝解锁。
+
+> **风险接受**：项目已明确接受“同场题干可解、答题卡可伪造、默认无 PIN、Header 可改”等残余风险；补偿措施和复审条件见 [风险接受记录](docs/风险接受记录.md)。这不是“风险已修复”。
 
 ---
 
