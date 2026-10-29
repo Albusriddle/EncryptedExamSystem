@@ -2,6 +2,15 @@
 
 管理端编排多场考试 → 打包加密题库 → 学生凭**学号 + 网络时间门禁**解锁个人试卷。
 
+## 更新摘要（v0.15.18）
+
+- 学生端 release 移除 `--master`，只允许 `--master-file`/`EXAM_MASTER`；README/脚本同步；
+- 门禁按学生 entry key 的信封 tag 过滤场次，修复无交集重叠场次被路由到错误场次；
+- 答题卡 `recovered` 备份唯一，失败不覆盖原卡；
+- 管理端/发布包：风险接受记录随 zip 分发；
+- 加固：KDF 上限降至 256 MiB、输出路径冲突拒绝、PIN 文件 0600、HTTP Date 安全切片、BOTTOM_PAD 动态；
+- 文档：架构文档旧状态、题库 `pick=0`、release 固定大小修正。
+
 ## 更新摘要（v0.15.17）
 
 - 备份提示不再被无条件清空；错误口令与工程字段错误分开处理；
@@ -143,7 +152,7 @@
 
 ## 教师：下载这个
 
-**下载 `ExamAdmin-<版本>-windows.zip`**（约 61 MB，见本页底部 Assets）
+**下载 `ExamAdmin-<版本>-windows.zip`**（大小以 Assets 显示为准）
 
 下载 → 解压 → 进 `ExamAdmin` 文件夹 → 双击 `ExamAdmin.exe`。
 

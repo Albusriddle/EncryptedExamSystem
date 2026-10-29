@@ -139,7 +139,7 @@ MASTER=$(./target/release/exam-builder.exe keygen)
 ./target/release/exam-builder.exe build \
   --manifest banks/demo/manifest.example.json --banks banks/ \
   --stub ./target/release/exam-client.exe --out StudentClient.exe --master "$MASTER" --force
-./StudentClient.exe --student 2021001 --package StudentClient.exe --master "$MASTER"
+EXAM_MASTER="$MASTER" ./StudentClient.exe --student 2021001 --package StudentClient.exe
 ```
 
 ---

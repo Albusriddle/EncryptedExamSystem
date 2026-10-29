@@ -20,9 +20,7 @@ use crate::keys;
 pub struct UnlockOpts {
     /// 自解压包路径；`None` 表示读自身。
     pub package: Option<String>,
-    /// 主密钥（开发模式用；发布版应通过 `EXAM_KEYFILE` 嵌入）。
-    pub master: Option<String>,
-    /// 从文件读取主密钥。
+    /// 从文件读取主密钥（master 本身不允许进命令行）。
     pub master_file: Option<String>,
     /// 在门禁通过后进一步指定场次（**不能**绕过时间窗）。
     pub session: Option<u32>,
@@ -115,14 +113,13 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
         .context("未找到内嵌 payload。请用 --package 指向 builder 生成的 exe")?;
 
     // 2. 解 header。密钥优先级见 resolve_manifest_key。
-    let (k_manifest, key_source) =
-        resolve_manifest_key(payload, opts.master.clone(), opts.master_file.clone())?;
+    let (k_manifest, key_source) = resolve_manifest_key(payload, opts.master_file.clone())?;
     let (header, blob_area) = container::parse_header(payload, &k_manifest)
         .context("解析 header 失败（密钥不匹配？）")?;
     let salt = hex::decode(&header.salt).context("header.salt hex 解码")?;
 
     // 3. 【时间门禁】必须在派生入场密钥之前。
-    let (session_id, net) = run_time_gate(&header, opts)?;
+    let (session_id, net) = run_time_gate(&header, opts, student_id, &salt, pin.as_deref())?;
     let session = header
         .sessions
         .iter()
@@ -222,11 +219,24 @@ fn fallback_network_time() -> anyhow::Result<timegate::NetworkTime> {
 fn run_time_gate(
     header: &Header,
     opts: &UnlockOpts,
+    student_id: u64,
+    salt: &[u8],
+    pin: Option<&str>,
 ) -> Result<(u32, Option<timegate::NetworkTime>)> {
-    // 把 header 里的场次转成门禁需要的窗口视图。
+    // 只把“该生所属的场次”交给门禁。否则两个场次时间重叠但学生无交集时，
+    // decide_session 会取最小 session_id，导致学生被路由到不属于自己的场次。
+    // Header 只有信封标签，没有明文名单；用该生 entry key 的 tag 精确过滤。
     let windows: Vec<SessionWindow> = header
         .sessions
         .iter()
+        .filter(|s| {
+            common::crypto::session_entry_key(student_id, s.session_id, salt, header.kdf, pin)
+                .map(|k| {
+                    let tag = common::crypto::envelope_tag(&k);
+                    s.envelopes.iter().any(|e| e.tag == tag)
+                })
+                .unwrap_or(false)
+        })
         .filter_map(|s| {
             let start = timegate::parse_rfc3339(&s.start)?;
             let end = timegate::parse_rfc3339(&s.end)?;
@@ -308,7 +318,7 @@ pub fn option_label(j: usize) -> String {
 /// 优先级（**嵌入优先**，发布版就是要学生零配置）：
 ///
 /// 1. 编译期嵌入的 K_manifest（由 `EXAM_KEYFILE` 提供，见 build.rs）；
-/// 2. `--master-file` / `--master` / 环境变量 `EXAM_MASTER`（开发调试用）。
+/// 2. `--master-file` / 环境变量 `EXAM_MASTER`（开发调试用；master 不进入命令行）。
 ///
 /// 注意：第 2 条拿到的是 **master**，需派生一次 K_manifest；
 /// 第 1 条已经是 K_manifest 本身，**不能再派生**。
@@ -320,13 +330,12 @@ pub fn option_label(j: usize) -> String {
 ///    学生不需要任何密钥文件，也不需要教师重新编译 client。
 /// 2. 编译期嵌入的 K_manifest（由 `EXAM_KEYFILE` 提供，见 build.rs）。
 ///    保留给"想把密钥混进 binary 而非包内"的进阶用法。
-/// 3. `--master-file` / `--master` / 环境变量 `EXAM_MASTER`（开发调试）。
+/// 3. `--master-file` / 环境变量 `EXAM_MASTER`（开发调试；master 不进入命令行）。
 ///
 /// 注意第 3 条拿到的是 **master**，需派生一次 K_manifest；
 /// 前两条已经是 K_manifest 本身，**不能再派生**。
 pub fn resolve_manifest_key(
     payload: &[u8],
-    master: Option<String>,
     master_file: Option<String>,
 ) -> Result<([u8; 32], KeySource)> {
     let from_package = container::embedded_k_manifest(payload)?;
@@ -337,15 +346,15 @@ pub fn resolve_manifest_key(
             Some(k) => (k, KeySource::Binary),
             None => {
                 // 回退到显式 master（开发模式）。
-                let given = read_master_arg(master.as_deref(), master_file.as_deref())?;
+                let given = read_master_arg(master_file.as_deref())?;
                 return Ok((container::manifest_key(&given), KeySource::Master));
             }
         },
     };
 
     // 若同时显式传了 master，校验一致性，避免"以为用了 A 实际用了 B"。
-    if master.is_some() || master_file.is_some() {
-        let given = read_master_arg(master.as_deref(), master_file.as_deref())?;
+    if master_file.is_some() || std::env::var("EXAM_MASTER").is_ok() {
+        let given = read_master_arg(master_file.as_deref())?;
         let derived = container::manifest_key(&given);
         anyhow::ensure!(
             derived == k,
@@ -389,14 +398,12 @@ pub fn peek_key_source(opts: &UnlockOpts) -> KeySource {
 }
 
 /// 把参数解析成 master。`master_file` 存在时读文件。
-fn read_master_arg(master: Option<&str>, master_file: Option<&str>) -> Result<[u8; 32]> {
+fn read_master_arg(master_file: Option<&str>) -> Result<[u8; 32]> {
     let hex = if let Some(path) = master_file {
         std::fs::read_to_string(path)
             .with_context(|| format!("读取密钥文件 {path}"))?
             .trim()
             .to_string()
-    } else if let Some(m) = master {
-        m.trim().to_string()
     } else if let Ok(v) = std::env::var("EXAM_MASTER") {
         if v.trim().is_empty() {
             anyhow::bail!("环境变量 EXAM_MASTER 为空");
@@ -405,7 +412,7 @@ fn read_master_arg(master: Option<&str>, master_file: Option<&str>) -> Result<[u
     } else {
         anyhow::bail!(
             "缺少密钥：本包未内嵌密钥，且未提供 master。\n\
-             请用 --master-file / --master / 环境变量 EXAM_MASTER 提供。"
+             请用 --master-file 或环境变量 EXAM_MASTER 提供（master 不进入命令行）。"
         );
     };
     let m = crypto::master_from_hex(&hex).context("解析主密钥")?;

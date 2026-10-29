@@ -29,7 +29,7 @@ ARGON2_MEMORY = 65536
 ARGON2_PARALLEL = 1
 # 加密文件头来自外部输入，必须在调用 Argon2 前限幅，避免恶意工程/备份造成 OOM。
 MAX_KDF_TIME = 16
-MAX_KDF_MEMORY = 1_048_576  # KiB = 1 GiB
+MAX_KDF_MEMORY = 262_144  # KiB = 256 MiB
 MAX_KDF_PARALLEL = 8
 
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")

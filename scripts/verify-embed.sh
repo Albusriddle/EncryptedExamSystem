@@ -84,7 +84,7 @@ if "$TMP/dev.exe" --student 2021001 --package "$TMP/dev.exe" >/dev/null 2>&1; th
 fi
 ok "不带 master 时正确报错"
 
-"$TMP/dev.exe" --student 2021001 --master "$MASTER" --package "$TMP/dev.exe" \
+EXAM_MASTER="$MASTER" "$TMP/dev.exe" --student 2021001 --package "$TMP/dev.exe" \
   | grep -c "解锁成功" >/dev/null || fail "带 master 时未能解锁"
 ok "带 master 可解锁"
 
@@ -137,12 +137,12 @@ ok "搜不到学号明文"
 echo
 echo "== 一致性校验 =="
 # 嵌入版 + 显式 master（不一致时应报错，一致时应通过）
-"$TMP/student.exe" --student 2021001 --master "$MASTER" --package "$TMP/student.exe" \
+EXAM_MASTER="$MASTER" "$TMP/student.exe" --student 2021001 --package "$TMP/student.exe" \
   | grep -c "解锁成功" >/dev/null || fail "嵌入版传入一致的 master 时应当通过"
 ok "显式 master 与嵌入值一致时通过"
 
 WRONG="$(printf 'ab%.0s' $(seq 1 32))"
-if "$TMP/student.exe" --student 2021001 --master "$WRONG" --package "$TMP/student.exe" \
+if EXAM_MASTER="$WRONG" "$TMP/student.exe" --student 2021001 --package "$TMP/student.exe" \
      >/dev/null 2>&1; then
   fail "不一致的 master 未被拒绝"
 fi

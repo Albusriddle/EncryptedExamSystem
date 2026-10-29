@@ -38,7 +38,7 @@ pub fn is_embedded() -> bool {
 ///
 /// builder 打包时会扫描 stub 二进制，确认它是否已嵌入密钥：
 /// - 找到 `EXAMKEY:EMBEDDED` → 学生端免输密钥，正常；
-/// - 找到 `EXAMKEY:PLAIN` → 学生端需要 `--master`，builder 必须**明确警告**；
+/// - 找到 `EXAMKEY:PLAIN` → 学生端需要环境变量或 `--master-file`，builder 必须**明确警告**；
 /// - 两个都没有 → 不是本项目的 client 构建产物。
 ///
 /// ⚠ 关键：**同一时刻只能有一个标记出现在二进制里**。

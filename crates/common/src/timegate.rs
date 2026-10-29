@@ -214,8 +214,11 @@ fn fetch_date_header(url: &str, timeout: Duration) -> Result<String, String> {
             let _ = rest;
             return Ok(v.trim().to_string());
         }
-        if line.len() > 5 && line[..5].eq_ignore_ascii_case("date:") {
-            return Ok(line[5..].trim().to_string());
+        if line
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("date:"))
+        {
+            return Ok(line.get(5..).unwrap_or("").trim().to_string());
         }
     }
     Err("响应中没有 Date 头".into())
@@ -611,7 +614,8 @@ pub fn fetch_network_time_with_policy(
     }
 
     let mut ok: Vec<u64> = values.iter().flatten().copied().collect();
-    if ok.len() < policy.min_sources {
+    // min_sources=0 时也至少要有 1 个源，否则下面的中位数索引会空数组 panic。
+    if ok.len() < policy.min_sources.max(1) {
         let details: Vec<String> = errors
             .iter()
             .enumerate()

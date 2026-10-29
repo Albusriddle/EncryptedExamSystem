@@ -88,7 +88,8 @@ echo "  ✓ 示例题库/（exam_id 与文件名一致）"
 
 # 4. 手册
 cp "$ROOT/docs/教师使用手册.md" "$STAGE/使用说明.md"
-echo "  ✓ 使用说明.md"
+cp "$ROOT/docs/风险接受记录.md" "$STAGE/风险接受记录.md"
+echo "  ✓ 使用说明.md + 风险接受记录.md"
 
 # 5. 入口页：告诉老师从哪开始
 cat > "$STAGE/开始这里.md" <<'DOC'

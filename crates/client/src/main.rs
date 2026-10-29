@@ -34,11 +34,8 @@ struct Cli {
     /// 学号
     #[arg(long)]
     student: u64,
-    /// 主密钥。优先 --master-file 或环境变量 EXAM_MASTER
+    /// 从文件读取主密钥（64-hex）；master 不允许出现在命令行
     #[arg(long)]
-    master: Option<String>,
-    /// 从文件读取主密钥（64-hex）
-    #[arg(long, conflicts_with = "master")]
     master_file: Option<String>,
     /// 自解压包路径（默认读自身）
     #[arg(long)]
@@ -109,7 +106,6 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let opts = UnlockOpts {
         package: cli.package.clone(),
-        master: cli.master.clone(),
         master_file: cli.master_file.clone(),
         session: cli.session,
         #[cfg(debug_assertions)]

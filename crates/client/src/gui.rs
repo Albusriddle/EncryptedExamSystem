@@ -762,8 +762,8 @@ impl eframe::App for ExamApp {
 }
 
 /// 渲染试卷。
-/// 试卷底部留白（pt）。约一屏高度，让最后一题也能贴顶。
-const BOTTOM_PAD: f32 = 900.0;
+/// 试卷底部留白下限（pt）；实际使用当前窗口高度，避免高窗口末题不能贴顶。
+const BOTTOM_PAD_MIN: f32 = 320.0;
 
 /// 把秒数格式化成"X 小时 Y 分 Z 秒"。
 fn format_duration(secs: u64) -> String {
@@ -1679,10 +1679,9 @@ fn render_paper(
         // 不足一屏，跳过去时会被"顶到上限"，题号卡点了也到不了顶部。
         // 实测 10 道题时第 10 题只能滚到 553，而它的目标位置是 1124。
         // 这里按视窗高度留出一屏空白，使任意题目都能贴顶。
-        // 固定留白一屏：ScrollArea 内部的 available_height() 在内容撑开后
-        // 会变成 0，用它算留白几乎不生效（实测只多了 20pt）。
-        // 这里改用固定值，保证任意题目都能滚到顶部。
-        ui.add_space(BOTTOM_PAD);
+        // 用当前窗口高度而不是固定 900pt：窗口更高时末题也能贴顶。
+        // ScrollArea 内部的 available_height() 在内容撑开后接近 0，不能用。
+        ui.add_space(ui.ctx().screen_rect().height().max(BOTTOM_PAD_MIN));
 
         // 全部题目渲染完毕，此时 rects 是本帧最新的，消费跳转请求。
         nav.apply_pending_scroll(ui);

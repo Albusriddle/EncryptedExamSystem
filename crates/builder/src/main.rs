@@ -470,7 +470,7 @@ fn export_pins(
     for ((sid, stu), pin) in rows {
         csv.push_str(&format!("{sid},{stu},{pin}\n"));
     }
-    std::fs::write(out, csv).with_context(|| format!("写入 {}", out.display()))?;
+    write_private(out, csv.as_bytes())?;
     println!("PIN 表已导出：{}", out.display());
     Ok(())
 }
@@ -628,6 +628,23 @@ struct BuildRequest {
     emit_pins: Option<PathBuf>,
 }
 
+fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(path)
+        .with_context(|| format!("写入 {}", path.display()))?;
+    f.write_all(data)
+        .with_context(|| format!("写入 {}", path.display()))?;
+    Ok(())
+}
+
 fn build(req: BuildRequest) -> Result<()> {
     let BuildRequest {
         manifest_path,
@@ -642,6 +659,34 @@ fn build(req: BuildRequest) -> Result<()> {
         pin_login,
         emit_pins,
     } = req;
+
+    // 输出/输入路径冲突保护：否则 `--emit-pins` 可以覆盖 exe，或 `--out`
+    // 覆盖 manifest/stub，导致“打包成功但文件被 CSV/密钥覆盖”。
+    let abs = |p: &std::path::Path| -> std::path::PathBuf {
+        p.canonicalize().unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(p)
+        })
+    };
+    let out_abs = abs(&out_path);
+    let mut protected: Vec<(&str, &std::path::Path)> = vec![
+        ("manifest", manifest_path.as_path()),
+        ("stub", stub_path.as_path()),
+    ];
+    if let Some(p) = emit_pins.as_deref() {
+        protected.push(("emit-pins", p));
+    }
+    if let Some(p) = emit_keyfile.as_deref() {
+        protected.push(("emit-keyfile", p));
+    }
+    for (label, p) in protected {
+        anyhow::ensure!(
+            out_abs != abs(p),
+            "输出路径不能与 {label} 相同：{}",
+            out_path.display()
+        );
+    }
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("读取清单 {}", manifest_path.display()))?;
     let manifest: Manifest = serde_json::from_str(&manifest_text).context("解析 manifest")?;
@@ -903,7 +948,7 @@ fn build(req: BuildRequest) -> Result<()> {
         for ((sid, stu), pin) in rows {
             csv.push_str(&format!("{sid},{stu},{pin}\n"));
         }
-        std::fs::write(path, csv).with_context(|| format!("写入 PIN 表 {}", path.display()))?;
+        write_private(path, csv.as_bytes())?;
         println!("PIN 表已导出：{}", path.display());
     }
 
@@ -934,8 +979,7 @@ fn build(req: BuildRequest) -> Result<()> {
     // 输出 K_manifest，供学生端编译时嵌入（使其免输 master）。
     if let Some(path) = emit_keyfile {
         let k_manifest = container::manifest_key(&master);
-        std::fs::write(&path, hex::encode(k_manifest))
-            .with_context(|| format!("写出 keyfile {}", path.display()))?;
+        write_private(&path, hex::encode(k_manifest).as_bytes())?;
         // Unix 上收窄权限：默认 0644 会让同机其他用户读到 K_manifest。
         #[cfg(unix)]
         {
