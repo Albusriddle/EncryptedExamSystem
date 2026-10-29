@@ -270,7 +270,7 @@ impl ExamApp {
                     .iter()
                     .flat_map(|sec| sec.items.iter().map(|it| it.id.clone()))
                     .collect();
-                let restored = std::fs::read(&path)
+                let mut restored = std::fs::read(&path)
                     .ok()
                     .and_then(|b| common::answer_sheet::open(&unlocked.k_manifest, &b).ok())
                     .filter(|s| {
@@ -279,6 +279,24 @@ impl ExamApp {
                             && s.session_id == unlocked.session_id
                             && s.qids == expected_qids
                     });
+                if restored.is_none()
+                    && let Some(rec) = find_recovered_sheet(&path)
+                {
+                    let candidate = std::fs::read(&rec)
+                        .ok()
+                        .and_then(|b| common::answer_sheet::open(&unlocked.k_manifest, &b).ok())
+                        .filter(|s| {
+                            s.paper_fingerprint == unlocked.paper.fingerprint()
+                                && s.student_id == unlocked.student_id
+                                && s.session_id == unlocked.session_id
+                                && s.qids == expected_qids
+                        });
+                    if candidate.is_some() {
+                        // 继续写回 recovered 文件，避免覆盖仍损坏的原卡。
+                        save_path = rec;
+                        restored = candidate;
+                    }
+                }
                 if restored.is_none() && path.exists() {
                     // 换卷/换包/损坏时旧卡不能默默丢掉：备份名唯一，绝不覆盖已有备份。
                     let mut bak = path.with_extension("eea.bak");
@@ -1942,6 +1960,26 @@ fn answer_sheet_path(
 fn answer_sheet_file_name(student_id: u64, session_id: u32, paper_fingerprint: &str) -> String {
     let short = paper_fingerprint.get(..8).unwrap_or(paper_fingerprint);
     format!("answers-{student_id}-{session_id}-{short}.eea")
+}
+
+/// 备份失败时写入的 `*.eea.recovered*`；下次启动必须优先尝试它，
+/// 否则原卡损坏会让学生再次得到空卡。
+fn find_recovered_sheet(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = path.parent()?;
+    let name = path.file_name()?.to_string_lossy();
+    let prefix = format!("{name}.recovered");
+    let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().starts_with(&prefix))
+                .unwrap_or(false)
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next()
 }
 
 /// 把旧命名（无指纹段）的答题卡迁移到新名字。

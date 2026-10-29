@@ -29,12 +29,16 @@ def test_parse_keygen_output_accepts_valid_and_rejects_garbage() -> None:
 def test_keygen_worker_emits_key(qapp, monkeypatch) -> None:
     from app.ui import tab_build
 
-    class CP:
+    class FakePopen:
         returncode = 0
-        stdout = "cd" * 32
-        stderr = ""
 
-    monkeypatch.setattr(tab_build.subprocess, "run", lambda *a, **k: CP())
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def communicate(self, timeout=None):
+            return ("cd" * 32, "")
+
+    monkeypatch.setattr(tab_build.subprocess, "Popen", FakePopen)
     worker = tab_build.KeygenWorker()
     got: list[str] = []
     worker.done.connect(got.append)
@@ -46,12 +50,16 @@ def test_keygen_worker_emits_key(qapp, monkeypatch) -> None:
 def test_keygen_worker_reports_failure(qapp, monkeypatch) -> None:
     from app.ui import tab_build
 
-    class CP:
+    class FakePopen:
         returncode = 2
-        stdout = ""
-        stderr = "boom"
 
-    monkeypatch.setattr(tab_build.subprocess, "run", lambda *a, **k: CP())
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def communicate(self, timeout=None):
+            return ("", "boom")
+
+    monkeypatch.setattr(tab_build.subprocess, "Popen", FakePopen)
     worker = tab_build.KeygenWorker()
     errors: list[str] = []
     worker.failed.connect(errors.append)

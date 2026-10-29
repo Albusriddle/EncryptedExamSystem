@@ -279,10 +279,10 @@
 5. 打包后可用命令行核对试卷内容：
 
 ```bash
-ExamAdmin\stub-template.exe --package 学生端.exe --student 2021001
+学生端.exe --package 学生端.exe --student 2021001
 ```
 
-（不带 `--master` 时需要在包内已嵌入密钥，正常打包都是这样。）
+正常打包已内嵌 K_manifest，学生端不需要 `--master`；无内嵌调试包可用 `--master-file` 或 `EXAM_MASTER`。
 
 ---
 

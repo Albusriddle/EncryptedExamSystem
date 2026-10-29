@@ -111,9 +111,12 @@ class VerifyWorker(QThread):
         self.master = master
         self.package = package
         self._stop = False
+        self._proc: subprocess.Popen[str] | None = None
 
     def cancel(self) -> None:
         self._stop = True
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()
 
     def run(self) -> None:  # noqa: D102 - QThread 约定
         try:
@@ -135,9 +138,27 @@ class VerifyWorker(QThread):
         env = dict(os.environ)
         env["EXAM_MASTER"] = self.master
         try:
-            out, err, code = run_tool(cmd, env)
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                **no_window_kwargs(),
+            )
+            try:
+                out, err = self._proc.communicate(timeout=120)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                out, err = self._proc.communicate()
+                return {"ok": False, "message": "校验工具超时（120 秒），已终止"}
+            code = self._proc.returncode
         except Exception as e:  # noqa: BLE001 - 子进程任何异常都要变成一行结果
             return {"ok": False, "message": f"调用校验工具失败：{e}"}
+        finally:
+            self._proc = None
         line = out.strip().splitlines()
         payload = {}
         if line:
@@ -473,8 +494,15 @@ class AnswersTab(QWidget):
             QMessageBox.warning(self, "主密钥不对", "主密钥应为 64 位十六进制。")
             return
         pkg_text = self.pkg.text().strip()
-        pkg = Path(pkg_text) if pkg_text else None
-        if pkg is not None and not pkg.is_file():
+        if not pkg_text:
+            QMessageBox.warning(
+                self,
+                "必须选择学生端包",
+                "校验必须指定本次考试的学生端 exe，才能核对答题卡是否绑定本包原卷。",
+            )
+            return
+        pkg = Path(pkg_text)
+        if not pkg.is_file():
             QMessageBox.warning(self, "找不到包", f"学生端包不存在：{pkg}")
             return
 

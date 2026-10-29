@@ -188,26 +188,44 @@ class KeygenWorker(QThread):
     done = Signal(str)
     failed = Signal(str)
 
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._proc: subprocess.Popen[str] | None = None
+
+    def cancel(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()
+
     def run(self) -> None:
         try:
-            cp = subprocess.run(
+            self._proc = subprocess.Popen(
                 [str(builder_exe()), "keygen"],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=30,
                 **no_window_kwargs(),
             )
+            try:
+                out, err = self._proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.communicate()
+                self.failed.emit("keygen 超时（30 秒），已终止")
+                return
+            code = self._proc.returncode
         except Exception as e:  # noqa: BLE001 - 展示给用户
             self.failed.emit(str(e))
             return
-        if cp.returncode != 0:
-            detail = (cp.stderr or cp.stdout or f"退出码 {cp.returncode}").strip()
-            self.failed.emit(detail[:300] or f"退出码 {cp.returncode}")
+        finally:
+            self._proc = None
+        if code != 0:
+            detail = (err or out or f"退出码 {code}").strip()
+            self.failed.emit(detail[:300] or f"退出码 {code}")
             return
         try:
-            self.done.emit(parse_keygen_output(cp.stdout))
+            self.done.emit(parse_keygen_output(out))
         except ValueError as e:
             self.failed.emit(str(e))
 
@@ -241,17 +259,22 @@ class BuildWorker(QThread):
     def run(self) -> None:  # noqa: D401 - QThread 约定
         # 命令拼装与密钥传递在 app/core/buildcmd.py 里（Qt-free、有单测）：
         # 主密钥**只走环境变量**，绝不进命令行。
-        cmd = build_command(
-            builder_exe=builder_exe(),
-            manifest=self.manifest_path,
-            banks_dir=self.banks_dir,
-            stub=self.stub,
-            out=self.out,
-            keyfile=self.keyfile,
-            pin_login=self.pin_login,
-            emit_pins=self.emit_pins,
-        )
-        env = build_env(self.master_hex)
+        try:
+            cmd = build_command(
+                builder_exe=builder_exe(),
+                manifest=self.manifest_path,
+                banks_dir=self.banks_dir,
+                stub=self.stub,
+                out=self.out,
+                keyfile=self.keyfile,
+                pin_login=self.pin_login,
+                emit_pins=self.emit_pins,
+            )
+            env = build_env(self.master_hex)
+        except Exception as e:  # noqa: BLE001 - 线程异常必须回传，否则 UI 卡死
+            self.master_hex = ""
+            self.done.emit(False, f"打包参数异常：{e}")
+            return
 
         try:
             self._proc = subprocess.Popen(
@@ -276,6 +299,10 @@ class BuildWorker(QThread):
                 # 安全兜底：万一某行带了 master（不应发生），打码后再显示
                 self.log.emit(_redact(line.rstrip(), self.master_hex))
             code = self._proc.wait()
+        except Exception as e:  # noqa: BLE001 - 读取线程异常也必须结束 UI 状态
+            self.master_hex = ""
+            self.done.emit(False, f"读取打包输出失败：{e}")
+            return
         finally:
             # master 用完立即丢弃：worker 对象会被 self.worker 一直持有，
             # 不清空就等于把主密钥留在内存里直到下次打包。
@@ -946,8 +973,10 @@ class BuildTab(QWidget):
         """Tab 销毁/窗口关闭前停止子进程，避免 QThread 析构崩溃。"""
         keygen = getattr(self, "_keygen", None)
         if keygen is not None and keygen.isRunning():
-            keygen.terminate()
-            keygen.wait(1000)
+            keygen.cancel()
+            if not keygen.wait(2000):
+                keygen.terminate()
+                keygen.wait(1000)
         if self.worker is not None and self.worker.isRunning():
             self._cancelled = True
             self.worker.cancel()

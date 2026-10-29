@@ -20,7 +20,7 @@
 //!
 //! - `EXAM_KEYFILE`：指向一个含 64 位 hex 的文件（K_manifest 的值）。
 //!   由 `exam-builder build --emit-keyfile <path>` 生成。
-//!   未设置时生成全零占位，`EMBEDDED = false`，运行时回退到 `--master`。
+//!   未设置时生成全零占位，`EMBEDDED = false`，运行时回退到 `EXAM_MASTER` / `--master-file`。
 
 use std::env;
 use std::fs;
@@ -73,11 +73,11 @@ fn main() {
     fs::write(&target, code).expect("写出 embedded_key.rs");
 
     if embedded {
-        println!("cargo:warning=已嵌入 K_manifest（学生端可免输 --master）");
+        println!("cargo:warning=已嵌入 K_manifest（学生端无需额外密钥）");
     } else {
         println!(
             "cargo:warning=未嵌入 K_manifest（EXAM_KEYFILE 未设置），\
-             学生端需用 --master 运行"
+             学生端需用 EXAM_MASTER 或 --master-file 运行"
         );
     }
 }

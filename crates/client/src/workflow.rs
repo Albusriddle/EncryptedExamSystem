@@ -119,7 +119,7 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
     let salt = hex::decode(&header.salt).context("header.salt hex 解码")?;
 
     // 3. 【时间门禁】必须在派生入场密钥之前。
-    let (session_id, net) = run_time_gate(&header, opts, student_id, &salt, pin.as_deref())?;
+    let (session_id, net) = run_time_gate(&header, opts)?;
     let session = header
         .sessions
         .iter()
@@ -127,7 +127,7 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
         .with_context(|| format!("内部错误：门禁返回了不存在的场次 {session_id}"))?;
 
     // 4. 解锁：Argon2id(学号, 场次, salt) → tag → 信封。
-    let unlocked = container::try_unlock_session_with_pin(
+    let first = container::try_unlock_session_with_pin(
         session,
         &header,
         blob_area,
@@ -135,8 +135,49 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
         &salt,
         pin.as_deref(),
     )
-    .context("解锁失败（包损坏或 KDF 参数异常）")?
-    .with_context(|| {
+    .context("解锁失败（包损坏或 KDF 参数异常）")?;
+    let mut unlocked = first;
+    if unlocked.is_none() {
+        // 重叠场次无交集时 decide_session 会取最小 session_id；若该场没有
+        // 这个学生，继续尝试其他仍在时间窗内的场次。门禁已在前面执行。
+        for other in &header.sessions {
+            if other.session_id == session_id {
+                continue;
+            }
+            if let Some(n) = &net {
+                let all: Vec<SessionWindow> = header
+                    .sessions
+                    .iter()
+                    .filter_map(|s| {
+                        let start = timegate::parse_rfc3339(&s.start)?;
+                        let end = timegate::parse_rfc3339(&s.end)?;
+                        Some(SessionWindow {
+                            session_id: s.session_id,
+                            start,
+                            end,
+                        })
+                    })
+                    .collect();
+                if timegate::decide_session(&all, Some(other.session_id), n.unix).is_err() {
+                    continue;
+                }
+            }
+            if let Some(found) = container::try_unlock_session_with_pin(
+                other,
+                &header,
+                blob_area,
+                student_id,
+                &salt,
+                pin.as_deref(),
+            )
+            .context("解锁失败（包损坏或 KDF 参数异常）")?
+            {
+                unlocked = Some(found);
+                break;
+            }
+        }
+    }
+    let unlocked = unlocked.with_context(|| {
         format!(
             "学号或 PIN 不正确，或学号 {student_id} 不在场次 {session_id} 的名单中。\n\
                  请确认学生端 exe 与 PIN 表来自同一次打包。"
@@ -219,24 +260,10 @@ fn fallback_network_time() -> anyhow::Result<timegate::NetworkTime> {
 fn run_time_gate(
     header: &Header,
     opts: &UnlockOpts,
-    student_id: u64,
-    salt: &[u8],
-    pin: Option<&str>,
 ) -> Result<(u32, Option<timegate::NetworkTime>)> {
-    // 只把“该生所属的场次”交给门禁。否则两个场次时间重叠但学生无交集时，
-    // decide_session 会取最小 session_id，导致学生被路由到不属于自己的场次。
-    // Header 只有信封标签，没有明文名单；用该生 entry key 的 tag 精确过滤。
     let windows: Vec<SessionWindow> = header
         .sessions
         .iter()
-        .filter(|s| {
-            common::crypto::session_entry_key(student_id, s.session_id, salt, header.kdf, pin)
-                .map(|k| {
-                    let tag = common::crypto::envelope_tag(&k);
-                    s.envelopes.iter().any(|e| e.tag == tag)
-                })
-                .unwrap_or(false)
-        })
         .filter_map(|s| {
             let start = timegate::parse_rfc3339(&s.start)?;
             let end = timegate::parse_rfc3339(&s.end)?;

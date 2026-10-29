@@ -218,7 +218,7 @@ class _FakeRunningWorker:
         pass
 
 
-def test_list_is_frozen_while_verifying(qapp, monkeypatch) -> None:
+def test_list_is_frozen_while_verifying(qapp, monkeypatch, tmp_path) -> None:
     import app.ui.tab_answers as mod
 
     monkeypatch.setattr(mod, "VerifyWorker", _FakeRunningWorker)
@@ -227,6 +227,9 @@ def test_list_is_frozen_while_verifying(qapp, monkeypatch) -> None:
         f = Path("a.eea")
         tab._append([f])
         tab.master.setText("11" * 32)
+        pkg = tmp_path / "StudentClient.exe"
+        pkg.write_bytes(b"")
+        tab.pkg.setText(str(pkg))
         tab._start()
 
         assert not tab.btn_add.isEnabled()
@@ -240,7 +243,7 @@ def test_list_is_frozen_while_verifying(qapp, monkeypatch) -> None:
         tab.deleteLater()
 
 
-def test_start_is_not_reentrant(qapp, monkeypatch) -> None:
+def test_start_is_not_reentrant(qapp, monkeypatch, tmp_path) -> None:
     import app.ui.tab_answers as mod
 
     monkeypatch.setattr(mod, "VerifyWorker", _FakeRunningWorker)
@@ -248,6 +251,9 @@ def test_start_is_not_reentrant(qapp, monkeypatch) -> None:
     try:
         tab._append([Path("a.eea")])
         tab.master.setText("11" * 32)
+        pkg = tmp_path / "StudentClient.exe"
+        pkg.write_bytes(b"")
+        tab.pkg.setText(str(pkg))
         tab._start()
         first = tab.worker
         tab._start()
@@ -257,7 +263,7 @@ def test_start_is_not_reentrant(qapp, monkeypatch) -> None:
         tab.deleteLater()
 
 
-def test_master_and_package_frozen_while_verifying(qapp, monkeypatch) -> None:
+def test_master_and_package_frozen_while_verifying(qapp, monkeypatch, tmp_path) -> None:
     import app.ui.tab_answers as mod
 
     monkeypatch.setattr(mod, "VerifyWorker", _FakeRunningWorker)
@@ -265,6 +271,9 @@ def test_master_and_package_frozen_while_verifying(qapp, monkeypatch) -> None:
     try:
         tab._append([Path("a.eea")])
         tab.master.setText("11" * 32)
+        pkg = tmp_path / "StudentClient.exe"
+        pkg.write_bytes(b"")
+        tab.pkg.setText(str(pkg))
         tab._start()
         assert not tab.master.isEnabled(), "校验中不能改主密钥"
         assert not tab.pkg.isEnabled(), "校验中不能换包"
