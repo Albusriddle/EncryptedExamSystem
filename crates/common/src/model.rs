@@ -292,6 +292,14 @@ pub enum StudentReviewPolicy {
     Free,
 }
 
+impl StudentReviewPolicy {
+    /// 学生端回看是否可用：必须同时已交卷且未到结束时间。
+    /// 教师端 `review-paper` 不受此函数限制。
+    pub fn allows_review(self, submitted: bool, expired: bool) -> bool {
+        matches!(self, Self::Free) && submitted && !expired
+    }
+}
+
 /// 顶层构建清单（管理端产出，builder 消费）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
@@ -336,6 +344,14 @@ pub enum ModelError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_policy_requires_free_submitted_and_not_expired() {
+        assert!(!StudentReviewPolicy::None.allows_review(true, false));
+        assert!(!StudentReviewPolicy::Free.allows_review(false, false));
+        assert!(StudentReviewPolicy::Free.allows_review(true, false));
+        assert!(!StudentReviewPolicy::Free.allows_review(true, true));
+    }
 
     fn q_with_options(n: usize) -> Question {
         Question {

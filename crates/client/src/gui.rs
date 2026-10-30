@@ -636,6 +636,40 @@ impl eframe::App for ExamApp {
                 return;
             }
 
+            let review_available = self.sheet.as_ref().is_some_and(|s| {
+                unlocked
+                    .student_review
+                    .allows_review(s.submitted, self.expired)
+            });
+            if self.review_mode && !review_available {
+                self.review_mode = false;
+            }
+
+            // 回看页固定工具栏：只读回看时可随时返回已交卷页。
+            // 放在 CentralPanel 之前，避免按钮随试卷滚动消失。
+            if self.review_mode {
+                let mut leave_review = false;
+                egui::TopBottomPanel::top("review_toolbar").show(ctx, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("← 返回已交卷页").clicked() {
+                            leave_review = true;
+                        }
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new("📖 只读回看 · 不能修改答案")
+                                .size(13.0)
+                                .color(egui::Color32::from_rgb(120, 150, 180)),
+                        );
+                    });
+                });
+                if leave_review || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.review_mode = false;
+                    self.confirm_submit = false;
+                    // 保留阅读位置，只清待跳转/矩形缓存。
+                    self.nav.reset_for_new_paper();
+                }
+            }
+
             // 提前交卷：直接进"已交卷"页，不要让学生继续盯着试卷
             #[allow(clippy::collapsible_if)]
             if let Some(at) = self
@@ -645,8 +679,6 @@ impl eframe::App for ExamApp {
                 .and_then(|s| s.submitted_unix)
             {
                 if !self.review_mode {
-                    let review_available =
-                        unlocked.student_review == common::model::StudentReviewPolicy::Free;
                     let mut review_requested = false;
                     egui::CentralPanel::default().show(ctx, |ui| {
                         render_locked(
@@ -730,7 +762,6 @@ impl eframe::App for ExamApp {
                         now,
                         sheet,
                         editable,
-                        self.review_mode,
                         &mut self.confirm_submit,
                         now_or_wall_clock(now),
                     );
@@ -1558,7 +1589,6 @@ fn render_paper(
     now: Option<u64>,
     sheet: &mut common::answer_sheet::AnswerSheet,
     editable: bool,
-    review_only: bool,
     confirm_submit: &mut bool,
     now_unix: u64,
 ) -> (egui::Vec2, bool) {
@@ -1567,14 +1597,6 @@ fn render_paper(
     let viewport_top = ui.clip_rect().top();
     let out = egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(8.0);
-        if review_only {
-            ui.label(
-                egui::RichText::new("📖 只读回看 · 不能修改答案")
-                    .size(13.0)
-                    .color(egui::Color32::from_rgb(120, 150, 180)),
-            );
-            ui.add_space(4.0);
-        }
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(format!("学号 {}", unlocked.student_id)).strong());
             ui.separator();
