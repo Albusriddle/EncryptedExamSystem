@@ -216,35 +216,42 @@ fn verify_answer_sheet(
         }
     };
 
-    // L3：与包交叉校验
-    let mut binding: Option<bool> = None;
-    if let Some(pkg) = package {
-        match check_binding(pkg, &sheet, &k_manifest, &master) {
-            Ok(true) => binding = Some(true),
-            Ok(false) => {
-                emit_result(
-                    as_json,
-                    false,
-                    "绑定校验失败：试卷指纹或题目列表与包内数据不一致",
-                    Some(&sheet),
-                    Some(false),
-                );
-                return Ok(4);
-            }
-            Err(e) => {
-                // 包用不了（不是同一个 master 的包、包里没这个场次/学号）与
-                // "指纹不一致"是两回事：前者是工具/环境问题，后者才是真的对不上。
-                emit_result(
-                    as_json,
-                    false,
-                    &format!("无法完成绑定校验：{e}"),
-                    Some(&sheet),
-                    None,
-                );
-                return Ok(5);
-            }
+    // L3：与包交叉校验。必须提供包；否则无法证明答题卡属于本包原卷。
+    let Some(pkg) = package else {
+        emit_result(
+            as_json,
+            false,
+            "verify-answer-sheet 必须指定 --package：没有包就无法校验答题卡与原卷的绑定",
+            Some(&sheet),
+            None,
+        );
+        return Ok(5);
+    };
+    let binding = match check_binding(pkg, &sheet, &k_manifest, &master) {
+        Ok(true) => Some(true),
+        Ok(false) => {
+            emit_result(
+                as_json,
+                false,
+                "绑定校验失败：试卷指纹或题目列表与包内数据不一致",
+                Some(&sheet),
+                Some(false),
+            );
+            return Ok(4);
         }
-    }
+        Err(e) => {
+            // 包用不了（不是同一个 master 的包、包里没这个场次/学号）与
+            // "指纹不一致"是两回事：前者是工具/环境问题，后者才是真的对不上。
+            emit_result(
+                as_json,
+                false,
+                &format!("无法完成绑定校验：{e}"),
+                Some(&sheet),
+                None,
+            );
+            return Ok(5);
+        }
+    };
 
     let summary = format!(
         "答题卡 {}\n  学号 {}\n  场次 {}\n  题目 {}（已答 {}，未答 {}）\n  试卷指纹 {}\n  交卷 {}\n  解密 ✓  结构 ✓{}",
@@ -1222,14 +1229,14 @@ mod tests {
     }
 
     #[test]
-    fn verify_sheet_without_package_skips_binding() {
+    fn verify_sheet_without_package_is_rejected() {
         let dir = tmpdir("no-pkg");
         let (pkg, k_manifest) = make_package(&dir, &master_hex(), "p.exe");
         let sheet = make_sheet(&pkg, &k_manifest);
         let file = dir.join("answers-2021001-1.eea");
         write_atomic(&file, &seal(&k_manifest, &sheet).unwrap()).unwrap();
         let code = verify_answer_sheet(&file, true, None, Some(master_hex()), None).unwrap();
-        assert_eq!(code, 0, "不给包时只做 L1+L2");
+        assert_eq!(code, 5, "不给包时必须拒绝，不能把未校验绑定当通过");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

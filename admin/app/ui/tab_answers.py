@@ -176,6 +176,31 @@ class VerifyWorker(QThread):
         return payload
 
 
+class ReviewWorker(QThread):
+    """后台运行 exam-builder review-paper，避免阻塞 GUI。"""
+
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, cmd: list[str], env: dict[str, str]) -> None:
+        super().__init__()
+        self.cmd = cmd
+        self.env = env
+
+    def run(self) -> None:
+        try:
+            out, err, code = run_tool(self.cmd, self.env)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(f"调用 review-paper 失败：{e}")
+            return
+        finally:
+            self.env = {}
+        if code != 0:
+            self.failed.emit((err or out).strip()[:1000] or f"退出码 {code}")
+            return
+        self.done.emit(out)
+
+
 class AnswersTab(QWidget):
     """答题卡列表 + 校验 + 自动判分 + 导出。"""
 
@@ -185,6 +210,7 @@ class AnswersTab(QWidget):
         self.files: list[Path] = []
         self.results: dict[str, dict] = {}
         self.worker: VerifyWorker | None = None
+        self._review_worker: ReviewWorker | None = None
         #: 判分明细（ItemResult），跨学生展平
         self.grade_rows: list = []
 
@@ -567,6 +593,9 @@ class AnswersTab(QWidget):
                 # subprocess.run 本身不可中断；兜底终止线程，避免 Qt abort。
                 self.worker.terminate()
                 self.worker.wait(1000)
+        if self._review_worker is not None and self._review_worker.isRunning():
+            self._review_worker.terminate()
+            self._review_worker.wait(1000)
 
     def _on_all(self) -> None:
         self._set_editing_enabled(True)
@@ -643,6 +672,9 @@ class AnswersTab(QWidget):
         )
         if not out:
             return
+        if self._review_worker is not None and self._review_worker.isRunning():
+            QMessageBox.information(self, "正在生成", "上一次原卷导出还未完成。")
+            return
         cmd = [
             str(builder_exe()),
             "review-paper",
@@ -655,16 +687,25 @@ class AnswersTab(QWidget):
         ]
         env = dict(os.environ)
         env["EXAM_MASTER"] = master
+        self.status.setText("正在生成原卷…")
+        self._review_worker = ReviewWorker(cmd, env)
+        self._review_worker.done.connect(lambda stdout: self._on_review_done(stdout, Path(out)))
+        self._review_worker.failed.connect(self._on_review_failed)
+        self._review_worker.start()
+
+    def _on_review_done(self, stdout: str, out: Path) -> None:
         try:
-            stdout, stderr, code = run_tool(cmd, env)
-            if code != 0:
-                QMessageBox.critical(self, "查看原卷失败", (stderr or stdout).strip()[:1000])
-                return
-            Path(out).write_text(stdout, encoding="utf-8")
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "查看原卷失败", str(e))
+            out.write_text(stdout, encoding="utf-8")
+        except OSError as e:
+            self.status.setText("原卷导出失败")
+            QMessageBox.critical(self, "查看原卷失败", f"写入 {out} 失败：{e}")
             return
+        self.status.setText("原卷已导出")
         QMessageBox.information(self, "原卷已导出", f"已保存：\n{out}")
+
+    def _on_review_failed(self, message: str) -> None:
+        self.status.setText("原卷导出失败")
+        QMessageBox.critical(self, "查看原卷失败", message)
 
     def _backup_receipt_key(self) -> None:
         from app.core.receipt import export_key, fingerprint, load_or_create_key

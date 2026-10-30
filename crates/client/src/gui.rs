@@ -165,7 +165,7 @@ pub struct ExamApp {
     clock: Option<SyncedClock>,
     /// 是否已到结束时刻（到点后锁定试卷）
     expired: bool,
-    /// 教师授权后进入“交卷后只读回看”模式。
+    /// 包策略为 free、已交卷且未到结束时的只读回看模式。
     review_mode: bool,
 
     /// 是否需要在下一帧把焦点交给学号输入框。

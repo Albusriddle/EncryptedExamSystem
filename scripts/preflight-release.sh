@@ -203,6 +203,20 @@ for f in LICENSE THIRD-PARTY-NOTICES.md licenses/LGPL-3.0.txt licenses/GPL-3.0.t
   if [ -f "$ROOT/$f" ]; then ok "存在 $f"; else bad "缺少 $f（发布包必须带上）"; fi
 done
 
+# ---------------------------------------------------------------- 8. 管理端测试
+
+head_ "8. 管理端测试"
+if command -v uv >/dev/null 2>&1 && [ -d "$ROOT/admin" ]; then
+  if (cd "$ROOT" && bash scripts/run-admin-tests.sh >/tmp/ees-preflight-pytest.log 2>&1); then
+    ok "pytest 全部通过"
+  else
+    bad "pytest 失败：$(tail -3 /tmp/ees-preflight-pytest.log | tr '\n' ' ')"
+  fi
+  rm -f /tmp/ees-preflight-pytest.log
+else
+  echo "  （跳过：没有 uv/admin）"
+fi
+
 # ---------------------------------------------------------------- 汇总
 
 echo
