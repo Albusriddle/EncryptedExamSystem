@@ -105,3 +105,12 @@ def test_manifest_short_salt() -> None:
 def test_manifest_duplicate_session_ids() -> None:
     with pytest.raises(ValueError, match="场次编号重复"):
         Manifest(salt="00" * 16, sessions=[_session(), _session()])
+
+
+def test_question_qtype_accepts_code_and_rejects_typo() -> None:
+    from app.core.models import Question
+
+    q = Question(id="c1", type="code", stem="s")
+    assert q.qtype == "code"
+    with pytest.raises(ValueError, match="不支持的题型"):
+        Question(id="c2", type="Code", stem="s")

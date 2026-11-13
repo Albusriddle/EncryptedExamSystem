@@ -40,10 +40,12 @@ use crate::model::Session;
 pub const MAGIC: &[u8; 8] = b"EXAMPKG3";
 /// 尾部魔数，用于从 exe 末尾定位 payload。
 pub const MAGIC_TAIL: &[u8; 8] = b"EXAMTAIL";
-/// 当前格式版本。v5 时间令牌、v6 大题、v7 大题下的部分。
-pub const VERSION: u32 = 7;
-/// v3–v7 可读；v7 仅用于 parts 非空的包（旧客户端最高 v6）。
+/// 当前格式版本。v5 时间令牌、v6 大题、v7 大题下的部分、v8 代码题。
+pub const VERSION: u32 = 8;
+/// v3–v8 可读；旧客户端最高 v7，因此含代码题的 v8 包会被旧客户端明确拒绝。
 pub const MIN_SUPPORTED_VERSION: u32 = 3;
+/// 无代码题时继续使用的最高旧版本；避免把普通包全部挡在门外。
+const LEGACY_HIGH_VERSION: u32 = 7;
 
 /// 密钥区魔数：标记"这个包内嵌了 K_manifest"。
 pub const KEY_MAGIC: &[u8; 8] = b"EXAMKEY1";
@@ -514,8 +516,14 @@ pub fn build_payload_with_options(
     let has_parts = sessions
         .iter()
         .any(|s| s.sections.iter().any(|sec| !sec.parts.is_empty()));
-    let version = if has_parts {
+    // 含代码题时升到 v8，旧客户端会明确拒绝而不是“题目空白”。
+    let has_code = clean_banks
+        .iter()
+        .any(|b| b.questions.iter().any(|q| q.qtype == "code"));
+    let version = if has_code {
         VERSION
+    } else if has_parts {
+        LEGACY_HIGH_VERSION
     } else if has_sections {
         6
     } else if time.is_some_and(|t| t.mode != "off") {
@@ -1407,6 +1415,21 @@ mod tests {
         assert_eq!(u32::from_le_bytes(payload[8..12].try_into().unwrap()), 5);
         let (header, _) = parse_header(&payload, &k_manifest()).unwrap();
         assert_eq!(header.time.mode, "require");
+    }
+
+    #[test]
+    fn code_question_bumps_payload_to_v8() {
+        let mut b = bank("math", 5);
+        b.questions[0].qtype = "code".into();
+        b.questions[0].options.clear();
+        b.questions[0].body = Default::default();
+        let sessions = vec![session(1, vec![2021001])];
+        let payload = build_payload(&master(), &[b], &sessions, SALT, kdf(), true).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(payload[8..12].try_into().unwrap()),
+            8,
+            "含 code 题的包必须用 v8，旧客户端才会明确拒绝"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 本文是**题库文件的唯一格式说明**。教师手写题库、或让其它系统导出题库时，照这份文档抄即可。
 
-> 配套的可运行样例：`banks/demo/demo-showcase.json`（四种题型各一道，可直接导入）。
+> 配套的可运行样例：`banks/demo/demo-showcase.json`（覆盖四种题型，可直接导入；`code` 题需按本文示例单独创建）。
 
 ---
 
@@ -190,7 +190,7 @@ open("answer.py", "w", encoding="utf-8", newline="").write(code)
 ### 1.4 完整示例
 
 见 `banks/demo/demo-showcase.json`：四道题分别用了 `options`（单选）、`options`（多选）、
-`template`、`code`。导入它应当看到「演示题库 · 四种题型，4 题」。
+`template`、`code`。导入它应当看到「演示题库 · 四种题型，4 题」；演示样例不含代码简答题。
 
 ---
 

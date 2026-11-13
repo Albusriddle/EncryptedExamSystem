@@ -81,6 +81,15 @@ class Question(BaseModel):
 
     model_config = {"populate_by_name": True}
 
+    @field_validator("qtype")
+    @classmethod
+    def _check_qtype(cls, v: str) -> str:
+        allowed = {"single", "multiple", "judge", "fill", "fix", "essay", "code"}
+        text = (v or "").strip()
+        if text not in allowed:
+            raise ValueError(f"不支持的题型：{v!r}；支持 {sorted(allowed)}")
+        return text
+
 
 #: Windows 保留设备名：即使带了扩展名也不能用作文件名。
 _WIN_RESERVED = {
