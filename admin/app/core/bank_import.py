@@ -217,7 +217,8 @@ def convert_pair(
     qtype = str(questions_payload.get("type", ""))
     if qtype not in _VERDICT_KINDS:
         raise BankImportError(
-            f"{q_name}: 不支持的题型 type={qtype!r}（支持 choice/fill_blank/fix_code）"
+            f"{q_name}: 不支持的题型 type={qtype!r}（外部格式支持 choice/fill_blank/fix_code；"
+            "代码简答题 code 请使用原生 JSON）"
         )
     if answers_payload.get("type") != qtype:
         raise BankImportError(

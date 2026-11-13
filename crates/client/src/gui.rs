@@ -2145,6 +2145,44 @@ mod tests {
     }
 
     #[test]
+    fn code_input_renders_without_panic_and_keeps_answer() {
+        let item = common::picker::PaperItem {
+            id: "c1".into(),
+            qtype: "code".into(),
+            stem: "请实现".into(),
+            options: vec![],
+            body: common::model::QuestionBody::Text,
+            score: 10,
+        };
+        let code = "def f():\n\treturn 1  \n";
+        let mut sheet = common::answer_sheet::AnswerSheet {
+            version: 1,
+            student_id: 1,
+            session_id: 1,
+            paper_fingerprint: "0".repeat(64),
+            qids: vec!["c1".into()],
+            answers: vec![Some(code.to_string())],
+            updated_unix: 0,
+            submitted: false,
+            submitted_unix: None,
+        };
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_answer_inputs(ui, &item, &mut sheet, 0, true, 0);
+            });
+        });
+        assert_eq!(sheet.answers[0].as_deref(), Some(code));
+    }
+
+    #[test]
     fn essay_stores_multiline_text_in_sheet() {
         let mut sheet = common::answer_sheet::AnswerSheet {
             version: 1,

@@ -349,7 +349,9 @@ pub enum ModelError {
         qid: String,
         count: usize,
     },
-    #[error("题库 {exam_id} 的题 {qid} 使用了未知题型：{qtype}")]
+    #[error(
+        "题库 {exam_id} 的题 {qid} 使用了未知题型：{qtype}；支持 single/multiple/judge/fill/fix/essay/code"
+    )]
     UnknownQuestionType {
         exam_id: String,
         qid: String,
