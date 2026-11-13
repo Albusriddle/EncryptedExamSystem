@@ -18,11 +18,11 @@ from app.core.models import Question
 #: 默认判选择/判断题（填空/改错常需要人工复核）
 DEFAULT_TYPES = frozenset({"single", "multiple", "judge"})
 
-#: 所有支持自动判分的题型（essay 只能人工判）
+#: 所有支持自动判分的题型（essay/code 只能人工判）
 SUPPORTED_TYPES = ("single", "multiple", "judge", "fill", "fix")
 
-#: 成绩表里题型的固定顺序（含 essay）
-TYPE_ORDER = ("single", "multiple", "judge", "fill", "fix", "essay")
+#: 成绩表里题型的固定顺序（含人工题型 essay/code）
+TYPE_ORDER = ("single", "multiple", "judge", "fill", "fix", "essay", "code")
 
 TYPE_LABELS = {
     "single": "单选题",
@@ -31,6 +31,7 @@ TYPE_LABELS = {
     "fill": "填空题",
     "fix": "改错题",
     "essay": "问答题",
+    "code": "代码简答题",
 }
 
 
@@ -155,8 +156,8 @@ def grade_question(q: Question, raw: str | None, policy: Policy) -> tuple[int, s
 
     blank = raw is None or (isinstance(raw, str) and raw.strip() == "")
 
-    if qtype == "essay":
-        # 问答题只能人工判：答案原样保留，交给老师打分
+    if qtype in ("essay", "code"):
+        # 问答题/代码简答题只能人工判：答案原样保留，交给老师打分
         return 0, "unjudged", "" if raw is None else str(raw), ""
 
     if qtype in ("single", "multiple", "judge"):

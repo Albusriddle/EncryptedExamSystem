@@ -187,3 +187,21 @@ def test_score_table_counts_manual_zero() -> None:
     assert rows[0].judged == 1 and rows[0].unjudged == 0
     assert rows[0].adjusted == 1, "人工给的 0 分也算人工调整"
     assert rows[0].total_score == 0 and rows[0].total_max == 10
+
+
+def test_code_question_is_unjudged_but_keeps_text() -> None:
+    from app.core.grading import TYPE_LABELS, TYPE_ORDER, grade_sheet
+
+    q = _q("code", {"kind": "text", "answer": None}, score=10)
+    code = "def f():\n\treturn 1  \n"
+    results = grade_sheet(
+        {"c1": q},
+        {"student_id": 1, "session_id": 1, "qids": ["c1"], "answers": [code]},
+        P(),
+    )
+    r = results[0]
+    assert r.status == "unjudged"
+    assert r.max_score == 10
+    assert r.student == code
+    assert TYPE_LABELS["code"] == "代码简答题"
+    assert "code" in TYPE_ORDER

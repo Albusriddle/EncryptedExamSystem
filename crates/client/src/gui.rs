@@ -1097,21 +1097,39 @@ fn render_answer_inputs(
             }
         }
         QuestionBody::Text => {
-            // 问答题：多行文本作答（纯展示题不给输入框）。
-            if item.qtype == "essay" {
+            // 问答题/代码简答题：多行文本作答（纯展示题不给输入框）。
+            if item.qtype == "essay" || item.qtype == "code" {
+                let is_code = item.qtype == "code";
                 let mut text = sheet.answers[idx].clone().unwrap_or_default();
-                let resp = ui.add_enabled(
-                    editable,
-                    egui::TextEdit::multiline(&mut text)
-                        .desired_rows(6)
-                        .desired_width(ui.available_width())
-                        .hint_text("请在此作答；本题由老师人工评阅"),
-                );
-                if resp.changed() && sheet.set_answer(idx, essay_value(&text), now_unix) {
-                    changed = true;
+                let mut edit = egui::TextEdit::multiline(&mut text)
+                    .desired_rows(if is_code { 10 } else { 6 })
+                    .desired_width(ui.available_width())
+                    .hint_text(if is_code {
+                        "请粘贴完整代码，保留缩进；本题由老师人工评阅"
+                    } else {
+                        "请在此作答；本题由老师人工评阅"
+                    });
+                if is_code {
+                    edit = edit.code_editor();
+                }
+                let resp = ui.add_enabled(editable, edit);
+                let value = if is_code {
+                    code_value(&text)
+                } else {
+                    Ok(essay_value(&text))
+                };
+                match value {
+                    Ok(value) => {
+                        if resp.changed() && sheet.set_answer(idx, value, now_unix) {
+                            changed = true;
+                        }
+                    }
+                    Err(message) => {
+                        ui.colored_label(egui::Color32::from_rgb(200, 60, 60), message);
+                    }
                 }
                 ui.label(
-                    egui::RichText::new(format!("{} 字", text.chars().count()))
+                    egui::RichText::new(format!("{} 字符", text.chars().count()))
                         .size(12.0)
                         .color(egui::Color32::GRAY),
                 );
@@ -1132,6 +1150,23 @@ fn essay_value(text: &str) -> Option<String> {
     } else {
         Some(capped)
     }
+}
+
+/// 代码简答题答案上限（字节）。只防超大 payload；超限必须报错，不能截断。
+const CODE_MAX_BYTES: usize = 256 * 1024;
+
+/// 代码答案原样保存：不 trim、不替换缩进、不截断。
+fn code_value(text: &str) -> Result<Option<String>, String> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if text.len() > CODE_MAX_BYTES {
+        return Err(format!(
+            "代码超过 {} KiB，未保存；请删减后再试",
+            CODE_MAX_BYTES / 1024
+        ));
+    }
+    Ok(Some(text.to_string()))
 }
 
 /// 空位序号：0→①，1→② …（超过 10 个空时退化为 ①+数字）
@@ -2094,6 +2129,15 @@ mod tests {
         let long = "字".repeat(ESSAY_MAX_CHARS + 10);
         let v = essay_value(&long).expect("非空");
         assert_eq!(v.chars().count(), ESSAY_MAX_CHARS);
+    }
+
+    #[test]
+    fn code_value_preserves_indentation_and_trailing_spaces() {
+        let code = "def f():\n\treturn 1  \n";
+        assert_eq!(code_value(code), Ok(Some(code.to_string())));
+        assert_eq!(code_value(""), Ok(None));
+        let too_long = "x".repeat(CODE_MAX_BYTES + 1);
+        assert!(code_value(&too_long).is_err());
     }
 
     #[test]

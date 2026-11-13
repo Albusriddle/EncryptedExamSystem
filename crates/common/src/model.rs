@@ -48,7 +48,7 @@ pub enum QuestionBody {
 pub struct Question {
     /// 题库内唯一 ID。
     pub id: String,
-    /// 题型：single / multiple / judge / fill / essay。
+    /// 题型：single / multiple / judge / fill / fix / essay / code。
     #[serde(rename = "type")]
     pub qtype: String,
     /// 题干。

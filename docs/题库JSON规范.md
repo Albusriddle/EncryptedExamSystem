@@ -42,7 +42,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `id` | 字符串 | 是 | 题库内唯一。**试卷指纹只哈希 id**，改 id 等于换了一份卷子 |
-| `type` | 字符串 | 是 | `single` 单选 / `multiple` 多选 / `judge` 判断 / `fill` 填空（旧称补全） / `fix` 改错 / `essay` 问答（人工判分） |
+| `type` | 字符串 | 是 | `single` 单选 / `multiple` 多选 / `judge` 判断 / `fill` 填空（旧称补全） / `fix` 改错 / `essay` 问答（人工判分） / `code` 代码简答（人工判分） |
 | `stem` | 字符串 | 是 | 题干，支持换行 |
 | `body` | 对象 | 否 | 正文形态，见 1.3；**省略时按旧格式用 `options` 渲染** |
 | `options` | 字符串数组 | 否 | 旧格式选项（只有文本）。新写题库请用 `body` |
@@ -61,6 +61,39 @@
 
 ```json
 { "kind": "text" }
+```
+
+#### 代码简答题（`type: "code"`，`body` 仍用 `text`）
+
+代码简答题是**独立题型**，题干可以包含 Markdown 围栏代码；学生端在题干下方
+提供等宽多行输入框，答案原样保存，**不自动判分**。
+
+```json
+{
+  "id": "code-1",
+  "type": "code",
+  "stem": "请实现 `reverse(s)`：\n\n```python\ndef reverse(s):\n    ...\n```",
+  "body": { "kind": "text" },
+  "score": 10
+}
+```
+
+- **不要**写成 `body.kind = "code"`；`code` body 是“改错题逐行代码”，不是代码作答；
+- `answer` 可省略或为 `null`；代码题由教师人工评分；
+- 学生端要求 **v1.1.0+**；
+- 答案原样保存在答题卡 `answers` 字符串里，换行、缩进、行尾空格不做 trim；
+- 解密 JSON 后可直接提取：
+
+```bash
+exam-builder verify-answer-sheet answers-2021001-1.eea \
+  --package 学生端.exe --master <master> --json > result.json
+```
+
+```python
+import json
+data = json.load(open("result.json", encoding="utf-8"))
+code = data["sheet"]["answers"][0]
+open("answer.py", "w", encoding="utf-8", newline="").write(code)
 ```
 
 #### `options` —— 选择题

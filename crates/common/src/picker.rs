@@ -21,7 +21,7 @@ use crate::model::ExamBank;
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PaperItem {
     pub id: String,
-    /// 题型：single / multiple / judge / fill / essay
+    /// 题型：single / multiple / judge / fill / fix / essay / code
     pub qtype: String,
     pub stem: String,
     /// 旧格式的纯文本选项；新格式走 `body`。

@@ -943,7 +943,7 @@ class AnswersTab(QWidget):
 
         问答题是人工判分，answer 为空是正常状态，不能算"缺答案"。
         """
-        if q.qtype == "essay":
+        if q.qtype in ("essay", "code"):
             return False
         if q.answer in (None, {}, []):
             return True
@@ -981,13 +981,15 @@ class AnswersTab(QWidget):
                 elif self._answer_missing(q):
                     missing_answer.add(str(qid))
 
-        essay_count = sum(1 for q in bank.values() if q.qtype == "essay")
+        manual_count = sum(1 for q in bank.values() if q.qtype in ("essay", "code"))
         lines = [
             f"答题卡：{len(sheets)} 张",
             f"题库题目：{len(bank)} 道",
         ]
-        if essay_count:
-            lines.append(f"ℹ 问答题：{essay_count} 道（不自动判分，生成成绩后双击得分人工打分）")
+        if manual_count:
+            lines.append(
+                f"ℹ 问答题/代码简答题：{manual_count} 道（不自动判分，生成成绩后双击得分人工打分）"
+            )
         if unsubmitted:
             lines.append(f"⚠ 未交卷：{unsubmitted} 张（仍可判分，汇总里会标出）")
         if unbound:
@@ -1151,7 +1153,7 @@ class AnswersTab(QWidget):
     def _status_text(r) -> str:
         if r.manual_score is not None and r.status in ("unjudged", "unknown"):
             return "人工判分"
-        if r.status == "unjudged" and r.qtype == "essay":
+        if r.status == "unjudged" and r.qtype in ("essay", "code"):
             return "待人工判分"
         return r.status
 
