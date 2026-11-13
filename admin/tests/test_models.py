@@ -114,3 +114,11 @@ def test_question_qtype_accepts_code_and_rejects_typo() -> None:
     assert q.qtype == "code"
     with pytest.raises(ValueError, match="不支持的题型"):
         Question(id="c2", type="Code", stem="s")
+
+
+def test_question_qtype_migrates_legacy_aliases() -> None:
+    from app.core.models import Question
+
+    assert Question(id="m1", type="multi", stem="s").qtype == "multiple"
+    assert Question(id="m2", type="blank", stem="s").qtype == "fill"
+    assert Question(id="m3", type="fix_code", stem="s").qtype == "fix"

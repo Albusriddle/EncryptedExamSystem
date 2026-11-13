@@ -1102,6 +1102,7 @@ fn render_answer_inputs(
                 let is_code = item.qtype == "code";
                 let mut text = sheet.answers[idx].clone().unwrap_or_default();
                 let mut edit = egui::TextEdit::multiline(&mut text)
+                    .id(ui.make_persistent_id(("answer_editor", idx)))
                     .desired_rows(if is_code { 10 } else { 6 })
                     .desired_width(ui.available_width())
                     .hint_text(if is_code {
@@ -1128,8 +1129,18 @@ fn render_answer_inputs(
                         ui.colored_label(egui::Color32::from_rgb(200, 60, 60), message);
                     }
                 }
+                let counter = if is_code {
+                    format!(
+                        "{} 字符 · 已用 {} / {} KiB",
+                        text.chars().count(),
+                        text.len() / 1024,
+                        CODE_MAX_BYTES / 1024
+                    )
+                } else {
+                    format!("{} 字符", text.chars().count())
+                };
                 ui.label(
-                    egui::RichText::new(format!("{} 字符", text.chars().count()))
+                    egui::RichText::new(counter)
                         .size(12.0)
                         .color(egui::Color32::GRAY),
                 );
@@ -1157,7 +1168,7 @@ const CODE_MAX_BYTES: usize = 256 * 1024;
 
 /// 代码答案原样保存：不 trim、不替换缩进、不截断。
 fn code_value(text: &str) -> Result<Option<String>, String> {
-    if text.is_empty() {
+    if text.trim().is_empty() {
         return Ok(None);
     }
     if text.len() > CODE_MAX_BYTES {
@@ -2140,6 +2151,7 @@ mod tests {
             Ok(Some("a\r\n\tb  \r\n".to_string()))
         );
         assert_eq!(code_value(""), Ok(None));
+        assert_eq!(code_value(" \n\t "), Ok(None), "纯空白代码视为未作答");
         let too_long = "x".repeat(CODE_MAX_BYTES + 1);
         assert!(code_value(&too_long).is_err());
     }
@@ -2180,6 +2192,56 @@ mod tests {
             });
         });
         assert_eq!(sheet.answers[0].as_deref(), Some(code));
+    }
+
+    #[test]
+    fn code_input_accepts_text_event() {
+        let item = common::picker::PaperItem {
+            id: "c1".into(),
+            qtype: "code".into(),
+            stem: "请实现".into(),
+            options: vec![],
+            body: common::model::QuestionBody::Text,
+            score: 10,
+        };
+        let mut sheet = common::answer_sheet::AnswerSheet {
+            version: 1,
+            student_id: 1,
+            session_id: 1,
+            paper_fingerprint: "0".repeat(64),
+            qids: vec!["c1".into()],
+            answers: vec![None],
+            updated_unix: 0,
+            submitted: false,
+            submitted_unix: None,
+        };
+        let ctx = egui::Context::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let id = ui.make_persistent_id(("answer_editor", 0));
+                ui.memory_mut(|m| m.request_focus(id));
+                render_answer_inputs(ui, &item, &mut sheet, 0, true, 0);
+            });
+        });
+        let mut typed = input();
+        typed.events.push(egui::Event::Text("abc".into()));
+        let _ = ctx.run(typed, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_answer_inputs(ui, &item, &mut sheet, 0, true, 1);
+            });
+        });
+        assert_eq!(
+            sheet.answers[0].as_deref(),
+            Some("abc"),
+            "真实 TextEdit 输入应写入 code 答案"
+        );
     }
 
     #[test]

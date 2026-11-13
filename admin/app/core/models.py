@@ -85,9 +85,14 @@ class Question(BaseModel):
     @classmethod
     def _check_qtype(cls, v: str) -> str:
         allowed = {"single", "multiple", "judge", "fill", "fix", "essay", "code"}
+        aliases = {"multi": "multiple", "blank": "fill", "blanks": "fill", "fix_code": "fix"}
         text = (v or "").strip()
+        text = aliases.get(text, text)
         if text not in allowed:
-            raise ValueError(f"不支持的题型：{v!r}；支持 {sorted(allowed)}")
+            raise ValueError(
+                f"不支持的题型：{v!r}；支持 {sorted(allowed)}；"
+                "旧别名 multi→multiple、blank→fill、fix_code→fix"
+            )
         return text
 
 

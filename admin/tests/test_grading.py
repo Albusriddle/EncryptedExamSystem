@@ -205,3 +205,18 @@ def test_code_question_is_unjudged_but_keeps_text() -> None:
     assert r.student == code
     assert TYPE_LABELS["code"] == "代码简答题"
     assert "code" in TYPE_ORDER
+
+
+def test_code_manual_score_counts_as_graded() -> None:
+    from app.core.grading import grade_sheet, is_graded
+
+    q = _q("code", {"kind": "text", "answer": None}, score=10)
+    results = grade_sheet(
+        {"c1": q},
+        {"student_id": 1, "session_id": 1, "qids": ["c1"], "answers": ["def f(): pass"]},
+        P(),
+    )
+    assert not is_graded(results[0])
+    results[0].manual_score = 8
+    assert is_graded(results[0])
+    assert results[0].final_score == 8
