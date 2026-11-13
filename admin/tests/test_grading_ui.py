@@ -230,3 +230,21 @@ def test_zero_score_on_unjudged_question_is_recorded(tab, monkeypatch) -> None:
     from app.core.grading import is_graded
 
     assert is_graded(row), "人工给的 0 分应计入已判"
+
+
+def test_code_question_status_is_waiting_for_manual_score() -> None:
+    from app.core.grading import ItemResult
+
+    r = ItemResult(
+        student_id=1,
+        session_id=1,
+        seq=1,
+        qid="c1",
+        qtype="code",
+        student="def f():\n\treturn 1",
+        expected="",
+        score=0,
+        max_score=10,
+        status="unjudged",
+    )
+    assert AnswersTab._status_text(r) == "待人工判分"

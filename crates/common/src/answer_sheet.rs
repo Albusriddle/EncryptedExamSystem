@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn code_answer_roundtrip_preserves_indentation_and_newlines() {
         let mut s = sheet();
-        let code = "def f(x):\n\tif x:\n\t\treturn \"a\\tb\"  \n\n";
+        let code = "def f(x):\r\n\tif x:\r\n\t\treturn \"a\\tb\"  \r\n\r\n";
         s.set_answer(0, Some(code.to_string()), 1003);
         let k = [9u8; 32];
         let bytes = seal(&k, &s).unwrap();

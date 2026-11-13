@@ -2135,6 +2135,10 @@ mod tests {
     fn code_value_preserves_indentation_and_trailing_spaces() {
         let code = "def f():\n\treturn 1  \n";
         assert_eq!(code_value(code), Ok(Some(code.to_string())));
+        assert_eq!(
+            code_value("a\r\n\tb  \r\n"),
+            Ok(Some("a\r\n\tb  \r\n".to_string()))
+        );
         assert_eq!(code_value(""), Ok(None));
         let too_long = "x".repeat(CODE_MAX_BYTES + 1);
         assert!(code_value(&too_long).is_err());

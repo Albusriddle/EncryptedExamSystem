@@ -125,6 +125,16 @@ impl ExamBank {
         }
         let mut seen = std::collections::HashSet::new();
         for q in &self.questions {
+            let allowed = [
+                "single", "multiple", "judge", "fill", "fix", "essay", "code",
+            ];
+            if !allowed.contains(&q.qtype.as_str()) {
+                return Err(crate::model::ModelError::UnknownQuestionType {
+                    exam_id: self.exam_id.clone(),
+                    qid: q.id.clone(),
+                    qtype: q.qtype.clone(),
+                });
+            }
             if !seen.insert(&q.id) {
                 return Err(crate::model::ModelError::DuplicateQuestionId {
                     exam_id: self.exam_id.clone(),
@@ -339,11 +349,42 @@ pub enum ModelError {
         qid: String,
         count: usize,
     },
+    #[error("题库 {exam_id} 的题 {qid} 使用了未知题型：{qtype}")]
+    UnknownQuestionType {
+        exam_id: String,
+        qid: String,
+        qtype: String,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_question_type_is_rejected() {
+        let bank = ExamBank {
+            exam_id: "m".into(),
+            title: "m".into(),
+            pick: 1,
+            questions: vec![Question {
+                id: "q".into(),
+                qtype: "Code".into(),
+                stem: "s".into(),
+                options: vec![],
+                body: QuestionBody::Text,
+                kp: None,
+                difficulty: None,
+                answer: None,
+                judge: None,
+                score: 2,
+            }],
+        };
+        assert!(matches!(
+            bank.validate(),
+            Err(ModelError::UnknownQuestionType { .. })
+        ));
+    }
 
     #[test]
     fn review_policy_requires_free_submitted_and_not_expired() {
