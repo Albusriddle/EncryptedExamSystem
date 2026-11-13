@@ -186,14 +186,37 @@ class ReviewWorker(QThread):
         super().__init__()
         self.cmd = cmd
         self.env = env
+        self._proc: subprocess.Popen[str] | None = None
+
+    def cancel(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()
 
     def run(self) -> None:
         try:
-            out, err, code = run_tool(self.cmd, self.env)
+            self._proc = subprocess.Popen(
+                self.cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=self.env,
+                **no_window_kwargs(),
+            )
+            try:
+                out, err = self._proc.communicate(timeout=120)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.communicate()
+                self.failed.emit("review-paper 超时（120 秒），已终止")
+                return
+            code = self._proc.returncode
         except Exception as e:  # noqa: BLE001
             self.failed.emit(f"调用 review-paper 失败：{e}")
             return
         finally:
+            self._proc = None
             self.env = {}
         if code != 0:
             self.failed.emit((err or out).strip()[:1000] or f"退出码 {code}")
@@ -594,8 +617,10 @@ class AnswersTab(QWidget):
                 self.worker.terminate()
                 self.worker.wait(1000)
         if self._review_worker is not None and self._review_worker.isRunning():
-            self._review_worker.terminate()
-            self._review_worker.wait(1000)
+            self._review_worker.cancel()
+            if not self._review_worker.wait(2000):
+                self._review_worker.terminate()
+                self._review_worker.wait(1000)
 
     def _on_all(self) -> None:
         self._set_editing_enabled(True)

@@ -322,3 +322,45 @@ def test_attendance_dialog_lists_missing(qapp) -> None:
         assert "缺考 1" in dlg.summary.text()
     finally:
         dlg.deleteLater()
+
+
+def test_review_worker_emits_output(qapp, monkeypatch) -> None:
+    import app.ui.tab_answers as mod
+
+    class FakePopen:
+        returncode = 0
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def communicate(self, timeout=None):
+            return ('{"ok": true}', "")
+
+    monkeypatch.setattr(mod.subprocess, "Popen", FakePopen)
+    worker = mod.ReviewWorker(["exam-builder"], {})
+    got: list[str] = []
+    worker.done.connect(got.append)
+    worker.run()
+    qapp.processEvents()
+    assert got == ['{"ok": true}']
+
+
+def test_review_worker_reports_failure(qapp, monkeypatch) -> None:
+    import app.ui.tab_answers as mod
+
+    class FakePopen:
+        returncode = 2
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def communicate(self, timeout=None):
+            return ("", "boom")
+
+    monkeypatch.setattr(mod.subprocess, "Popen", FakePopen)
+    worker = mod.ReviewWorker(["exam-builder"], {})
+    errors: list[str] = []
+    worker.failed.connect(errors.append)
+    worker.run()
+    qapp.processEvents()
+    assert errors and "boom" in errors[0]
