@@ -248,3 +248,40 @@ def test_code_question_status_is_waiting_for_manual_score() -> None:
         status="unjudged",
     )
     assert AnswersTab._status_text(r) == "待人工判分"
+
+
+def test_code_manual_score_moves_to_judged_export(tab, monkeypatch) -> None:
+    """代码简答题：人工分后进入已判分，成绩表含代码简答列。"""
+    from app.core.models import Question
+
+    tab.state.banks["m"].questions.append(
+        Question(
+            id="code9",
+            type="code",
+            stem="实现 reverse",
+            answer=None,
+            score=10,
+        )
+    )
+    tab.results[str(tab.files[0])]["sheet"]["qids"].append("code9")
+    tab.results[str(tab.files[0])]["sheet"]["answers"].append("def reverse(s):\n\treturn s[::-1]\n")
+
+    tab._grade()
+    row = next(r for r in tab.grade_rows if r.qid == "code9")
+    assert row.status == "unjudged" and row.max_score == 10
+    idx = tab.grade_rows.index(row)
+    tab.grade_table.item(idx, 7).setText("9")
+    assert tab.grade_rows[idx].manual_score == 9
+
+    out = WORK / "out-code"
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(out)))
+    tab._export_grading()
+
+    detail = next(out.glob("已判分-明细-*.csv")).read_text(encoding="utf-8-sig")
+    assert "code9" in detail and "9" in detail
+    unjudged = next(out.glob("未判分-*.csv")).read_text(encoding="utf-8-sig")
+    assert "code9" not in unjudged
+    score = next(out.glob("考生成绩表-*.csv")).read_text(encoding="utf-8-sig")
+    assert "代码简答题得分" in score and "代码简答题满分" in score

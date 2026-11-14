@@ -122,3 +122,15 @@ def test_question_qtype_migrates_legacy_aliases() -> None:
     assert Question(id="m1", type="multi", stem="s").qtype == "multiple"
     assert Question(id="m2", type="blank", stem="s").qtype == "fill"
     assert Question(id="m3", type="fix_code", stem="s").qtype == "fix"
+
+
+def test_code_question_rejects_fix_body() -> None:
+    from app.core.models import Question, QuestionBody
+
+    with pytest.raises(ValueError, match="body.kind=text"):
+        Question(
+            id="c1",
+            type="code",
+            stem="s",
+            body=QuestionBody(kind="code", code=["x"], blank_count=1),
+        )

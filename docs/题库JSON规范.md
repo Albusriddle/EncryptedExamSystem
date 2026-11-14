@@ -44,7 +44,7 @@
 | `id` | 字符串 | 是 | 题库内唯一。**试卷指纹只哈希 id**，改 id 等于换了一份卷子 |
 | `type` | 字符串 | 是 | `single` 单选 / `multiple` 多选 / `judge` 判断 / `fill` 填空（旧称补全） / `fix` 改错 / `essay` 问答（人工判分） / `code` 代码简答（人工判分） |
 
-> 旧别名 `multi`、`blank`/`blanks`、`fix_code` 会在导入时映射为
+> 旧别名 `multi`、`blank`/`blanks`、`fix_code` 会在管理端导入与 builder 加载时映射为
 > `multiple`、`fill`、`fix`；新写题库请直接使用标准值。
 | `stem` | 字符串 | 是 | 题干，支持换行 |
 | `body` | 对象 | 否 | 正文形态，见 1.3；**省略时按旧格式用 `options` 渲染** |

@@ -87,6 +87,20 @@ fn default_score() -> u32 {
     2
 }
 
+impl Question {
+    /// 把导入/手工清单里的旧题型别名迁移为标准值。
+    ///
+    /// 别名只在入库时兼容；校验和渲染仍只认标准值。
+    pub fn normalize_qtype(&mut self) {
+        self.qtype = match self.qtype.as_str() {
+            "multi" => "multiple".into(),
+            "blank" | "blanks" => "fill".into(),
+            "fix_code" => "fix".into(),
+            other => other.into(),
+        };
+    }
+}
+
 /// 选项序号 → 显示标签（0→A，25→Z，26→"27"）。
 ///
 /// 放在 common 里是**唯一实现**：管理端导出、builder 校验、学生端渲染
@@ -111,6 +125,13 @@ pub struct ExamBank {
 }
 
 impl ExamBank {
+    /// 迁移旧题型别名；builder 在 validate 前调用。
+    pub fn normalize_qtypes(&mut self) {
+        for q in &mut self.questions {
+            q.normalize_qtype();
+        }
+    }
+
     /// 校验题库基本合法性。
     pub fn validate(&self) -> Result<(), crate::model::ModelError> {
         if self.exam_id.is_empty() {
@@ -133,6 +154,12 @@ impl ExamBank {
                     exam_id: self.exam_id.clone(),
                     qid: q.id.clone(),
                     qtype: q.qtype.clone(),
+                });
+            }
+            if q.qtype == "code" && !matches!(q.body, QuestionBody::Text) {
+                return Err(crate::model::ModelError::CodeQuestionRequiresTextBody {
+                    exam_id: self.exam_id.clone(),
+                    qid: q.id.clone(),
                 });
             }
             if !seen.insert(&q.id) {
@@ -357,11 +384,65 @@ pub enum ModelError {
         qid: String,
         qtype: String,
     },
+    #[error("题库 {exam_id} 的代码题 {qid} 必须使用 body.kind=text")]
+    CodeQuestionRequiresTextBody { exam_id: String, qid: String },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_question_requires_text_body() {
+        let bank = ExamBank {
+            exam_id: "m".into(),
+            title: "m".into(),
+            pick: 1,
+            questions: vec![Question {
+                id: "c1".into(),
+                qtype: "code".into(),
+                stem: "s".into(),
+                options: vec![],
+                body: QuestionBody::Code {
+                    code: vec!["x".into()],
+                    blank_count: 1,
+                },
+                kp: None,
+                difficulty: None,
+                answer: None,
+                judge: None,
+                score: 2,
+            }],
+        };
+        assert!(matches!(
+            bank.validate(),
+            Err(ModelError::CodeQuestionRequiresTextBody { .. })
+        ));
+    }
+
+    #[test]
+    fn normalize_legacy_qtypes() {
+        let mut bank = ExamBank {
+            exam_id: "m".into(),
+            title: "m".into(),
+            pick: 1,
+            questions: vec![Question {
+                id: "q".into(),
+                qtype: "multi".into(),
+                stem: "s".into(),
+                options: vec![],
+                body: QuestionBody::Text,
+                kp: None,
+                difficulty: None,
+                answer: None,
+                judge: None,
+                score: 2,
+            }],
+        };
+        bank.normalize_qtypes();
+        assert_eq!(bank.questions[0].qtype, "multiple");
+        assert!(bank.validate().is_ok());
+    }
 
     #[test]
     fn unknown_question_type_is_rejected() {

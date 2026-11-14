@@ -611,8 +611,9 @@ fn load_banks(dir: &std::path::Path, files: &[String]) -> Result<Vec<ExamBank>> 
                 path.display()
             )
         })?;
-        let bank: ExamBank =
+        let mut bank: ExamBank =
             serde_json::from_str(&text).with_context(|| format!("解析题库 {}", path.display()))?;
+        bank.normalize_qtypes();
         bank.validate()
             .map_err(|e| anyhow::anyhow!("题库 {f} 校验失败: {e}"))?;
         out.push(bank);

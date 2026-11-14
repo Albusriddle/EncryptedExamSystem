@@ -33,6 +33,8 @@ pub const VERSION: u32 = 1;
 pub const FP_LEN: usize = 64;
 /// HKDF 用途标签。
 const HKDF_INFO: &str = "ees-answer-sheet-v1";
+/// 整张答题卡答案总字节上限：1 MiB 单题 × 多题时防止无界内存。
+pub const MAX_TOTAL_ANSWER_BYTES: usize = 16 * 1024 * 1024;
 
 /// 答题卡错误。
 #[derive(Debug, thiserror::Error)]
@@ -130,6 +132,17 @@ impl AnswerSheet {
                 "题目数 {} 与答案数 {} 不一致",
                 self.qids.len(),
                 self.answers.len()
+            )));
+        }
+        let total: usize = self
+            .answers
+            .iter()
+            .filter_map(|a| a.as_ref().map(String::len))
+            .sum();
+        if total > MAX_TOTAL_ANSWER_BYTES {
+            return Err(AnswerSheetError::BadContent(format!(
+                "答案总大小 {total} 字节超过上限 {} 字节",
+                MAX_TOTAL_ANSWER_BYTES
             )));
         }
         Ok(())
@@ -402,6 +415,14 @@ mod tests {
         let bytes = seal(&k, &s).unwrap();
         let back = open(&k, &bytes).unwrap();
         assert_eq!(back.answers[0].as_deref(), Some(code));
+    }
+
+    #[test]
+    fn total_answer_size_is_capped() {
+        let mut s = sheet();
+        let half = MAX_TOTAL_ANSWER_BYTES / 2 + 1;
+        s.answers = vec![Some("x".repeat(half)), Some("x".repeat(half))];
+        assert!(matches!(s.validate(), Err(AnswerSheetError::BadContent(_))));
     }
 
     #[test]

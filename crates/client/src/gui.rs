@@ -2260,6 +2260,21 @@ mod tests {
     }
 
     #[test]
+    fn code_input_paste_preserves_crlf() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        run_code_editor_frame(&ctx, &mut text, vec![], true);
+        let code = "def f():\r\n\treturn 1  \r\n";
+        run_code_editor_frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Paste(code.to_string())],
+            false,
+        );
+        assert_eq!(text, code, "粘贴 CRLF 代码不能丢失行尾格式");
+    }
+
+    #[test]
     fn code_input_accepts_ime_commit() {
         let ctx = egui::Context::default();
         let mut text = String::new();

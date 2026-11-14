@@ -81,6 +81,12 @@ class Question(BaseModel):
 
     model_config = {"populate_by_name": True}
 
+    @model_validator(mode="after")
+    def _check_code_body(self) -> Question:
+        if self.qtype == "code" and self.body.kind != "text":
+            raise ValueError("代码简答题必须使用 body.kind=text，不能用改错题的 code body")
+        return self
+
     @field_validator("qtype")
     @classmethod
     def _check_qtype(cls, v: str) -> str:
