@@ -2,6 +2,14 @@
 
 管理端编排多场考试 → 打包加密题库 → 学生凭**学号 + 网络时间门禁**解锁个人试卷。
 
+## 更新摘要（v1.2.1）
+
+- `code_language` 在 Rust `ExamBank::validate` 中校验，非法语言直接报错；
+- 旧 code 题未写 `code_language` 时，从题干 fenced code 语言推断；
+- 高亮缓存改为小型 LRU，多个代码题不会互相冲刷；
+- README 全面重写，补充代码题、安全边界、构建与文档索引；
+- 文档版本口径更新到 v1.2.x。
+
 ## 更新摘要（v1.2.0）
 
 - 代码简答题新增行号与 `code_language` 语法高亮（syntect，纯 Rust 离线）；

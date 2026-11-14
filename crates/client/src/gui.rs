@@ -1108,6 +1108,7 @@ fn render_answer_inputs(
                         editable,
                         idx,
                         item.code_language.as_deref(),
+                        &item.stem,
                     )
                 } else {
                     ui.add_enabled(
@@ -2228,7 +2229,7 @@ mod tests {
                     let id = egui::Id::new(("answer_editor", 0));
                     ui.memory_mut(|m| m.request_focus(id));
                 }
-                rect = crate::code_editor::render_code_editor(ui, text, true, 0, None).rect;
+                rect = crate::code_editor::render_code_editor(ui, text, true, 0, None, "").rect;
             });
         });
         rect

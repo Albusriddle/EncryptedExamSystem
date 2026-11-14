@@ -1,189 +1,231 @@
-# EncryptedExamSystem · 保密考试系统
+# 保密考试系统（EncryptedExamSystem）
 
-[![CI](https://github.com/Albusriddle/EncryptedExamSystem/actions/workflows/ci.yml/badge.svg)](https://github.com/Albusriddle/EncryptedExamSystem/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Albusriddle/EncryptedExamSystem)](https://github.com/Albusriddle/EncryptedExamSystem/releases/latest)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+> 一套面向校内闭卷/随堂考试的离线加密考试系统：教师端编排题目与场次，生成学生端 exe；学生在断网环境作答，答题卡加密落盘；教师端收卷、校验、判分并导出成绩。
 
-> 管理端编排考试 → 打包加密题库 → 生成**单个自解压 exe** →
-> 学生凭 **学号 + 网络时间门禁** 解锁 → 确定性抽题，生成个人试卷。
+当前版本：**1.2.x**
 
-**无需服务器、无需部署数据库。** 一场考试就是一个 exe 文件。
+- 教师端：`ExamAdmin`（PySide6 图形界面）
+- 命令行工具：`exam-builder`（打包、校验、导出 PIN、考后查看原卷）
+- 学生端：`exam-client`（双击运行，按场次与网络时间解锁）
 
-| 你是 | 从这里开始 |
-|---|---|
-| 老师 | [教师使用手册](docs/教师使用手册.md)（不需要懂编程） |
-| 想了解设计 | [架构与实施方案](docs/保密考试系统_架构与实施方案.md) |
-| 想改代码 | [AGENTS.md](AGENTS.md)（**强制规则**，先读再动手） |
+> 本系统是“防误操作 + 现场监考”工具，不是密码学意义上的强防作弊系统。  
+> 安全边界与已接受风险见 [安全边界与威胁模型](docs/安全边界与威胁模型.md) 与 [风险接受记录](docs/风险接受记录.md)。
 
 ---
 
-## 下载
+## 1. 主要能力
 
-最新版本见 [Releases](https://github.com/Albusriddle/EncryptedExamSystem/releases/latest)。
+### 考试与题型
 
-| 资产 | 给谁 | 说明 |
-|---|---|---|
-| `ExamAdmin-<版本>-windows.zip` | 教师 | 解压后进 `ExamAdmin/` 双击 `ExamAdmin.exe` |
-| `exam-builder.exe` | 进阶用户 / 脚本 | 命令行打包器 |
-| `stub-template.exe` | 进阶用户 | 学生端模板，打包时被复制并追加加密数据 |
+- 单选、多选、判断、填空、改错、问答、**代码简答**七种题型；
+- 代码简答题支持：
+  - 等宽多行输入；
+  - 行号；
+  - 按 `code_language` 使用 syntect 做 **python / c / cpp / java / rust / javascript / typescript / go / sql / bash / text** 语法高亮；
+  - 答案保留缩进、换行、行尾空格；单题上限 1 MiB，整卡答案上限 16 MiB；
+  - 不执行学生代码，不自动判分，由教师人工评分；
+- 问答/代码简答之外的选择、判断、填空、改错可自动判分，支持人工改分；
+- 场次可按题库设置平均难度区间，支持“大题 → 部分 → 小题”。
 
-发布包内已含示例题库，解压即可跑通全流程。
+### 考试组织
 
----
+- 教师端编排题库、学生名单、班级、场次；
+- 生成学生端 exe，可选每生 6 位 PIN 登录；
+- 网络时间门禁：三个公共 HTTPS 时间源中位数，失败即拒绝；
+- 可选签名时间令牌（默认关闭，需自建时间服务）；
+- 交卷与到点自动冻结；
+- 收卷后批量校验答题卡、生成缺考名单、导出 CSV。
 
-## 教师工作流
+### 回看与原卷
 
-1. **题库** —— 导入 JSON 题库（格式见手册），支持多题库、按题库设默认抽题数
-2. **学生** —— 粘贴或导入 CSV 学号名单
-3. **场次** —— 编排考试时间窗、勾选科目、设每场抽题数；时间轴可视化重叠场次
-4. **打包** —— 点「生成」得到学生端 exe，分发即可
-5. 学生双击 → 输学号 → 通过时间门禁 → 看到自己的试卷
-6. **收卷判分** —— 拖入 `.eea` 校验，自动判分（可改分），导出已判/未判 CSV
+- 默认「仅教师可查看原卷」：学生端无回看入口；
+- 取消该限制后，学生已交卷且未到结束时间可只读回看；回看页可返回已交卷页；
+- 教师考后查看原卷使用 `exam-builder review-paper`，需要教师电脑上的 master，不经过学生端时间门禁；
+- 学生端不接收、不保存教师 master。
 
-学生端**只需要联网校时**（三个公共时间源取中位数），不访问任何自建服务。
+### 安全与审计
 
----
-
-## 当前能力边界
-
-**已实现**：多场次 · 按场次选科与抽题 · 学号名单（可建班级分组） · 题干 Markdown（代码块/表格/图片，管理端内置「插入图片…」，教程见 `docs/图片使用教程.md`） · 网络时间门禁 · 确定性出卷 · 试卷指纹 ·
-学生端右侧题号导航卡（圆形按钮，点题号把该题滚到视窗顶部；
-已答蓝色 / 未答灰色 / 当前题绿色描边）
-
-**已实现**：学生作答（单选/多选/判断/填空/改错/问答/代码简答 七种题型）、交卷与到点自动冻结、答题卡加密落盘（`.eea`）、
-教师端批量解密校验（管理端「收卷判分」页 / `exam-builder verify-answer-sheet`）。
-
-**已实现**：场次可按题库设置**平均难度区间**（只约束抽出的 N 题均值，不限制单题）、
-自动判分（单选/多选/判断/填空/改错，按题型勾选；双击可改分；问答/代码简答人工判）、
-已判分/未判分五份 CSV 导出（含按学号排序、按题型分项的考生成绩表）、
-收卷后按场次生成缺考名单（已交/未交/缺考/失败/名单外）、
-打包后自动保存工程（不会写进考试包目录，含子目录）；下次启动为空白工程，
-可点工具栏【打开上次工程】恢复。
-
-**安全能力（v1.1.x）**：主密钥加密备份/恢复、工程口令加密（默认开启）、
-哈希链审计日志（工具栏可校验）、每生 PIN 登录（可选，打包成功后选择 PIN 表 CSV 保存位置）、交卷后按包策略回看、
-按大题出题（大题→部分→小题，固定题库/题数/精确难度，可上下调整顺序）、
-答题卡收据（教师 Ed25519 签名，审计菜单中签发/验证）；
-学生交卷后回看默认关闭；教师可在「审计 → 考后查看原卷」用 master 查看原卷；
-签名时间令牌（可选，需自建服务；默认关闭）；
-发布包 `SHA256SUMS.txt`；完整边界见 `docs/安全边界与威胁模型.md`。
-服务端答题卡签名尚未实现。
-
-**仍未实现**：代码题（`judge{entry,harness,tests}`）的自动判分——编译运行学生代码
-有安全与公平风险，仍按 judge 材料人工判；判分只按题型勾选，暂不支持逐题开关。
-
-> 完整的安全边界与"防谁/不防谁"见 `docs/安全边界与威胁模型.md`。
->
-> 答题卡的安全性边界：密钥由 `K_manifest` 派生，而它嵌在学生端 exe 里，
-> 因此加密只能**防误改、防明文**，不能防蓄意篡改。真正的防作弊仍需现场监考
-> 或将来做在线提交。详见 `docs/教师使用手册.md`。
+- 答题卡加密落盘（`.eea`），不存明文答案；
+- 主密钥加密备份 / 恢复，工程文件口令加密；
+- 哈希链审计日志；
+- 答题卡收据（教师侧 Ed25519，可检测收卷后改动，不防伪造）；
+- 发布包带 `SHA256SUMS.txt`。
 
 ---
 
-## 仓库结构
+## 2. 学生端答题卡与代码题
 
-```
-crates/
-  common/         # 加密、密钥派生、容器格式、时间门禁、确定性抽题（两端共用）
-  builder/        # exam-builder：题库 + 场次 → 自解压学生端
-  client/         # exam-client：学生端单 exe（GUI + CLI 双模式）
-admin/
-  app/core/       # 纯逻辑：模型、状态、时间解析、题库 IO（**不依赖 Qt**）
-  app/ui/         # PySide6 界面
-  buildtools/     # PyInstaller 打包脚本
-  tests/          # Python 测试
-banks/demo/       # 演示题库（真题库不入库）
-schemas/          # 题库/清单的 JSON Schema（编辑器补全用，由 pydantic 生成）
-docs/题库JSON规范.md  # 题库格式规范与可直接导入的样例
-examples/         # 可直接导入的示例题库（含图片题）
-licenses/         # LGPL/GPL 全文（PySide6 合规）
-tools/            # 辅助脚本（embed-image.py 等）
-docs/             # 教师手册、安全边界、风险接受记录、架构方案、发布说明
-scripts/          # verify-embed / preflight-release / release_body / run-admin-tests / smoke-answers
-.github/workflows # CI 与 Release
+学生答题卡保存为：
+
+```text
+answers-<学号>-<场次>-<试卷指纹前8位>.eea
 ```
 
-**单一真相**：版本号只在 `VERSION`；对外文案集中在 `branding.json`；加密参数随包存于 header。
+答题卡是加密文件，教师端用 master 解密校验。代码题答案保存在：
 
----
+```json
+"answers": [
+  "def f():\n\treturn 1  \n"
+]
+```
 
-## 开发
-
-前置：Rust（见 `rust-toolchain.toml`）、Python 3.11+、[uv](https://github.com/astral-sh/uv)。
-下面的命令是 bash 语法（Windows 上用 Git Bash / MSYS2 执行）。
+代码内容不做 `trim`、不替换缩进、不截断；解密后的 JSON 可直接提取：
 
 ```bash
-# Rust
-cargo test --workspace                 # 加密 / 抽题 / 容器 / 门禁
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
+exam-builder verify-answer-sheet answers-2021001-1.eea \
+  --package 学生端.exe --master <master> --json > result.json
+```
 
-# 管理端（首次执行会建好 .venv 并装齐 GUI/打包依赖）
+```python
+import json
+
+data = json.load(open("result.json", encoding="utf-8"))
+code = data["sheet"]["answers"][0]
+open("answer.py", "w", encoding="utf-8", newline="").write(code)
+```
+
+> 代码题需要 **v1.1.0+** 学生端；行号与语法高亮需要 **v1.2.0+**。  
+> 旧学生端会忽略 `code_language`，仍可作答，但没有高亮。
+
+---
+
+## 3. 快速开始（教师）
+
+1. 从 Release 下载 `ExamAdmin-<版本>-windows.zip`；
+2. 解压，进入 `ExamAdmin` 目录，双击 `ExamAdmin.exe`；
+3. 在「题库」页导入题库（原生 JSON 或题目/答案分离格式）；
+4. 在「学生」页维护名单 / 班级；
+5. 在「场次」页创建场次，选择题库、抽题数、时间、名单；
+6. 在「打包」页：
+   - 生成/粘贴主密钥；
+   - 选择学生端 stub；
+   - 选择输出 exe；
+   - 按需启用 PIN、时间令牌、学生回看；
+   - 开始打包；
+7. 学生端 exe 发给学生；
+8. 收卷后进入「收卷判分」页，选择学生端包、粘贴 master，批量校验答题卡；
+9. 生成成绩，人工给问答/代码题打分，导出 CSV。
+
+---
+
+## 4. 快速开始（学生）
+
+- 双击学生端 exe；
+- 输入学号（启用 PIN 时再输入 6 位 PIN）；
+- 等待网络时间校验；
+- 作答，交卷；
+- 如教师允许，可在结束前只读回看；
+- 答题卡自动加密保存在 exe 同目录（不可写时回退 `%LOCALAPPDATA%`）。
+
+---
+
+## 5. 从源码构建
+
+前置：
+
+- Rust（见 `rust-toolchain.toml`）
+- Python 3.11+
+- [uv](https://github.com/astral-sh/uv)
+- Windows 管理端需要 PySide6 / PyInstaller
+
+```bash
+# Rust：common / builder / client
+cargo build --release --workspace
+
+# 管理端
 cd admin
-uv sync --extra gui --extra build
-uv run pytest -q                       # 模型 / 状态 / UI 联动
-uv run ruff check . && uv run ruff format --check .
-
-# 端到端（打包 → 嵌入密钥 → 解锁）
-bash scripts/verify-embed.sh           # 端到端断言
-
-# 发布前自检
-bash scripts/preflight-release.sh      # 加 --full 连管理端打包一起查
+uv sync --extra gui --group dev
+uv run python -m app
 ```
 
-本地跑通一次完整演示：
+生成管理端发布目录：
 
 ```bash
-cargo build --release -p client -p builder
-MASTER=$(./target/release/exam-builder.exe keygen)
-./target/release/exam-builder.exe build \
-  --manifest banks/demo/manifest.example.json --banks banks/ \
-  --stub ./target/release/exam-client.exe --out StudentClient.exe --master "$MASTER" --force
-EXAM_MASTER="$MASTER" ./StudentClient.exe --student 2021001 --package StudentClient.exe
+cd admin
+uv run python buildtools/build_exe.py
+```
+
+发布前检查：
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cd admin && uv run pytest -q
+uv run ruff check . && uv run ruff format --check .
+cd .. && bash scripts/verify-embed.sh
+bash scripts/preflight-release.sh
 ```
 
 ---
 
-## 版本与发布
+## 6. 目录结构
 
-1. 改 `VERSION`，同步 `Cargo.toml` 与 `admin/pyproject.toml`（**三处必须一致**）
-2. 提交，打 tag `v<版本>`，推送 tag
-3. `release` 工作流校验版本与 tag 一致 → 构建 → 跑 e2e → 发布资产
-
-本地已装 `gh`/令牌时，也可用 `bash scripts/make-release-zip.sh` 手动生成同构发布包。
-
----
-
-## 安全模型
-
-**这是"防君子"的系统，不是密码学意义上的强防护。** 请在采用前理解以下边界。
-
-| 保护什么 | 手段 |
-|---|---|
-| 未解锁时无明文题库 | 每场独立 `session_secret`，AES-256-GCM；同场学生解锁后可解本场题干（答案/judge 已剥离） |
-| 提前拿到卷子 | 包内没有明文题目，密钥靠学号派生 |
-| 提前/延后解锁 | 三个公共 HTTPS 时间源取中位数，失败即拒绝（fail-closed） |
-| 场次之间串卷 | 每场独立密钥与数据段，实测跨场解密失败 |
-
-**明确的限制**：
-
-- **学号是低熵数据**。拿到包的人可以离线枚举名单，Argon2id 参数（64 MiB / 3 轮）只是把成本抬到 10⁵ 个学号约 19 分钟量级，不是密码学保证。
-- **包内嵌入的是 `K_manifest`，不是 master**。泄漏后攻击者能读到场次时间与人数；有合法学号的学生可解密本场题库题干（不含答案/判分材料），不能读其他场次或标准答案。
-- 有逆向能力且知道合法学号的人，可以在时间窗内解锁——这是设计使然，无法用纯客户端方案消除。
-- 学生端必须有网（校时）；完全断网时会拒绝解锁。
-
-> **风险接受**：项目已明确接受“同场题干可解、答题卡可伪造、默认无 PIN、Header 可改”等残余风险；补偿措施和复审条件见 [风险接受记录](docs/风险接受记录.md)。这不是“风险已修复”。
+```text
+crates/common/       共享模型、加密、容器、答题卡、时间门禁
+crates/builder/      exam-builder：打包、校验、review-paper、PIN 导出
+crates/client/       学生端：GUI、解锁流程、答题卡、代码编辑器
+admin/               教师端 PySide6 + 打包工具
+banks/               示例题库
+examples/            可直接导入的示例
+docs/                教师手册、题库规范、安全边界、时间令牌协议、发布说明
+schemas/             题库 / manifest JSON Schema
+scripts/             verify-embed、preflight、release_body、烟测、管理端测试
+licenses/            LGPL / GPL 全文
+```
 
 ---
 
-## 许可证
+## 7. 安全边界（必读）
 
-[Apache License 2.0](LICENSE)。
+### 已实现
 
-## 致谢
+- 考试包不含明文标准答案；
+- 答题卡不是明文；
+- 工程文件默认口令加密；
+- 主密钥只通过环境变量/文件传给教师工具，不进入学生端命令行；
+- 学生端不保存 master；
+- 时间门禁失败即拒绝；
+- 代码高亮只影响显示，不执行代码。
+
+### 已接受风险
+
+项目明确接受以下风险，不在当前 v1.x 内实现 P0 新格式（v9）：
+
+- 同场学生可解出本场全部题干；
+- 同场学生可读取/伪造他人答题卡；
+- 默认无 PIN 时，任意已知名单内学号可解锁；
+- Header 可被重加密，时间门禁只是 UI 约束。
+
+完整决策与补偿措施见 [风险接受记录](docs/风险接受记录.md)。
+
+### 版本门禁
+
+- 普通包：容器 v4；
+- 时间令牌：v5；
+- 大题：v6；
+- 大题部分：v7；
+- 含代码简答题：v8，旧学生端会明确拒绝，需 v1.1.0+ 学生端；
+- P0 的 per-student/Header 签名方案记为 v9，当前不实现。
+
+---
+
+## 8. 文档
+
+- [教师使用手册](docs/教师使用手册.md)
+- [题库 JSON 规范](docs/题库JSON规范.md)
+- [安全边界与威胁模型](docs/安全边界与威胁模型.md)
+- [风险接受记录](docs/风险接受记录.md)
+- [时间令牌协议](docs/时间令牌协议.md)
+- [发布说明](docs/release-notes.md)
+- [代码审阅报告](docs/代码审阅报告.md)
+
+---
+
+## 9. 许可与致谢
+
+本项目代码以 [Apache License 2.0](LICENSE) 发布。第三方组件许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 - 创始人 / 仓库作者：[AlbusRiddle](https://github.com/Albusriddle)
 - 部分创意支持：[Stone](https://github.com/stone6060)
 - 精神支持：[湖南大学 Robot 工作坊](https://github.com/RobotWorkShop-BigHeroX)
-
-如果这个项目对你有帮助，欢迎点一个 ⭐ Star。

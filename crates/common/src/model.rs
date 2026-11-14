@@ -166,6 +166,29 @@ impl ExamBank {
                     qid: q.id.clone(),
                 });
             }
+            if q.qtype == "code"
+                && let Some(lang) = q.code_language.as_deref()
+                && ![
+                    "python",
+                    "c",
+                    "cpp",
+                    "java",
+                    "rust",
+                    "javascript",
+                    "typescript",
+                    "go",
+                    "sql",
+                    "bash",
+                    "text",
+                ]
+                .contains(&lang)
+            {
+                return Err(crate::model::ModelError::InvalidCodeLanguage {
+                    exam_id: self.exam_id.clone(),
+                    qid: q.id.clone(),
+                    language: lang.to_string(),
+                });
+            }
             if !seen.insert(&q.id) {
                 return Err(crate::model::ModelError::DuplicateQuestionId {
                     exam_id: self.exam_id.clone(),
@@ -390,6 +413,12 @@ pub enum ModelError {
     },
     #[error("题库 {exam_id} 的代码题 {qid} 必须使用 body.kind=text")]
     CodeQuestionRequiresTextBody { exam_id: String, qid: String },
+    #[error("题库 {exam_id} 的代码题 {qid} 使用了不支持的语言：{language}")]
+    InvalidCodeLanguage {
+        exam_id: String,
+        qid: String,
+        language: String,
+    },
 }
 
 #[cfg(test)]
@@ -422,6 +451,32 @@ mod tests {
         assert!(matches!(
             bank.validate(),
             Err(ModelError::CodeQuestionRequiresTextBody { .. })
+        ));
+    }
+
+    #[test]
+    fn invalid_code_language_is_rejected() {
+        let bank = ExamBank {
+            exam_id: "m".into(),
+            title: "m".into(),
+            pick: 1,
+            questions: vec![Question {
+                id: "c1".into(),
+                qtype: "code".into(),
+                stem: "s".into(),
+                options: vec![],
+                body: QuestionBody::Text,
+                code_language: Some("brainfuck".into()),
+                kp: None,
+                difficulty: None,
+                answer: None,
+                judge: None,
+                score: 2,
+            }],
+        };
+        assert!(matches!(
+            bank.validate(),
+            Err(ModelError::InvalidCodeLanguage { .. })
         ));
     }
 

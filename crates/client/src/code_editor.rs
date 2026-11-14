@@ -48,7 +48,9 @@ struct CacheEntry {
     galley: std::sync::Arc<egui::Galley>,
 }
 
-static CACHE: Mutex<Option<CacheEntry>> = Mutex::new(None);
+/// 小型 LRU：一份试卷可能有多道 code 题，单条缓存会互相冲刷。
+const CACHE_MAX: usize = 8;
+static CACHE: Mutex<Vec<CacheEntry>> = Mutex::new(Vec::new());
 
 fn cache_key(text: &str, language: Option<&str>, width: f32, dark: bool) -> u64 {
     let mut h = blake3::Hasher::new();
@@ -78,6 +80,31 @@ fn plain_job(ui: &egui::Ui, text: &str) -> LayoutJob {
 }
 
 /// 生成语法高亮后的 LayoutJob；`text` 内容不会改变。
+/// 从题干第一个 fenced code block 的语言标记推断代码语言。
+pub fn infer_language(stem: &str) -> Option<&'static str> {
+    for line in stem.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("```") else {
+            continue;
+        };
+        let token = rest.trim().to_ascii_lowercase();
+        return match token.as_str() {
+            "python" | "py" => Some("python"),
+            "c" => Some("c"),
+            "cpp" | "c++" | "cxx" => Some("cpp"),
+            "java" => Some("java"),
+            "rust" | "rs" => Some("rust"),
+            "javascript" | "js" => Some("javascript"),
+            "typescript" | "ts" => Some("typescript"),
+            "go" | "golang" => Some("go"),
+            "sql" => Some("sql"),
+            "bash" | "sh" | "shell" => Some("bash"),
+            _ => None,
+        };
+    }
+    None
+}
+
 fn highlighted_job(ui: &egui::Ui, text: &str, language: Option<&str>) -> LayoutJob {
     if text.len() > HIGHLIGHT_MAX_BYTES {
         return plain_job(ui, text);
@@ -124,7 +151,9 @@ pub fn render_code_editor(
     editable: bool,
     idx: usize,
     language: Option<&str>,
+    stem: &str,
 ) -> egui::Response {
+    let language = language.or_else(|| infer_language(stem));
     let lines = line_count(text);
     let line_numbers = (1..=lines)
         .map(|n| n.to_string())
@@ -153,17 +182,22 @@ pub fn render_code_editor(
                 let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
                     let dark = ui.visuals().dark_mode;
                     let key = cache_key(text, language, wrap_width, dark);
-                    if let Ok(cache) = CACHE.lock()
-                        && let Some(entry) = cache.as_ref()
-                        && entry.key == key
+                    if let Ok(mut cache) = CACHE.lock()
+                        && let Some(pos) = cache.iter().position(|e| e.key == key)
                     {
-                        return entry.galley.clone();
+                        let entry = cache.remove(pos);
+                        let galley = entry.galley.clone();
+                        cache.push(entry);
+                        return galley;
                     }
                     let mut job = highlighted_job(ui, text, language);
                     job.wrap.max_width = wrap_width;
                     let galley = ui.fonts(|f| f.layout_job(job));
                     if let Ok(mut cache) = CACHE.lock() {
-                        *cache = Some(CacheEntry {
+                        if cache.len() >= CACHE_MAX {
+                            cache.remove(0);
+                        }
+                        cache.push(CacheEntry {
                             key,
                             galley: galley.clone(),
                         });
@@ -226,6 +260,13 @@ mod tests {
             let job = highlighted_job(ui, code, Some("python"));
             assert_eq!(job.text, code);
         });
+    }
+
+    #[test]
+    fn infer_language_from_fenced_stem() {
+        assert_eq!(infer_language("```python\nprint(1)\n```"), Some("python"));
+        assert_eq!(infer_language("```cpp\nint x;\n```"), Some("cpp"));
+        assert_eq!(infer_language("no fence"), None);
     }
 
     #[test]
