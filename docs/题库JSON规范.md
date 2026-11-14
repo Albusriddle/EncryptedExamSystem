@@ -75,6 +75,7 @@
 {
   "id": "code-1",
   "type": "code",
+  "code_language": "python",
   "stem": "请实现 `reverse(s)`：\n\n```python\ndef reverse(s):\n    ...\n```",
   "body": { "kind": "text" },
   "score": 10
@@ -82,6 +83,7 @@
 ```
 
 - **不要**写成 `body.kind = "code"`；`code` body 是“改错题逐行代码”，不是代码作答；
+- `code_language` 可选：`python`/`c`/`cpp`/`java`/`rust`/`javascript`/`typescript`/`go`/`sql`/`bash`/`text`；缺省不高亮；
 - `answer` 可省略或为 `null`；代码题由教师人工评分；
 - 学生端要求 **v1.1.0+**；
 - 答案原样保存在答题卡 `answers` 字符串里，换行、缩进、行尾空格不做 trim；

@@ -12,6 +12,7 @@
 // release 构建不弹控制台窗口；debug 保留控制台便于看日志。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod code_editor;
 mod gui;
 mod images;
 mod keys;

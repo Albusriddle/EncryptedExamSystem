@@ -70,6 +70,8 @@ class Question(BaseModel):
     stem: str
     options: list[str] = Field(default_factory=list)
     body: QuestionBody = Field(default_factory=QuestionBody)
+    #: 代码简答题语言；仅 type=code 使用。
+    code_language: str | None = None
     kp: str | None = None
     difficulty: int | None = Field(default=None, ge=0, le=255)
     #: 结构化答案（single/multi/blanks/fixes）。打包时会被剥离。
@@ -85,6 +87,24 @@ class Question(BaseModel):
     def _check_code_body(self) -> Question:
         if self.qtype == "code" and self.body.kind != "text":
             raise ValueError("代码简答题必须使用 body.kind=text，不能用改错题的 code body")
+        allowed_langs = {
+            "python",
+            "c",
+            "cpp",
+            "java",
+            "rust",
+            "javascript",
+            "typescript",
+            "go",
+            "sql",
+            "bash",
+            "text",
+        }
+        if self.code_language is not None:
+            lang = self.code_language.strip().lower()
+            if lang not in allowed_langs:
+                raise ValueError(f"不支持的代码语言：{self.code_language!r}")
+            self.code_language = lang
         return self
 
     @field_validator("qtype")

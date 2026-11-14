@@ -59,6 +59,10 @@ pub struct Question {
     /// 题目正文形态（旧题库缺省为 `Text`，此时用 `options` 渲染）。
     #[serde(default)]
     pub body: QuestionBody,
+    /// 代码简答题语言（python/c/cpp/java/rust/javascript/typescript/go/sql/bash）。
+    /// 旧题库/非代码题缺省为 None；只在 code 题型使用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_language: Option<String>,
     /// 知识点编号（如 "1.1"，外部题库才有）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kp: Option<String>,
@@ -403,6 +407,7 @@ mod tests {
                 qtype: "code".into(),
                 stem: "s".into(),
                 options: vec![],
+                code_language: None,
                 body: QuestionBody::Code {
                     code: vec!["x".into()],
                     blank_count: 1,
@@ -431,6 +436,7 @@ mod tests {
                 qtype: "multi".into(),
                 stem: "s".into(),
                 options: vec![],
+                code_language: None,
                 body: QuestionBody::Text,
                 kp: None,
                 difficulty: None,
@@ -455,6 +461,7 @@ mod tests {
                 qtype: "Code".into(),
                 stem: "s".into(),
                 options: vec![],
+                code_language: None,
                 body: QuestionBody::Text,
                 kp: None,
                 difficulty: None,
@@ -483,6 +490,7 @@ mod tests {
             qtype: "multiple".into(),
             stem: "s".into(),
             options: Vec::new(),
+            code_language: None,
             body: QuestionBody::Options {
                 options: (0..n)
                     .map(|i| ChoiceOption {

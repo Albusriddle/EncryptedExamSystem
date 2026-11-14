@@ -28,6 +28,9 @@ pub struct PaperItem {
     pub options: Vec<String>,
     /// 题目正文形态（选项 / 代码模板 / 逐行代码）。
     pub body: crate::model::QuestionBody,
+    /// 代码简答题语言；非代码题为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_language: Option<String>,
     pub score: u32,
 }
 
@@ -58,6 +61,7 @@ impl From<&crate::model::Question> for PaperItem {
             stem: q.stem.clone(),
             options: q.options.clone(),
             body,
+            code_language: q.code_language.clone(),
             score: q.score,
             // 注意：`q.answer` / `q.judge` 被有意忽略，本结构没有对应字段可放。
         }
@@ -720,6 +724,7 @@ mod tests {
                     qtype: "single".into(),
                     stem: format!("题目 {i}"),
                     options: vec!["A".into(), "B".into(), "C".into(), "D".into()],
+                    code_language: None,
                     body: Default::default(),
                     kp: None,
                     difficulty: None,
@@ -880,6 +885,7 @@ mod tests {
             qtype: "single".into(),
             stem: format!("题干 {id}"),
             options: vec![],
+            code_language: None,
             body: Default::default(),
             score: 2,
         }

@@ -2,6 +2,14 @@
 
 管理端编排多场考试 → 打包加密题库 → 学生凭**学号 + 网络时间门禁**解锁个人试卷。
 
+## 更新摘要（v1.2.0）
+
+- 代码简答题新增行号与 `code_language` 语法高亮（syntect，纯 Rust 离线）；
+- 支持 python/c/cpp/java/rust/javascript/typescript/go/sql/bash/text；
+- 高亮结果缓存；超过 256 KiB 降级纯等宽，避免大文本卡顿；
+- 行号栏与代码共用滚动容器，不改变答题卡内容；
+- 旧客户端忽略 `code_language`，仍可作答。
+
 ## 更新摘要（v1.1.7）
 
 - code 输入下方显示整卡答案已用/16 MiB，超限变红；

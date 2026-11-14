@@ -1287,6 +1287,7 @@ mod tests {
                     qtype: "single".into(),
                     stem: "s".into(),
                     options: vec!["A".into()],
+                    code_language: None,
                     body: Default::default(),
                     kp: None,
                     difficulty: None,

@@ -37,7 +37,9 @@
 `aes-gcm`（Apache-2.0 OR MIT）、`hkdf` / `sha2` / `hmac`（MIT OR Apache-2.0）、
 `rand` / `rand_chacha`（MIT OR Apache-2.0）、`clap`（MIT OR Apache-2.0）、
 `anyhow` / `thiserror`（MIT OR Apache-2.0）、`hex` / `zeroize`（MIT OR Apache-2.0）、
-`winit` / `glutin`（Apache-2.0）、`ab_glyph`（Apache-2.0）。
+`winit` / `glutin`（Apache-2.0）、`ab_glyph`（Apache-2.0）、
+`syntect`（MIT）、`fancy-regex`（MIT）、`regex`（MIT OR Apache-2.0）、
+`bincode`（MIT）、`plist`（MIT）、`yaml-rust`（MIT OR Apache-2.0）。
 
 完整依赖树与版本见 `Cargo.lock`；各 crate 的许可原文在其发布页可查。
 

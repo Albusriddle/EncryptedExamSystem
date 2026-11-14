@@ -43,6 +43,18 @@
         "body": {
           "$ref": "#/$defs/QuestionBody"
         },
+        "code_language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code Language"
+        },
         "kp": {
           "anyOf": [
             {

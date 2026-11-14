@@ -134,3 +134,12 @@ def test_code_question_rejects_fix_body() -> None:
             stem="s",
             body=QuestionBody(kind="code", code=["x"], blank_count=1),
         )
+
+
+def test_code_language_is_validated() -> None:
+    from app.core.models import Question
+
+    q = Question(id="c1", type="code", stem="s", code_language="python")
+    assert q.code_language == "python"
+    with pytest.raises(ValueError, match="不支持的代码语言"):
+        Question(id="c2", type="code", stem="s", code_language="brainfuck")

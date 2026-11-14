@@ -1102,7 +1102,13 @@ fn render_answer_inputs(
                 let is_code = item.qtype == "code";
                 let mut text = sheet.answers[idx].clone().unwrap_or_default();
                 let resp = if is_code {
-                    code_answer_editor(ui, &mut text, editable, idx)
+                    crate::code_editor::render_code_editor(
+                        ui,
+                        &mut text,
+                        editable,
+                        idx,
+                        item.code_language.as_deref(),
+                    )
                 } else {
                     ui.add_enabled(
                         editable,
@@ -1133,7 +1139,7 @@ fn render_answer_inputs(
                         "{} 字符 · 本题 {}/{} KiB · 整卡 {}/{} MiB",
                         text.chars().count(),
                         text.len() / 1024,
-                        CODE_MAX_BYTES / 1024,
+                        crate::code_editor::CODE_MAX_BYTES / 1024,
                         sheet.total_answer_bytes() / (1024 * 1024),
                         common::answer_sheet::MAX_TOTAL_ANSWER_BYTES / (1024 * 1024)
                     )
@@ -1157,28 +1163,6 @@ fn render_answer_inputs(
     changed
 }
 
-/// 代码简答题输入框：稳定 ID、等宽、1 MiB 字符上限。
-///
-/// `char_limit` 只限制“控件先吞多少”，最终仍由 `code_value` 按 UTF-8
-/// 字节数校验；两者一起防止粘贴超大文本把界面卡死。
-fn code_answer_editor(
-    ui: &mut egui::Ui,
-    text: &mut String,
-    editable: bool,
-    idx: usize,
-) -> egui::Response {
-    ui.add_enabled(
-        editable,
-        egui::TextEdit::multiline(text)
-            .id(ui.make_persistent_id(("answer_editor", idx)))
-            .code_editor()
-            .char_limit(CODE_MAX_BYTES)
-            .desired_rows(10)
-            .desired_width(ui.available_width())
-            .hint_text("请粘贴完整代码，保留缩进；本题由老师人工评阅"),
-    )
-}
-
 /// 问答题答案上限：防止单题把答题卡撑爆。
 const ESSAY_MAX_CHARS: usize = 5000;
 
@@ -1192,18 +1176,15 @@ fn essay_value(text: &str) -> Option<String> {
     }
 }
 
-/// 代码简答题答案上限（字节）。只防超大 payload；超限必须报错，不能截断。
-const CODE_MAX_BYTES: usize = 1024 * 1024;
-
 /// 代码答案原样保存：不 trim、不替换缩进、不截断。
 fn code_value(text: &str) -> Result<Option<String>, String> {
     if text.trim().is_empty() {
         return Ok(None);
     }
-    if text.len() > CODE_MAX_BYTES {
+    if text.len() > crate::code_editor::CODE_MAX_BYTES {
         return Err(format!(
             "代码超过 {} KiB，未保存；请删减后再试",
-            CODE_MAX_BYTES / 1024
+            crate::code_editor::CODE_MAX_BYTES / 1024
         ));
     }
     Ok(Some(text.to_string()))
@@ -2181,9 +2162,9 @@ mod tests {
         );
         assert_eq!(code_value(""), Ok(None));
         assert_eq!(code_value(" \n\t "), Ok(None), "纯空白代码视为未作答");
-        let max = "x".repeat(CODE_MAX_BYTES);
+        let max = "x".repeat(crate::code_editor::CODE_MAX_BYTES);
         assert!(code_value(&max).is_ok(), "1 MiB 边界内必须接受");
-        let too_long = "x".repeat(CODE_MAX_BYTES + 1);
+        let too_long = "x".repeat(crate::code_editor::CODE_MAX_BYTES + 1);
         assert!(code_value(&too_long).is_err(), "超过 1 MiB 必须拒绝");
     }
 
@@ -2194,6 +2175,7 @@ mod tests {
             qtype: "code".into(),
             stem: "请实现".into(),
             options: vec![],
+            code_language: None,
             body: common::model::QuestionBody::Text,
             score: 10,
         };
@@ -2243,10 +2225,10 @@ mod tests {
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 if focus {
-                    let id = ui.make_persistent_id(("answer_editor", 0));
+                    let id = egui::Id::new(("answer_editor", 0));
                     ui.memory_mut(|m| m.request_focus(id));
                 }
-                rect = code_answer_editor(ui, text, true, 0).rect;
+                rect = crate::code_editor::render_code_editor(ui, text, true, 0, None).rect;
             });
         });
         rect
@@ -2334,6 +2316,7 @@ mod tests {
             qtype: "code".into(),
             stem: "请实现".into(),
             options: vec![],
+            code_language: None,
             body: common::model::QuestionBody::Text,
             score: 10,
         };
@@ -2358,7 +2341,7 @@ mod tests {
         };
         let _ = ctx.run(input(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let id = ui.make_persistent_id(("answer_editor", 0));
+                let id = egui::Id::new(("answer_editor", 0));
                 ui.memory_mut(|m| m.request_focus(id));
                 render_answer_inputs(ui, &item, &mut sheet, 0, true, 0);
             });
