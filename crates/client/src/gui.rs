@@ -1101,19 +1101,18 @@ fn render_answer_inputs(
             if item.qtype == "essay" || item.qtype == "code" {
                 let is_code = item.qtype == "code";
                 let mut text = sheet.answers[idx].clone().unwrap_or_default();
-                let mut edit = egui::TextEdit::multiline(&mut text)
-                    .id(ui.make_persistent_id(("answer_editor", idx)))
-                    .desired_rows(if is_code { 10 } else { 6 })
-                    .desired_width(ui.available_width())
-                    .hint_text(if is_code {
-                        "请粘贴完整代码，保留缩进；本题由老师人工评阅"
-                    } else {
-                        "请在此作答；本题由老师人工评阅"
-                    });
-                if is_code {
-                    edit = edit.code_editor();
-                }
-                let resp = ui.add_enabled(editable, edit);
+                let resp = if is_code {
+                    code_answer_editor(ui, &mut text, editable, idx)
+                } else {
+                    ui.add_enabled(
+                        editable,
+                        egui::TextEdit::multiline(&mut text)
+                            .id(ui.make_persistent_id(("answer_editor", idx)))
+                            .desired_rows(6)
+                            .desired_width(ui.available_width())
+                            .hint_text("请在此作答；本题由老师人工评阅"),
+                    )
+                };
                 let value = if is_code {
                     code_value(&text)
                 } else {
@@ -1150,6 +1149,28 @@ fn render_answer_inputs(
     changed
 }
 
+/// 代码简答题输入框：稳定 ID、等宽、1 MiB 字符上限。
+///
+/// `char_limit` 只限制“控件先吞多少”，最终仍由 `code_value` 按 UTF-8
+/// 字节数校验；两者一起防止粘贴超大文本把界面卡死。
+fn code_answer_editor(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    editable: bool,
+    idx: usize,
+) -> egui::Response {
+    ui.add_enabled(
+        editable,
+        egui::TextEdit::multiline(text)
+            .id(ui.make_persistent_id(("answer_editor", idx)))
+            .code_editor()
+            .char_limit(CODE_MAX_BYTES)
+            .desired_rows(10)
+            .desired_width(ui.available_width())
+            .hint_text("请粘贴完整代码，保留缩进；本题由老师人工评阅"),
+    )
+}
+
 /// 问答题答案上限：防止单题把答题卡撑爆。
 const ESSAY_MAX_CHARS: usize = 5000;
 
@@ -1164,7 +1185,7 @@ fn essay_value(text: &str) -> Option<String> {
 }
 
 /// 代码简答题答案上限（字节）。只防超大 payload；超限必须报错，不能截断。
-const CODE_MAX_BYTES: usize = 256 * 1024;
+const CODE_MAX_BYTES: usize = 1024 * 1024;
 
 /// 代码答案原样保存：不 trim、不替换缩进、不截断。
 fn code_value(text: &str) -> Result<Option<String>, String> {
@@ -2152,8 +2173,10 @@ mod tests {
         );
         assert_eq!(code_value(""), Ok(None));
         assert_eq!(code_value(" \n\t "), Ok(None), "纯空白代码视为未作答");
+        let max = "x".repeat(CODE_MAX_BYTES);
+        assert!(code_value(&max).is_ok(), "1 MiB 边界内必须接受");
         let too_long = "x".repeat(CODE_MAX_BYTES + 1);
-        assert!(code_value(&too_long).is_err());
+        assert!(code_value(&too_long).is_err(), "超过 1 MiB 必须拒绝");
     }
 
     #[test]
@@ -2192,6 +2215,93 @@ mod tests {
             });
         });
         assert_eq!(sheet.answers[0].as_deref(), Some(code));
+    }
+
+    fn run_code_editor_frame(
+        ctx: &egui::Context,
+        text: &mut String,
+        events: Vec<egui::Event>,
+        focus: bool,
+    ) -> egui::Rect {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut rect = egui::Rect::NOTHING;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if focus {
+                    let id = ui.make_persistent_id(("answer_editor", 0));
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
+                rect = code_answer_editor(ui, text, true, 0).rect;
+            });
+        });
+        rect
+    }
+
+    #[test]
+    fn code_input_accepts_paste_event() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        run_code_editor_frame(&ctx, &mut text, vec![], true);
+        let code = "def f():\n\treturn 1  \n";
+        run_code_editor_frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Paste(code.to_string())],
+            false,
+        );
+        assert_eq!(text, code, "Event::Paste 必须原样进入 code 输入框");
+    }
+
+    #[test]
+    fn code_input_accepts_ime_commit() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        run_code_editor_frame(&ctx, &mut text, vec![], true);
+        run_code_editor_frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Ime(egui::ImeEvent::Enabled)],
+            false,
+        );
+        run_code_editor_frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Ime(egui::ImeEvent::Commit("中文".into()))],
+            false,
+        );
+        assert!(text.contains("中文"), "IME Commit 必须进入 code 输入框");
+    }
+
+    #[test]
+    fn code_input_replaces_selection_with_text() {
+        let ctx = egui::Context::default();
+        let mut text = "abcdef".to_string();
+        run_code_editor_frame(&ctx, &mut text, vec![], true);
+        run_code_editor_frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Key {
+                key: egui::Key::A,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    ctrl: true,
+                    command: true,
+                    ..Default::default()
+                },
+            }],
+            false,
+        );
+        run_code_editor_frame(&ctx, &mut text, vec![egui::Event::Text("XY".into())], false);
+        assert_eq!(text, "XY", "Ctrl+A 后输入应替换选中文本");
     }
 
     #[test]
