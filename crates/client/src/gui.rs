@@ -1130,18 +1130,26 @@ fn render_answer_inputs(
                 }
                 let counter = if is_code {
                     format!(
-                        "{} 字符 · 已用 {} / {} KiB",
+                        "{} 字符 · 本题 {}/{} KiB · 整卡 {}/{} MiB",
                         text.chars().count(),
                         text.len() / 1024,
-                        CODE_MAX_BYTES / 1024
+                        CODE_MAX_BYTES / 1024,
+                        sheet.total_answer_bytes() / (1024 * 1024),
+                        common::answer_sheet::MAX_TOTAL_ANSWER_BYTES / (1024 * 1024)
                     )
                 } else {
                     format!("{} 字符", text.chars().count())
                 };
+                let total_too_large =
+                    sheet.total_answer_bytes() > common::answer_sheet::MAX_TOTAL_ANSWER_BYTES;
                 ui.label(
                     egui::RichText::new(counter)
                         .size(12.0)
-                        .color(egui::Color32::GRAY),
+                        .color(if total_too_large {
+                            egui::Color32::from_rgb(200, 60, 60)
+                        } else {
+                            egui::Color32::GRAY
+                        }),
                 );
             }
         }

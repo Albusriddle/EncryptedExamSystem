@@ -134,11 +134,7 @@ impl AnswerSheet {
                 self.answers.len()
             )));
         }
-        let total: usize = self
-            .answers
-            .iter()
-            .filter_map(|a| a.as_ref().map(String::len))
-            .sum();
+        let total = self.total_answer_bytes();
         if total > MAX_TOTAL_ANSWER_BYTES {
             return Err(AnswerSheetError::BadContent(format!(
                 "答案总大小 {total} 字节超过上限 {} 字节",
@@ -146,6 +142,14 @@ impl AnswerSheet {
             )));
         }
         Ok(())
+    }
+
+    /// 当前所有答案的 UTF-8 字节总数。
+    pub fn total_answer_bytes(&self) -> usize {
+        self.answers
+            .iter()
+            .filter_map(|a| a.as_ref().map(String::len))
+            .sum()
     }
 
     /// 已作答题数。
