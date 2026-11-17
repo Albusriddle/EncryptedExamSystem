@@ -73,7 +73,11 @@ class Question(BaseModel):
     #: 代码简答题**单个**允许语言（旧字段）。
     code_language: str | None = None
     #: 代码简答题**多个**允许语言（新字段）；与 code_language 不共存。
-    code_languages: list[str] = Field(default_factory=list)
+    code_languages: list[str] = Field(
+        default_factory=list,
+        max_length=8,
+        json_schema_extra={"uniqueItems": True},
+    )
     kp: str | None = None
     difficulty: int | None = Field(default=None, ge=0, le=255)
     #: 结构化答案（single/multi/blanks/fixes）。打包时会被剥离。

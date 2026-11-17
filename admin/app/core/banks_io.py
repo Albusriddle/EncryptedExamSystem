@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from app.core.models import ExamBank, validate_exam_id
@@ -37,6 +38,10 @@ def write_temp_banks(banks: dict[str, ExamBank], tmpdir: Path) -> None:
             q.judge = None
         # exclude_none：答案/判分材料是 None 时连键都不写，
         # 而不是留一个 `"judge": null`——少一个字段就少一次被误读的机会。
-        (tmpdir / name).write_text(
-            stripped.model_dump_json(by_alias=True, exclude_none=True), encoding="utf-8"
-        )
+        # 语言字段：规范要求“二选一”。空数组不算“写了”，但留在 JSON 里
+        # 会让人误以为两字段共存，所以空的时候直接删掉这个键。
+        data = stripped.model_dump(mode="python", by_alias=True, exclude_none=True)
+        for q in data.get("questions", []):
+            if not q.get("code_languages"):
+                q.pop("code_languages", None)
+        (tmpdir / name).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")

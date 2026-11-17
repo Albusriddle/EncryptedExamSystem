@@ -59,8 +59,10 @@
           "items": {
             "type": "string"
           },
+          "maxItems": 8,
           "title": "Code Languages",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         },
         "kp": {
           "anyOf": [

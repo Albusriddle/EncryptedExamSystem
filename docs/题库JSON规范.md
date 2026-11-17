@@ -87,7 +87,8 @@
   - 只允许 1 种语言 → 写 `code_language`（字符串）；
   - 允许 ≥2 种语言 → 写 `code_languages`（数组，最多 8 个）；
   - 都不写 → 学生端不限制语言，学生可自选；
-  - 两个都写 → 导入/打包直接报错 `code_language 与 code_languages 不能同时填写`。
+  - 两个都写 → 导入/打包直接报错 `code_language 与 code_languages 不能同时填写`；
+  - 空数组 `[]` 等价于“没写”，打包时不会输出该字段。
 - 支持的语言：`python` / `c` / `cpp` / `java` / `rust` / `javascript` / `typescript` / `go` / `sql` / `bash` / `text`；
 - 单语言时旧学生端（v1.1–v1.2）仍能高亮；多语言时旧学生端忽略该字段，仍可作答但无高亮；
 - `answer` 可省略或为 `null`；代码题由教师人工评分；

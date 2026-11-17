@@ -224,6 +224,27 @@ class ReviewWorker(QThread):
         self.done.emit(out)
 
 
+def _language_note(chosen: str, question) -> str:
+    """把“学生自报语言”整理成给老师看的一列。
+
+    - 学生没选 → 空；
+    - 老师未限制语言 → 原样显示；
+    - 在允许集合内 → 原样显示；
+    - 不在允许集合内 → 标注“超出允许”，提示老师人工留意（不参与判分）。
+    """
+    if not chosen:
+        return ""
+    allowed: list[str] = []
+    if question is not None:
+        allowed = list(getattr(question, "code_languages", []) or [])
+        single = getattr(question, "code_language", None)
+        if not allowed and single:
+            allowed = [single]
+    if not allowed or chosen in allowed:
+        return chosen
+    return f"{chosen}（超出允许：{'/'.join(allowed)}）"
+
+
 class AnswersTab(QWidget):
     """答题卡列表 + 校验 + 自动判分 + 导出。"""
 
@@ -875,6 +896,7 @@ class AnswersTab(QWidget):
 
     def _export_csv(self) -> None:
         rows = []
+        bank = self._bank_by_qid()
         for path in self.files:
             name = path.name
             result = self.results.get(str(path)) or {}
@@ -896,7 +918,9 @@ class AnswersTab(QWidget):
                         "题目ID": qid,
                         "作答": "" if value is None else value,
                         "是否作答": "否" if value is None else "是",
-                        "学生自报语言": chosen.get(str(qid), ""),
+                        "学生自报语言": _language_note(
+                            chosen.get(str(qid), ""), bank.get(str(qid))
+                        ),
                         "交卷时间": submitted,
                     }
                 )

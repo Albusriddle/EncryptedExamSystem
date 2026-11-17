@@ -354,6 +354,10 @@ pub fn read_header(bytes: &[u8]) -> Result<AnswerFileHeader, AnswerSheetError> {
     if !(MIN_SUPPORTED_VERSION..=VERSION).contains(&version) {
         return Err(AnswerSheetError::BadVersion(version));
     }
+    // 魔数与版本必须自洽：v1 魔数只能配 v1，避免手工拼出的“半新半旧”文件。
+    if magic == MAGIC_V1 && version != 1 {
+        return Err(AnswerSheetError::BadVersion(version));
+    }
     let student_id = u64::from_le_bytes(bytes[12..20].try_into().expect("8 字节"));
     let session_id = u32::from_le_bytes(bytes[20..24].try_into().expect("4 字节"));
     let fp = std::str::from_utf8(&bytes[24..HEAD])

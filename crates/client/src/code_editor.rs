@@ -109,9 +109,7 @@ pub fn infer_language(stem: &str) -> Option<&'static str> {
 ///
 /// 顺序：题干围栏 → 内容特征。识别不出返回 `None`，绝不猜。
 pub fn detect_language(stem: &str, code: &str) -> Option<&'static str> {
-    if let Some(lang) = infer_language(stem) {
-        return Some(lang);
-    }
+    // 按钮语义是“按代码内容识别”，所以内容优先；题干围栏只作最后兜底。
     let lower = code.to_ascii_lowercase();
     let has = |needle: &str| lower.contains(needle);
     if has("#include <iostream>") || has("std::") || has("using namespace std") {
@@ -120,7 +118,12 @@ pub fn detect_language(stem: &str, code: &str) -> Option<&'static str> {
     if has("#include <stdio.h>") || has("int main(") || has("printf(") || has("scanf(") {
         return Some("c");
     }
-    if has("public static void") || has("system.out.println") || has("import java.") {
+    if has("public static void")
+        || has("system.out.println")
+        || has("import java.")
+        || has("public class ")
+        || has("private class ")
+    {
         return Some("java");
     }
     if has("fn main") || has("let mut ") || has("impl ") || has("println!(") {
@@ -141,10 +144,18 @@ pub fn detect_language(stem: &str, code: &str) -> Option<&'static str> {
     if lower.trim_start().starts_with("select ") || has("select ") && has(" from ") {
         return Some("sql");
     }
-    if has("def ") || has("import ") || has("print(") || lower.trim_start().starts_with("class ") {
+    // Python 的块以冒号结尾（class A: / def f():），Java 用大括号。
+    for line in lower.lines() {
+        let t = line.trim();
+        if (t.starts_with("class ") || t.starts_with("def ")) && t.ends_with(':') {
+            return Some("python");
+        }
+    }
+    if has("def ") || has("import ") || has("print(") || has("if __name__") || has("self.") {
         return Some("python");
     }
-    None
+    // 内容认不出时，退回题干围栏。
+    infer_language(stem)
 }
 
 fn highlighted_job(ui: &egui::Ui, text: &str, language: Option<&str>) -> LayoutJob {
@@ -188,6 +199,19 @@ pub struct CodeEditorOutcome {
     pub chosen_language: Option<String>,
 }
 
+/// 读取“自动识别语言”的提示。
+///
+/// egui 的 `get_temp`/`insert_temp` 按 `TypeId` 存取值：这里必须**存取同一类型**
+/// （`String`），否则读回永远是 `None`，提示只显示一帧——v1.3.0 的真实 bug。
+fn load_hint(ui: &egui::Ui, id: egui::Id) -> Option<String> {
+    ui.data(|d| d.get_temp::<String>(id))
+        .filter(|s| !s.is_empty())
+}
+
+fn save_hint(ui: &egui::Ui, id: egui::Id, hint: Option<&str>) {
+    ui.data_mut(|d| d.insert_temp(id, hint.unwrap_or("").to_string()));
+}
+
 /// 决定本次显示用哪种语言。
 ///
 /// 优先级：学生已选（且在允许范围内）→ 老师允许的第一个 → 题干围栏 → 无。
@@ -221,19 +245,20 @@ pub fn render_code_editor(
 ) -> CodeEditorOutcome {
     let mut chosen_language: Option<String> = None;
     let hint_id = egui::Id::new(("code_lang_hint", idx));
-    let mut hint: Option<String> = ui.data(|d| d.get_temp(hint_id));
+    let mut hint: Option<String> = load_hint(ui, hint_id);
+    let current = effective_language(allowed, stored, stem);
 
     // ---- 语言选择行 ----
     ui.horizontal_wrapped(|ui| {
         ui.label("语言：");
-        if allowed.len() == 1 {
-            // 老师只允许一种：只读灰色显示，不给选择机会。
-            ui.add_enabled(
-                false,
-                egui::Label::new(egui::RichText::new(display_name(&allowed[0])).weak()),
-            );
+        if allowed.len() == 1 || !editable {
+            // 只允许一种，或已交卷/回看：只读灰色显示，不给选择机会。
+            let text = current
+                .as_deref()
+                .map(display_name)
+                .unwrap_or_else(|| "未选择".to_string());
+            ui.add_enabled(false, egui::Label::new(egui::RichText::new(text).weak()));
         } else {
-            let current = effective_language(allowed, stored, stem);
             let current_label = current
                 .as_deref()
                 .map(display_name)
@@ -243,32 +268,26 @@ pub fn render_code_editor(
                 .selected_text(current_label)
                 .width(150.0)
                 .show_ui(ui, |ui| {
-                    if allowed.is_empty() {
-                        for lang in crate::code_editor::ALL_LANGUAGES {
-                            let selected = current.as_deref() == Some(*lang);
-                            if ui.selectable_label(selected, display_name(lang)).clicked() {
-                                next = Some((*lang).to_string());
-                            }
-                        }
+                    let options: Vec<&str> = if allowed.is_empty() {
+                        crate::code_editor::ALL_LANGUAGES.to_vec()
                     } else {
-                        for lang in allowed {
-                            let selected = current.as_deref() == Some(lang.as_str());
-                            if ui.selectable_label(selected, display_name(lang)).clicked() {
-                                next = Some(lang.clone());
-                            }
+                        allowed.iter().map(String::as_str).collect()
+                    };
+                    for lang in options {
+                        let selected = current.as_deref() == Some(lang);
+                        if ui.selectable_label(selected, display_name(lang)).clicked() {
+                            next = Some(lang.to_string());
                         }
                     }
                 });
-            if let Some(lang) = next
-                && editable
-            {
+            if let Some(lang) = next {
                 chosen_language = Some(lang);
                 hint = None;
             }
         }
 
-        // 自动识别：单语言题没有意义，直接隐藏。
-        if allowed.len() != 1 {
+        // 自动识别：单语言题没有意义；只读状态下也不允许改。
+        if allowed.len() != 1 && editable {
             if ui.button("自动识别语言").clicked() {
                 if text.trim().is_empty() {
                     hint = Some("请先粘贴代码，再自动识别。".to_string());
@@ -288,7 +307,7 @@ pub fn render_code_editor(
                     hint = Some("未能识别语言，请手动选择。".to_string());
                 }
             }
-        } else {
+        } else if allowed.len() == 1 {
             hint = None;
         }
 
@@ -308,7 +327,7 @@ pub fn render_code_editor(
                 .color(ui.visuals().weak_text_color()),
         );
     }
-    ui.data_mut(|d| d.insert_temp(hint_id, hint));
+    save_hint(ui, hint_id, hint.as_deref());
 
     let language = effective_language(allowed, stored, stem);
     let language = language.as_deref();
@@ -502,6 +521,53 @@ mod tests {
             effective_language(&[], None, "```python\nx\n```").as_deref(),
             Some("python")
         );
+    }
+
+    #[test]
+    fn hint_survives_across_frames() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("hint-probe");
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input.clone(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                save_hint(ui, id, Some("已识别为 C"));
+            });
+        });
+        let mut read = None;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                read = load_hint(ui, id);
+            });
+        });
+        assert_eq!(
+            read.as_deref(),
+            Some("已识别为 C"),
+            "提示必须能跨帧读回（v1.3.0 曾因存取类型不一致只显示一帧）"
+        );
+    }
+
+    #[test]
+    fn detect_language_prefers_code_over_stem_fence() {
+        // 题干写着 python，但代码明显是 C：按“代码内容”应识别为 C。
+        let stem = "```python\n样例\n```";
+        assert_eq!(
+            detect_language(stem, "#include <stdio.h>\nint main(void){}"),
+            Some("c")
+        );
+        // 内容认不出时才退回围栏。
+        assert_eq!(detect_language(stem, "看不懂"), Some("python"));
+    }
+
+    #[test]
+    fn java_class_is_not_python() {
+        assert_eq!(detect_language("", "public class A { }"), Some("java"));
+        assert_eq!(detect_language("", "class A:\n    pass"), Some("python"));
     }
 
     #[test]

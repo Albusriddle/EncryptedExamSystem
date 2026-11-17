@@ -364,3 +364,17 @@ def test_review_worker_reports_failure(qapp, monkeypatch) -> None:
     worker.run()
     qapp.processEvents()
     assert errors and "boom" in errors[0]
+
+
+def test_language_note_marks_out_of_range_choice() -> None:
+    from app.core.models import Question
+    from app.ui.tab_answers import _language_note
+
+    q = Question(id="c1", type="code", stem="s", code_languages=["c", "cpp"])
+    assert _language_note("", q) == ""
+    assert _language_note("c", q) == "c"
+    assert "超出允许" in _language_note("python", q)
+    assert "c/cpp" in _language_note("python", q)
+
+    unrestricted = Question(id="c2", type="code", stem="s")
+    assert _language_note("python", unrestricted) == "python"
