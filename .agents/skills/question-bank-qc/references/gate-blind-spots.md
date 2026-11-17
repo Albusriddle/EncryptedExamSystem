@@ -6,7 +6,8 @@
 
 | 能力 | 源码位置（约） | 判定 |
 |---|---|---|
-| 5 个文件存在、题数 500/50/50/4/4 | `check_bank` | error |
+| 5 个文件存在 | `main()` | error |
+| 题数 500/50/50/4/4 | `check_bank` | error |
 | id 库内唯一、kp 编号范围、difficulty 合法、score 整数 | `check_question` | error |
 | `pick` 在 1..题量 | `check_bank` | error |
 | 选择题 4 选项、键/文本不重复、答案在选项内、多选 2–3 且升序 | `check_question` | error |

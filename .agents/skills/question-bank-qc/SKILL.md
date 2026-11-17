@@ -46,7 +46,7 @@ description: Use when a C-language question bank must be produced, rebuilt, revi
 | A7 | 空位钉死 | `fill_inject.py` | 注入错误值必须失败；域内等价须逐条归类说明 |
 | A8 | 重复 | `verify.py` + `qc.py` | 库内/跨库逐字 0；骨架族 ≤4；骨架种类 choice ≥120、fill/fix ≥30 |
 | A9 | 答案位置 | 统计 | 单选项 A/B/C/D 各 18%–32%；与 `"ABCD"[i%4]` 吻合 <35% |
-| A10 | 代码排版 | `verify.py` 排版规则 | 禁止单行 `int main`；单行块 ≤40 字符；程序片段禁止行内代码；4 空格缩进 |
+| A10 | 代码排版 | `verify.py` + `qc.py` V2 | 禁止单行 `int main`；单行块 ≤40 字符；程序片段禁止行内代码（以上 `verify.py` error）；4 空格缩进由 `qc.py` V2 检查（warning） |
 | A11 | 选项可见性 | `qc.py` V1 | 选项去首尾空白后两两不同；禁止仅差空格的选项 |
 | A12 | 判题写文件 | `verify.py` | harness 含 `fopen/fprintf/freopen` 即 error |
 
