@@ -143,3 +143,14 @@ def test_code_language_is_validated() -> None:
     assert q.code_language == "python"
     with pytest.raises(ValueError, match="不支持的代码语言"):
         Question(id="c2", type="code", stem="s", code_language="brainfuck")
+
+
+def test_code_languages_multi_and_conflict() -> None:
+    from app.core.models import Question
+
+    q = Question(id="c1", type="code", stem="s", code_languages=["C", "cpp", "python"])
+    assert q.code_languages == ["c", "cpp", "python"], "应小写去重"
+    q2 = Question(id="c2", type="code", stem="s", code_languages=["c", "c"])
+    assert q2.code_languages == ["c"]
+    with pytest.raises(ValueError, match="不能同时填写"):
+        Question(id="c3", type="code", stem="s", code_language="c", code_languages=["c"])

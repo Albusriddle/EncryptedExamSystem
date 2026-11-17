@@ -25,10 +25,14 @@ use zeroize::Zeroizing;
 use crate::crypto;
 use crate::picker::Paper;
 
-/// 文件魔数（8 字节）。
-pub const MAGIC: &[u8; 8] = b"EESANS01";
-/// 文件版本。
-pub const VERSION: u32 = 1;
+/// 文件魔数（8 字节）。v2 起用新魔数，读取时仍接受 v1 旧卡。
+pub const MAGIC: &[u8; 8] = b"EESANS02";
+/// v1 旧魔数（只读兼容）。
+pub const MAGIC_V1: &[u8; 8] = b"EESANS01";
+/// 当前文件版本。v2 增加“学生自报代码语言”。
+pub const VERSION: u32 = 2;
+/// 可读取的最低版本。
+pub const MIN_SUPPORTED_VERSION: u32 = 1;
 /// 指纹长度（blake3 hex）。
 pub const FP_LEN: usize = 64;
 /// HKDF 用途标签。
@@ -76,6 +80,12 @@ pub struct AnswerSheet {
     /// 交卷时间（Unix 秒）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submitted_unix: Option<u64>,
+    /// 学生对各代码题自报的语言（qid → 语言）。
+    ///
+    /// 只记录学生**显式选择**的语言，用于阅卷时参考与显示；
+    /// 不参与判分，也不影响试卷指纹。旧 v1 答题卡没有该字段。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub chosen_code_languages: std::collections::BTreeMap<String, String>,
 }
 
 impl AnswerSheet {
@@ -100,6 +110,7 @@ impl AnswerSheet {
             updated_unix: now_unix,
             submitted: false,
             submitted_unix: None,
+            chosen_code_languages: std::collections::BTreeMap::new(),
         }
     }
 
@@ -107,6 +118,25 @@ impl AnswerSheet {
     pub fn validate(&self) -> Result<(), AnswerSheetError> {
         if self.version != VERSION {
             return Err(AnswerSheetError::BadVersion(self.version));
+        }
+        if self.chosen_code_languages.len() > self.qids.len() {
+            return Err(AnswerSheetError::BadContent(format!(
+                "自报语言条目 {} 多于题目数 {}",
+                self.chosen_code_languages.len(),
+                self.qids.len()
+            )));
+        }
+        for (qid, lang) in &self.chosen_code_languages {
+            if !self.qids.iter().any(|q| q == qid) {
+                return Err(AnswerSheetError::BadContent(format!(
+                    "自报语言里的题号 {qid} 不在本卡题目列表中"
+                )));
+            }
+            if lang.len() > 16 || !crate::model::CODE_LANGUAGES.contains(&lang.as_str()) {
+                return Err(AnswerSheetError::BadContent(format!(
+                    "自报语言 {lang} 不是受支持的语言"
+                )));
+            }
         }
         if self.paper_fingerprint.len() != FP_LEN
             || !self
@@ -177,6 +207,27 @@ impl AnswerSheet {
             return false;
         }
         self.answers[idx] = value;
+        self.updated_unix = now_unix;
+        true
+    }
+
+    /// 记录学生显式选择的代码语言（已冻结则忽略）。
+    pub fn set_chosen_language(&mut self, qid: &str, language: &str, now_unix: u64) -> bool {
+        if self.submitted {
+            return false;
+        }
+        if !crate::model::CODE_LANGUAGES.contains(&language) {
+            return false;
+        }
+        if !self.qids.iter().any(|q| q == qid) {
+            return false;
+        }
+        let previous = self.chosen_code_languages.get(qid).cloned();
+        if previous.as_deref() == Some(language) {
+            return false;
+        }
+        self.chosen_code_languages
+            .insert(qid.to_string(), language.to_string());
         self.updated_unix = now_unix;
         true
     }
@@ -295,11 +346,12 @@ pub fn read_header(bytes: &[u8]) -> Result<AnswerFileHeader, AnswerSheetError> {
     if bytes.len() < HEAD {
         return Err(AnswerSheetError::Truncated);
     }
-    if &bytes[..8] != MAGIC {
+    let magic = &bytes[..8];
+    if magic != MAGIC && magic != MAGIC_V1 {
         return Err(AnswerSheetError::BadMagic);
     }
     let version = u32::from_le_bytes(bytes[8..12].try_into().expect("4 字节"));
-    if version != VERSION {
+    if !(MIN_SUPPORTED_VERSION..=VERSION).contains(&version) {
         return Err(AnswerSheetError::BadVersion(version));
     }
     let student_id = u64::from_le_bytes(bytes[12..20].try_into().expect("8 字节"));
@@ -333,8 +385,16 @@ pub fn open(k_manifest: &[u8; 32], bytes: &[u8]) -> Result<AnswerSheet, AnswerSh
         ),
     )
     .map_err(|_| AnswerSheetError::Decrypt)?;
-    let sheet: AnswerSheet = serde_json::from_slice(&plaintext)
+    let mut sheet: AnswerSheet = serde_json::from_slice(&plaintext)
         .map_err(|e| AnswerSheetError::BadContent(format!("解析 JSON 失败: {e}")))?;
+    if sheet.version != header.version {
+        return Err(AnswerSheetError::BadContent(format!(
+            "头部版本 {} 与内容版本 {} 不一致",
+            header.version, sheet.version
+        )));
+    }
+    // 旧 v1 卡读入后统一升为当前内存版本；缺失字段由 serde default 补齐。
+    sheet.version = VERSION;
     sheet.validate()?;
     // 头部与内容必须一致（防"换了头部另配一份密文"）
     if sheet.student_id != header.student_id
@@ -374,6 +434,7 @@ mod tests {
                     stem: "s".into(),
                     options: vec!["a".into(), "b".into()],
                     code_language: None,
+                    code_languages: Vec::new(),
                     body: Default::default(),
                     kp: None,
                     difficulty: None,
@@ -420,6 +481,57 @@ mod tests {
         let bytes = seal(&k, &s).unwrap();
         let back = open(&k, &bytes).unwrap();
         assert_eq!(back.answers[0].as_deref(), Some(code));
+    }
+
+    #[test]
+    fn chosen_languages_roundtrip_and_validate() {
+        let mut s = sheet();
+        assert!(s.set_chosen_language("q0", "cpp", 1001));
+        assert!(!s.set_chosen_language("q0", "cpp", 1002), "同值不应重复写");
+        assert!(
+            !s.set_chosen_language("nope", "c", 1003),
+            "题号不在卡内应拒绝"
+        );
+        assert!(
+            !s.set_chosen_language("q1", "brainfuck", 1004),
+            "非法语言应拒绝"
+        );
+        let k = [11u8; 32];
+        let bytes = seal(&k, &s).unwrap();
+        let back = open(&k, &bytes).unwrap();
+        assert_eq!(
+            back.chosen_code_languages.get("q0").map(String::as_str),
+            Some("cpp")
+        );
+    }
+
+    #[test]
+    fn v1_card_without_language_field_is_readable() {
+        let mut s = sheet();
+        s.set_answer(0, Some("B".into()), 1001);
+        // 手工构造 v1 落盘字节：旧魔数、版本 1、JSON 里没有 chosen_code_languages。
+        let mut v1 = serde_json::to_value(&s).unwrap();
+        v1["version"] = serde_json::json!(1);
+        v1.as_object_mut().unwrap().remove("chosen_code_languages");
+        let plaintext = serde_json::to_vec(&v1).unwrap();
+        let key = answer_key(&[12u8; 32], &s.paper_fingerprint).unwrap();
+        let ct = crypto::encrypt(
+            &key,
+            &plaintext,
+            &aad(s.student_id, s.session_id, &s.paper_fingerprint),
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC_V1);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&s.student_id.to_le_bytes());
+        bytes.extend_from_slice(&s.session_id.to_le_bytes());
+        bytes.extend_from_slice(s.paper_fingerprint.as_bytes());
+        bytes.extend_from_slice(&ct);
+        let back = open(&[12u8; 32], &bytes).expect("旧 v1 卡必须仍可读");
+        assert_eq!(back.version, VERSION, "读入后统一升为当前版本");
+        assert!(back.chosen_code_languages.is_empty());
+        assert_eq!(back.answers[0].as_deref(), Some("B"));
     }
 
     #[test]

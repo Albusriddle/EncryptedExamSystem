@@ -70,8 +70,10 @@ class Question(BaseModel):
     stem: str
     options: list[str] = Field(default_factory=list)
     body: QuestionBody = Field(default_factory=QuestionBody)
-    #: 代码简答题语言；仅 type=code 使用。
+    #: 代码简答题**单个**允许语言（旧字段）。
     code_language: str | None = None
+    #: 代码简答题**多个**允许语言（新字段）；与 code_language 不共存。
+    code_languages: list[str] = Field(default_factory=list)
     kp: str | None = None
     difficulty: int | None = Field(default=None, ge=0, le=255)
     #: 结构化答案（single/multi/blanks/fixes）。打包时会被剥离。
@@ -105,6 +107,18 @@ class Question(BaseModel):
             if lang not in allowed_langs:
                 raise ValueError(f"不支持的代码语言：{self.code_language!r}")
             self.code_language = lang
+        cleaned: list[str] = []
+        for raw in self.code_languages:
+            lang = str(raw).strip().lower()
+            if lang not in allowed_langs:
+                raise ValueError(f"不支持的代码语言：{raw!r}")
+            if lang not in cleaned:
+                cleaned.append(lang)
+        self.code_languages = cleaned
+        if self.code_languages and self.code_language is not None:
+            raise ValueError("code_language 与 code_languages 不能同时填写，二者只写一个")
+        if len(self.code_languages) > 8:
+            raise ValueError("code_languages 最多 8 个")
         return self
 
     @field_validator("qtype")

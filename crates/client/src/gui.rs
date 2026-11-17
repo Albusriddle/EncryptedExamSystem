@@ -1101,15 +1101,25 @@ fn render_answer_inputs(
             if item.qtype == "essay" || item.qtype == "code" {
                 let is_code = item.qtype == "code";
                 let mut text = sheet.answers[idx].clone().unwrap_or_default();
+                let mut chosen_language = None;
                 let resp = if is_code {
-                    crate::code_editor::render_code_editor(
+                    // 学生已选语言（若有）要在渲染前取出，避免与后面的可变借用冲突。
+                    let stored = sheet
+                        .qids
+                        .get(idx)
+                        .and_then(|q| sheet.chosen_code_languages.get(q))
+                        .cloned();
+                    let outcome = crate::code_editor::render_code_editor(
                         ui,
                         &mut text,
                         editable,
                         idx,
-                        item.code_language.as_deref(),
+                        &item.code_languages,
+                        stored.as_deref(),
                         &item.stem,
-                    )
+                    );
+                    chosen_language = outcome.chosen_language;
+                    outcome.response
                 } else {
                     ui.add_enabled(
                         editable,
@@ -1120,6 +1130,12 @@ fn render_answer_inputs(
                             .hint_text("请在此作答；本题由老师人工评阅"),
                     )
                 };
+                if let Some(lang) = chosen_language
+                    && let Some(qid) = sheet.qids.get(idx).cloned()
+                    && sheet.set_chosen_language(&qid, &lang, now_unix)
+                {
+                    changed = true;
+                }
                 let value = if is_code {
                     code_value(&text)
                 } else {
@@ -2176,7 +2192,7 @@ mod tests {
             qtype: "code".into(),
             stem: "请实现".into(),
             options: vec![],
-            code_language: None,
+            code_languages: Vec::new(),
             body: common::model::QuestionBody::Text,
             score: 10,
         };
@@ -2191,6 +2207,7 @@ mod tests {
             updated_unix: 0,
             submitted: false,
             submitted_unix: None,
+            chosen_code_languages: Default::default(),
         };
         let ctx = egui::Context::default();
         let input = egui::RawInput {
@@ -2229,7 +2246,9 @@ mod tests {
                     let id = egui::Id::new(("answer_editor", 0));
                     ui.memory_mut(|m| m.request_focus(id));
                 }
-                rect = crate::code_editor::render_code_editor(ui, text, true, 0, None, "").rect;
+                rect = crate::code_editor::render_code_editor(ui, text, true, 0, &[], None, "")
+                    .response
+                    .rect;
             });
         });
         rect
@@ -2317,7 +2336,7 @@ mod tests {
             qtype: "code".into(),
             stem: "请实现".into(),
             options: vec![],
-            code_language: None,
+            code_languages: Vec::new(),
             body: common::model::QuestionBody::Text,
             score: 10,
         };
@@ -2331,6 +2350,7 @@ mod tests {
             updated_unix: 0,
             submitted: false,
             submitted_unix: None,
+            chosen_code_languages: Default::default(),
         };
         let ctx = egui::Context::default();
         let input = || egui::RawInput {
@@ -2373,6 +2393,7 @@ mod tests {
             updated_unix: 0,
             submitted: false,
             submitted_unix: None,
+            chosen_code_languages: Default::default(),
         };
         assert!(sheet.set_answer(0, essay_value("第一行\n第二行"), 100));
         assert_eq!(sheet.answers[0].as_deref(), Some("第一行\n第二行"));

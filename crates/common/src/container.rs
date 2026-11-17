@@ -1288,6 +1288,7 @@ mod tests {
                     stem: "s".into(),
                     options: vec!["A".into()],
                     code_language: None,
+                    code_languages: Vec::new(),
                     body: Default::default(),
                     kp: None,
                     difficulty: None,

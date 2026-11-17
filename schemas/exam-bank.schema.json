@@ -55,6 +55,13 @@
           "default": null,
           "title": "Code Language"
         },
+        "code_languages": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Code Languages",
+          "type": "array"
+        },
         "kp": {
           "anyOf": [
             {

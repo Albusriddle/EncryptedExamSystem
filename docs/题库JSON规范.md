@@ -75,7 +75,7 @@
 {
   "id": "code-1",
   "type": "code",
-  "code_language": "python",
+  "code_languages": ["c", "cpp", "python"],
   "stem": "请实现 `reverse(s)`：\n\n```python\ndef reverse(s):\n    ...\n```",
   "body": { "kind": "text" },
   "score": 10
@@ -83,9 +83,15 @@
 ```
 
 - **不要**写成 `body.kind = "code"`；`code` body 是“改错题逐行代码”，不是代码作答；
-- `code_language` 可选：`python`/`c`/`cpp`/`java`/`rust`/`javascript`/`typescript`/`go`/`sql`/`bash`/`text`；缺省不高亮；
+- **语言字段二选一，不允许同时出现**：
+  - 只允许 1 种语言 → 写 `code_language`（字符串）；
+  - 允许 ≥2 种语言 → 写 `code_languages`（数组，最多 8 个）；
+  - 都不写 → 学生端不限制语言，学生可自选；
+  - 两个都写 → 导入/打包直接报错 `code_language 与 code_languages 不能同时填写`。
+- 支持的语言：`python` / `c` / `cpp` / `java` / `rust` / `javascript` / `typescript` / `go` / `sql` / `bash` / `text`；
+- 单语言时旧学生端（v1.1–v1.2）仍能高亮；多语言时旧学生端忽略该字段，仍可作答但无高亮；
 - `answer` 可省略或为 `null`；代码题由教师人工评分；
-- 学生端要求 **v1.1.0+**；
+- 学生端要求 **v1.1.0+**；语言下拉框与“自动识别语言”按钮需 **v1.3.0+**；
 - 答案原样保存在答题卡 `answers` 字符串里，换行、缩进、行尾空格不做 trim；
 - 解密 JSON 后可直接提取：
 
@@ -98,6 +104,8 @@ exam-builder verify-answer-sheet answers-2021001-1.eea \
 import json
 data = json.load(open("result.json", encoding="utf-8"))
 code = data["sheet"]["answers"][0]
+# 学生自报的语言（若学生选过）：
+lang = data["sheet"].get("chosen_code_languages", {}).get("<题目ID>")
 open("answer.py", "w", encoding="utf-8", newline="").write(code)
 ```
 

@@ -6,6 +6,23 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 代码简答题支持的语言（与客户端 syntect、管理端校验、文档保持一致）。
+pub const CODE_LANGUAGES: [&str; 11] = [
+    "python",
+    "c",
+    "cpp",
+    "java",
+    "rust",
+    "javascript",
+    "typescript",
+    "go",
+    "sql",
+    "bash",
+    "text",
+];
+/// 单题允许语言数量上限。
+pub const MAX_CODE_LANGUAGES: usize = 8;
+
 /// 一个选项。保留键（A/B/C…），顺序即呈现顺序。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChoiceOption {
@@ -59,10 +76,16 @@ pub struct Question {
     /// 题目正文形态（旧题库缺省为 `Text`，此时用 `options` 渲染）。
     #[serde(default)]
     pub body: QuestionBody,
-    /// 代码简答题语言（python/c/cpp/java/rust/javascript/typescript/go/sql/bash）。
-    /// 旧题库/非代码题缺省为 None；只在 code 题型使用。
+    /// 代码简答题**单个**允许语言（旧字段，兼容既有题库）。
+    ///
+    /// 与 `code_languages` **不共存**：两个都有时以 `code_languages` 为准。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_language: Option<String>,
+    /// 代码简答题**多个**允许语言（新字段）。
+    ///
+    /// 非空时忽略 `code_language`。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub code_languages: Vec<String>,
     /// 知识点编号（如 "1.1"，外部题库才有）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kp: Option<String>,
@@ -95,6 +118,23 @@ impl Question {
     /// 把导入/手工清单里的旧题型别名迁移为标准值。
     ///
     /// 别名只在入库时兼容；校验和渲染仍只认标准值。
+    /// 归一语言字段：把 `code_languages` 去重小写；若只有单个 `code_language`，
+    /// 保持原样（规范要求单语言只写 `code_language`）。
+    pub fn normalize_code_languages(&mut self) {
+        let mut out: Vec<String> = Vec::new();
+        for lang in &self.code_languages {
+            let l = lang.trim().to_ascii_lowercase();
+            if !l.is_empty() && !out.contains(&l) {
+                out.push(l);
+            }
+        }
+        self.code_languages = out;
+        if let Some(single) = self.code_language.take() {
+            let l = single.trim().to_ascii_lowercase();
+            self.code_language = if l.is_empty() { None } else { Some(l) };
+        }
+    }
+
     pub fn normalize_qtype(&mut self) {
         self.qtype = match self.qtype.as_str() {
             "multi" => "multiple".into(),
@@ -133,6 +173,7 @@ impl ExamBank {
     pub fn normalize_qtypes(&mut self) {
         for q in &mut self.questions {
             q.normalize_qtype();
+            q.normalize_code_languages();
         }
     }
 
@@ -166,28 +207,40 @@ impl ExamBank {
                     qid: q.id.clone(),
                 });
             }
-            if q.qtype == "code"
-                && let Some(lang) = q.code_language.as_deref()
-                && ![
-                    "python",
-                    "c",
-                    "cpp",
-                    "java",
-                    "rust",
-                    "javascript",
-                    "typescript",
-                    "go",
-                    "sql",
-                    "bash",
-                    "text",
-                ]
-                .contains(&lang)
-            {
-                return Err(crate::model::ModelError::InvalidCodeLanguage {
-                    exam_id: self.exam_id.clone(),
-                    qid: q.id.clone(),
-                    language: lang.to_string(),
-                });
+            if q.qtype == "code" {
+                if let Some(lang) = q.code_language.as_deref()
+                    && !CODE_LANGUAGES.contains(&lang)
+                {
+                    return Err(crate::model::ModelError::InvalidCodeLanguage {
+                        exam_id: self.exam_id.clone(),
+                        qid: q.id.clone(),
+                        language: lang.to_string(),
+                    });
+                }
+                if q.code_languages.len() > MAX_CODE_LANGUAGES {
+                    return Err(crate::model::ModelError::TooManyCodeLanguages {
+                        exam_id: self.exam_id.clone(),
+                        qid: q.id.clone(),
+                        count: q.code_languages.len(),
+                    });
+                }
+                for lang in &q.code_languages {
+                    if !CODE_LANGUAGES.contains(&lang.as_str()) {
+                        return Err(crate::model::ModelError::InvalidCodeLanguage {
+                            exam_id: self.exam_id.clone(),
+                            qid: q.id.clone(),
+                            language: lang.clone(),
+                        });
+                    }
+                }
+                // 不共存：两个字段同时填写属于出题错误，直接拒绝，
+                // 避免"以为写了多语言、实际被单语言覆盖"。
+                if !q.code_languages.is_empty() && q.code_language.is_some() {
+                    return Err(crate::model::ModelError::CodeLanguageConflict {
+                        exam_id: self.exam_id.clone(),
+                        qid: q.id.clone(),
+                    });
+                }
             }
             if !seen.insert(&q.id) {
                 return Err(crate::model::ModelError::DuplicateQuestionId {
@@ -413,6 +466,14 @@ pub enum ModelError {
     },
     #[error("题库 {exam_id} 的代码题 {qid} 必须使用 body.kind=text")]
     CodeQuestionRequiresTextBody { exam_id: String, qid: String },
+    #[error("题库 {exam_id} 的代码题 {qid} 允许语言过多：{count}（上限 {MAX_CODE_LANGUAGES}）")]
+    TooManyCodeLanguages {
+        exam_id: String,
+        qid: String,
+        count: usize,
+    },
+    #[error("题库 {exam_id} 的代码题 {qid} 同时写了 code_language 与 code_languages；二者不共存")]
+    CodeLanguageConflict { exam_id: String, qid: String },
     #[error("题库 {exam_id} 的代码题 {qid} 使用了不支持的语言：{language}")]
     InvalidCodeLanguage {
         exam_id: String,
@@ -437,6 +498,7 @@ mod tests {
                 stem: "s".into(),
                 options: vec![],
                 code_language: None,
+                code_languages: Vec::new(),
                 body: QuestionBody::Code {
                     code: vec!["x".into()],
                     blank_count: 1,
@@ -454,6 +516,57 @@ mod tests {
         ));
     }
 
+    fn code_q(languages: Vec<&str>, single: Option<&str>) -> ExamBank {
+        ExamBank {
+            exam_id: "m".into(),
+            title: "m".into(),
+            pick: 1,
+            questions: vec![Question {
+                id: "c1".into(),
+                qtype: "code".into(),
+                stem: "s".into(),
+                options: vec![],
+                body: QuestionBody::Text,
+                code_language: single.map(str::to_string),
+                code_languages: languages.into_iter().map(str::to_string).collect(),
+                kp: None,
+                difficulty: None,
+                answer: None,
+                judge: None,
+                score: 2,
+            }],
+        }
+    }
+
+    #[test]
+    fn code_languages_accepts_multiple() {
+        let bank = code_q(vec!["c", "cpp", "python"], None);
+        assert!(bank.validate().is_ok());
+    }
+
+    #[test]
+    fn code_language_and_languages_conflict() {
+        let bank = code_q(vec!["c", "python"], Some("c"));
+        assert!(matches!(
+            bank.validate(),
+            Err(ModelError::CodeLanguageConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn too_many_code_languages_rejected() {
+        let bank = code_q(
+            vec![
+                "c", "cpp", "python", "java", "rust", "go", "sql", "bash", "text",
+            ],
+            None,
+        );
+        assert!(matches!(
+            bank.validate(),
+            Err(ModelError::TooManyCodeLanguages { .. })
+        ));
+    }
+
     #[test]
     fn invalid_code_language_is_rejected() {
         let bank = ExamBank {
@@ -467,6 +580,7 @@ mod tests {
                 options: vec![],
                 body: QuestionBody::Text,
                 code_language: Some("brainfuck".into()),
+                code_languages: Vec::new(),
                 kp: None,
                 difficulty: None,
                 answer: None,
@@ -492,6 +606,7 @@ mod tests {
                 stem: "s".into(),
                 options: vec![],
                 code_language: None,
+                code_languages: Vec::new(),
                 body: QuestionBody::Text,
                 kp: None,
                 difficulty: None,
@@ -517,6 +632,7 @@ mod tests {
                 stem: "s".into(),
                 options: vec![],
                 code_language: None,
+                code_languages: Vec::new(),
                 body: QuestionBody::Text,
                 kp: None,
                 difficulty: None,
@@ -546,6 +662,7 @@ mod tests {
             stem: "s".into(),
             options: Vec::new(),
             code_language: None,
+            code_languages: Vec::new(),
             body: QuestionBody::Options {
                 options: (0..n)
                     .map(|i| ChoiceOption {

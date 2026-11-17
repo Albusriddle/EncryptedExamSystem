@@ -883,6 +883,7 @@ class AnswersTab(QWidget):
                 continue
             sub = sheet.get("submitted_unix")
             submitted = datetime.fromtimestamp(sub).strftime("%Y-%m-%d %H:%M:%S") if sub else ""
+            chosen = sheet.get("chosen_code_languages") or {}
             for idx, qid in enumerate(sheet.get("qids") or []):
                 answers = sheet.get("answers") or []
                 value = answers[idx] if idx < len(answers) else None
@@ -895,6 +896,7 @@ class AnswersTab(QWidget):
                         "题目ID": qid,
                         "作答": "" if value is None else value,
                         "是否作答": "否" if value is None else "是",
+                        "学生自报语言": chosen.get(str(qid), ""),
                         "交卷时间": submitted,
                     }
                 )

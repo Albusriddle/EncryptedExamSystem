@@ -28,10 +28,34 @@ pub struct PaperItem {
     pub options: Vec<String>,
     /// 题目正文形态（选项 / 代码模板 / 逐行代码）。
     pub body: crate::model::QuestionBody,
-    /// 代码简答题语言；非代码题为 None。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code_language: Option<String>,
+    /// 代码简答题允许的语言集合（归一后）。
+    ///
+    /// - 1 个：学生端只读显示；
+    /// - ≥2 个：学生可从中选择；
+    /// - 空：老师未限制，学生可选全部语言。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub code_languages: Vec<String>,
     pub score: u32,
+}
+
+/// 把题目的两种语言字段归一成一个集合：`code_languages` 优先，其次单值。
+fn normalize_code_languages(q: &crate::model::Question) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let push = |out: &mut Vec<String>, lang: &str| {
+        let l = lang.trim().to_ascii_lowercase();
+        if !l.is_empty() && !out.contains(&l) {
+            out.push(l);
+        }
+    };
+    for lang in &q.code_languages {
+        push(&mut out, lang);
+    }
+    if out.is_empty()
+        && let Some(single) = q.code_language.as_deref()
+    {
+        push(&mut out, single);
+    }
+    out
 }
 
 impl From<&crate::model::Question> for PaperItem {
@@ -61,7 +85,7 @@ impl From<&crate::model::Question> for PaperItem {
             stem: q.stem.clone(),
             options: q.options.clone(),
             body,
-            code_language: q.code_language.clone(),
+            code_languages: normalize_code_languages(q),
             score: q.score,
             // 注意：`q.answer` / `q.judge` 被有意忽略，本结构没有对应字段可放。
         }
@@ -725,6 +749,7 @@ mod tests {
                     stem: format!("题目 {i}"),
                     options: vec!["A".into(), "B".into(), "C".into(), "D".into()],
                     code_language: None,
+                    code_languages: Vec::new(),
                     body: Default::default(),
                     kp: None,
                     difficulty: None,
@@ -885,7 +910,7 @@ mod tests {
             qtype: "single".into(),
             stem: format!("题干 {id}"),
             options: vec![],
-            code_language: None,
+            code_languages: Vec::new(),
             body: Default::default(),
             score: 2,
         }
