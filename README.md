@@ -1,160 +1,181 @@
 # 保密考试系统（EncryptedExamSystem）
 
-> 一套面向校内闭卷/随堂考试的离线加密考试系统：教师端编排题目与场次，生成学生端 exe；学生在断网环境作答，答题卡加密落盘；教师端收卷、校验、判分并导出成绩。
-
-当前版本：**1.2.x**
-
-- 教师端：`ExamAdmin`（PySide6 图形界面）
-- 命令行工具：`exam-builder`（打包、校验、导出 PIN、考后查看原卷）
-- 学生端：`exam-client`（双击运行，按场次与网络时间解锁）
-
-> 本系统是“防误操作 + 现场监考”工具，不是密码学意义上的强防作弊系统。
+> 面向校内闭卷 / 随堂考试的离线加密考试系统：教师在管理端编排题库与场次，生成一个自带加密数据的学生端 exe；学生在断网环境作答，答题卡加密落盘；教师收卷、校验、判分、导出成绩。
 >
-> 安全边界与已接受风险见 [安全边界与威胁模型](docs/安全边界与威胁模型.md) 与 [风险接受记录](docs/风险接受记录.md)。
+> 本系统的定位是**「防误操作 + 现场监考」**，不是密码学意义上的强防作弊系统。防什么、不防什么，见 [安全边界与威胁模型](docs/安全边界与威胁模型.md)；已经明确接受、且**没有**修复的风险，见 [风险接受记录](docs/风险接受记录.md)。
+
+当前版本：**1.3.1**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
+
+| 组件 | 技术形态 | 职责 |
+|---|---|---|
+| `ExamAdmin` | Python + PySide6 | 教师端图形界面：题库、学生与班级、场次、打包、收卷判分、审计 |
+| `exam-builder` | Rust CLI | 打包、校验包、校验答题卡、导出 PIN 表、考后查看原卷 |
+| `exam-client` | Rust + egui 单文件 exe | 学生端：学号（可选 PIN）登录、网络时间门禁、离线作答、答题卡落盘 |
+
+> 全部文档在 `docs/` 下（本文链接带 `docs/` 前缀）；`docs/` 内各文档互为同级，链接为同目录相对路径。
 
 ---
 
 ## 1. 主要能力
 
-### 考试与题型
+### 1.1 题型与判分
 
-- 单选、多选、判断、填空、改错、问答、**代码简答**七种题型；
-- 代码简答题支持：
-  - 等宽多行输入、行号；
-  - **多语言声明**：题库写 `code_language`（1 种）或 `code_languages`（≥2 种，最多 8 个），二者不可同时写；支持 **python / c / cpp / java / rust / javascript / typescript / go / sql / bash / text**；
-  - **学生自选语言**：只允许 1 种时下拉框只读；允许多种时从中选择；老师未限制时可选全部，并提示“以考场老师通知为准”；
-  - **「自动识别语言」按钮**：仅点击时按代码内容推断，不会自动覆盖学生选择；
-  - 语法高亮使用 syntect（纯 Rust、离线），超过 256 KiB 降级纯等宽；
-  - 答案保留缩进、换行、行尾空格；单题上限 1 MiB，整卡答案上限 16 MiB；
-  - 学生自选语言写入答题卡 `chosen_code_languages`，导出 CSV 有「学生自报语言」列（仅阅卷参考，不参与判分）；
-  - 不执行学生代码，不自动判分，由教师人工评分；
-- 问答/代码简答之外的选择、判断、填空、改错可自动判分，支持人工改分；
-- 场次可按题库设置平均难度区间，支持“大题 → 部分 → 小题”。
+支持七种题型：
 
-### 考试组织
+| `type` | 名称 | 学生端作答方式 | 自动判分 |
+|---|---|---|---|
+| `single` | 单选 | 选项按钮，单选 | ✅ |
+| `multiple` | 多选 | 选项按钮，多选 | ✅ |
+| `judge` | 判断 | 选项按钮 | ✅ |
+| `fill` | 填空（旧称补全） | 按占位符逐空输入 | ✅（可选「按项给分」） |
+| `fix` | 改错 | 按行号逐条改正 | ✅（可选「按项给分」） |
+| `essay` | 问答 | 多行文本框，5000 字符上限 | ❌ 人工给分 |
+| `code` | 代码简答 | 等宽多行编辑器 + 行号 + 语法高亮 | ❌ 人工给分 |
 
-- 教师端编排题库、学生名单、班级、场次；
-- 生成学生端 exe，可选每生 6 位 PIN 登录；
-- 网络时间门禁：三个公共 HTTPS 时间源中位数，失败即拒绝；
-- 可选签名时间令牌（默认关闭，需自建时间服务）；
-- 交卷与到点自动冻结；
-- 收卷后批量校验答题卡、生成缺考名单、导出 CSV。
+- 自动判分在收卷判分页**按题型勾选**启用，默认只勾单选 / 多选 / 判断；
+- 可选项：忽略大小写、忽略空白、填空 / 改错按项给分；
+- 已判分也能**双击「得分」列改分**，导出里留「原分 → 新分」与「调整时间」；
+- 代码题**不执行**学生代码、**不自动判分**：编译运行学生代码有安全与公平风险。
 
-### 回看与原卷
+### 1.2 代码简答题
 
-- 默认「仅教师可查看原卷」：学生端无回看入口；
-- 取消该限制后，学生已交卷且未到结束时间可只读回看；回看页可返回已交卷页；
-- 教师考后查看原卷使用 `exam-builder review-paper`，需要教师电脑上的 master，不经过学生端时间门禁；
-- 学生端不接收、不保存教师 master。
+- 语言声明二选一，**不允许同时出现**：
+  - `code_language`：只允许 1 种语言（字符串）；
+  - `code_languages`：允许 ≥2 种语言（数组，**最多 8 个**，`uniqueItems`）；
+  - 都不写 = 不限制，学生自选；
+  - 两个都写 → 导入 / 打包直接报错。
+- 支持 11 种：`python` / `c` / `cpp` / `java` / `rust` / `javascript` / `typescript` / `go` / `sql` / `bash` / `text`。
+- 学生端语言控件**三态**：
+  1. 只允许 1 种 → 灰色只读，不给选择机会；
+  2. 允许 ≥2 种 → 下拉框只能从这些里选；
+  3. 未限制 → 下拉框列出全部 11 种，并提示「本题老师出题时未限制语言，请以考场老师通知为准」。
+- 「自动识别语言」按钮**只有学生点击时才运行**，不自动覆盖学生已选语言；识别结果若不在允许集合内，会提示「识别为 X，但本题只允许 Y」。
+- 学生显式选择的语言写入答题卡 `chosen_code_languages`；导出 CSV 有「学生自报语言」列，**仅阅卷参考，不参与判分**；若超出题目允许集合，该列标注「超出允许：…」。
+- 答案保留缩进、换行、行尾空格，不做 `trim`、不替换缩进、不截断；
+- 容量：**单题 1 MiB**（`CODE_MAX_BYTES`）、**整卡答案 16 MiB**（`MAX_TOTAL_ANSWER_BYTES`），界面实时显示「本题 x/1024 KiB · 整卡 x/16 MiB」；
+- 超过 **256 KiB** 降级为纯等宽（不做语法高亮），避免逐帧高亮卡死。
 
-### 安全与审计
+### 1.3 考试组织
 
-- 答题卡加密落盘（`.eea`），不存明文答案；
-- 主密钥加密备份 / 恢复，工程文件口令加密；
-- 哈希链审计日志；
-- 答题卡收据（教师侧 Ed25519，可检测收卷后改动，不防伪造）；
-- 发布包带 `SHA256SUMS.txt`。
+- 题库导入支持两种形态：原生 JSON（题目+答案同文件）、题目 / 答案分离（`format_version: 2`，`X.questions.json` + `X.answers.json`）；
+- 学生名单 / 班级（班级成员恒为全局名单子集）；
+- 场次两种模式：
+  - **按题库 + 平均难度区间**：`exams[]`，可设 `difficulty_min/max`，只约束抽出 N 题的**平均值**，不限制单题；
+  - **按大题（section）**：`sections[]`，每个大题固定题库；大题下还可再分「部分（part）」；
+- 同一学生不得同时出现在重叠场次（Rust `check_student_overlap` + Python `_check_student_overlap`）；
+- 打包：班级 → 每生一个信封；可选每生 6 位 PIN；可选签名时间令牌；可选学生回看。
 
----
+### 1.4 时间门禁
 
-## 2. 学生端答题卡与代码题
+- 并发请求 3 个公共 HTTPS 站点的 `Date` 响应头：`www.baidu.com` / `www.aliyun.com` / `www.tencent.com`；
+- 取**中位数**；成功源 ≥2 且分歧不超阈值才放行，否则 **fail-closed**；
+- 本机时钟只作参考，偏差过大只警告，不参与判定；
+- 可选签名时间令牌（`off` / `prefer` / `require`，默认 `off`，需自建时间服务），协议见 [时间令牌协议](docs/时间令牌协议.md)；
+- 时间门禁在**派生入场密钥之前**执行（`client/src/workflow.rs::unlock` 的步骤顺序），这是必须保持的不变量。
 
-学生答题卡保存为：
+### 1.5 收卷、判分、审计
 
-```text
-answers-<学号>-<场次>-<试卷指纹前8位>.eea
-```
-
-答题卡是加密文件，教师端用 master 解密校验。代码题答案保存在：
-
-```json
-"answers": [
-  "def f():\n\treturn 1  \n"
-]
-```
-
-代码内容不做 `trim`、不替换缩进、不截断；解密后的 JSON 可直接提取：
-
-```bash
-exam-builder verify-answer-sheet answers-2021001-1.eea \
-  --package 学生端.exe --master <master> --json > result.json
-```
-
-```python
-import json
-
-data = json.load(open("result.json", encoding="utf-8"))
-code = data["sheet"]["answers"][0]
-open("answer.py", "w", encoding="utf-8", newline="").write(code)
-```
-
-> 代码题需要 **v1.1.0+** 学生端；行号与语法高亮需要 **v1.2.0+**；
-> 多语言下拉与「自动识别语言」需要 **v1.3.0+**。
->
-> 答题卡自 v1.3.0 起为 **`EESANS02` / v2**（新增学生自报语言），仍可读取 v1 旧卡；
-> 但 **v1.2.x 及更早的管理端/builder 读不了 v2 卡**，升级学生端时请同步升级管理端。
->
-> 旧学生端会忽略 `code_languages` / `chosen_code_languages`，仍可作答；多语言题在旧学生端没有语法高亮。
+- 答题卡 `.eea` 加密落盘，文件名 `answers-<学号>-<场次>-<试卷指纹前8位>.eea`；
+- 教师端批量校验，**必须选择学生端包**（否则无法证明答题卡绑定了本包原卷）；
+- 缺考名单、四类成绩 CSV + 考生成绩表；
+- 审计菜单：签发答题卡收据（Ed25519）、验证收据、备份 / 恢复收据私钥、考后查看原卷；
+- 哈希链审计日志 `audit-YYYYMM.jsonl`，改一行即断链。
 
 ---
 
-## 3. 快速开始（教师）
+## 2. 安全边界（摘要）
 
-1. 从 Release 下载 `ExamAdmin-<版本>-windows.zip`；
-2. 解压，进入 `ExamAdmin` 目录，双击 `ExamAdmin.exe`；
-3. 在「题库」页导入题库（原生 JSON 或题目/答案分离格式）；
-4. 在「学生」页维护名单 / 班级；
-5. 在「场次」页创建场次，选择题库、抽题数、时间、名单；
-6. 在「打包」页：
-   - 生成/粘贴主密钥；
-   - 选择学生端 stub；
-   - 选择输出 exe；
-   - 按需启用 PIN、时间令牌、学生回看；
-   - 开始打包；
-7. 学生端 exe 发给学生；
-8. 收卷后进入「收卷判分」页，选择学生端包、粘贴 master，批量校验答题卡；
-9. 生成成绩，人工给问答/代码题打分，导出 CSV。
+**已实现**
+
+- 考试包内**不含明文标准答案**：`answer` 与 `judge` 在打包时被剥离；
+- 包内只嵌**混淆后的 `K_manifest`**（密钥区 `EXAMKEY1` + 32 字节 XOR 掩码），不是 master；
+- master 只在教师机；学生端不接收、不保存 master；
+- 答题卡不是明文；
+- 工程文件默认口令加密（`EESPROJ3`，兼容读取 `EESPROJ2`；Argon2id + AES-256-GCM）；
+- 主密钥加密备份 `.eekey`；
+- 时间门禁失败即拒绝；
+- 代码高亮只影响显示，不执行代码。
+
+**已接受风险（不得写成「已修复」）**
+
+| 编号 | 内容 |
+|---|---|
+| R-01 | 同场学生可解出本场全部**题干**（答案 / judge 已剥离） |
+| R-02 | 同场学生可读取 / 伪造他人答题卡，`check_binding` 只校验原卷指纹与 qids |
+| R-03 | 默认无 PIN 时，任意已知名单内学号可解锁该生信封 |
+| R-04 | Header 可被重加密，时间窗 / 回看策略只是 UI 约束，不是密码学边界 |
+
+决策、补偿措施与复审触发条件见 [风险接受记录](docs/风险接受记录.md)。
 
 ---
 
-## 4. 快速开始（学生）
+## 3. 版本门禁
+
+容器格式当前实现到 **v8**；**v9 的 P0 新格式未实现**。
+
+| 包类型 | 容器版本 | 最低学生端 |
+|---|---|---|
+| 普通包 | v4 | v0.15.0+ |
+| 启用签名时间令牌（`mode != off`） | v5 | v0.15.0+ |
+| 按大题（`sections`） | v6 | v0.15.0+ |
+| 大题下再分部分（`parts`） | v7 | v0.15.0+ |
+| 含代码简答题（`qtype = code`） | v8 | v1.1.1+ |
+| P0 per-student / Header 签名 | **v9（未实现）** | — |
+> 表中「最低学生端」为保守口径：v0.15.0 起的客户端可读 v4–v7；更早的客户端未逐版本验证。
+
+
+解析侧接受 v3–v8（`MIN_SUPPORTED_VERSION = 3`）。旧学生端遇到高于它认识的版本会**明确拒绝**，不会静默显示空白题。
+
+答题卡：`EESANS02` / v2（v1.3.0 起新增 `chosen_code_languages`），可读取 `EESANS01` / v1 旧卡。**v1.2.x 及更早的管理端 / builder 读不了 v2 卡**，升级学生端时请同步升级管理端。
+
+---
+
+## 4. 快速开始（教师）
+
+1. 从 Release 下载 `ExamAdmin-<版本>-windows.zip`，解压；
+2. 进入 `ExamAdmin` 文件夹，双击 `ExamAdmin.exe`（整个文件夹要一起保留，`_internal` 不能少）；
+3. **[题库]** 导入题库（可多选）；
+4. **[学生]** 粘贴学号（每行一个）或按班级维护；
+5. **[场次]** 新建场次：时间、名单、科目与抽题数；
+6. **[打包]**：生成 / 粘贴主密钥 → 选输出 exe → 按需勾选每生 PIN、时间令牌、学生回看 → 开始打包；
+7. 把生成的 `.exe` 发给学生；
+8. 考后 **[收卷判分]**：拖入 `.eea` → 填 master → 选学生端包 → 校验 → 生成成绩 → 导出 CSV。
+
+完整步骤、按钮名、常见报错对照见 [教师使用手册](docs/教师使用手册.md)。
+
+## 5. 快速开始（学生）
 
 - 双击学生端 exe；
 - 输入学号（启用 PIN 时再输入 6 位 PIN）；
-- 等待网络时间校验；
-- 作答，交卷；
-- 如教师允许，可在结束前只读回看；
-- 答题卡自动加密保存在 exe 同目录（不可写时回退 `%LOCALAPPDATA%`）。
+- 等待网络时间校验（至少 2 个时间源成功）；
+- 作答 → 交卷（连点两次确认）；
+- 答题卡自动加密保存在 exe 同目录，不可写时回退 `%LOCALAPPDATA%\ExamSystem\answers\`；
+- 若教师允许，交卷后可在结束时间前只读回看。
 
 ---
 
-## 5. 从源码构建
+## 6. 从源码构建
 
-前置：
-
-- Rust（见 `rust-toolchain.toml`）
-- Python 3.11+
-- [uv](https://github.com/astral-sh/uv)
-- Windows 管理端需要 PySide6 / PyInstaller
+前置：Rust（见 `rust-toolchain.toml`）、Python 3.11+、[uv](https://github.com/astral-sh/uv)；Windows 管理端另需 PySide6 / PyInstaller。
 
 ```bash
 # Rust：common / builder / client
 cargo build --release --workspace
 
-# 管理端
+# 管理端（开发态直接跑）
 cd admin
 uv sync --extra gui --group dev
 uv run python -m app
 ```
 
-生成管理端发布目录：
+生成管理端发布目录与教师 zip：
 
 ```bash
-cd admin
-uv run python buildtools/build_exe.py
+cd admin && uv run python buildtools/build_exe.py
+cd .. && bash scripts/make-release-zip.sh 1.3.1
 ```
 
-发布前检查：
+发布前必须全绿（详见 [代码审阅报告](docs/代码审阅报告.md) 的「如何复跑」）：
 
 ```bash
 cargo fmt --all -- --check
@@ -163,77 +184,93 @@ cargo test --workspace
 cd admin && uv run pytest -q
 uv run ruff check . && uv run ruff format --check .
 cd .. && bash scripts/verify-embed.sh
-bash scripts/preflight-release.sh
+bash scripts/preflight-release.sh          # 加 --full 连管理端打包一起查
 ```
 
 ---
 
-## 6. 目录结构
+## 7. 目录结构
 
 ```text
-crates/common/       共享模型、加密、容器、答题卡、时间门禁
-crates/builder/      exam-builder：打包、校验、review-paper、PIN 导出
-crates/client/       学生端：GUI、解锁流程、答题卡、代码编辑器
-admin/               教师端 PySide6 + 打包工具
-banks/               示例题库
-examples/            可直接导入的示例
-docs/                教师手册、题库规范、安全边界、时间令牌协议、发布说明
-schemas/             题库 / manifest JSON Schema
-scripts/             verify-embed、preflight、release_body、烟测、管理端测试
-licenses/            LGPL / GPL 全文
+crates/common/       共享模型、加密、容器格式、抽题、答题卡、时间门禁、审计原语
+crates/builder/      exam-builder：keygen / build / verify / verify-answer-sheet /
+                     review-paper / export-pins
+crates/client/       学生端：GUI（egui）、解锁流程、答题卡、代码编辑器、Markdown 渲染
+admin/app/core/      Qt-free 核心逻辑：models / state / grading / attendance / audit /
+                     receipt / secure / bank_import / images / difficulty
+admin/app/ui/        PySide6 界面：题库、学生、场次、打包、收卷判分、审计菜单
+admin/buildtools/    PyInstaller 打包脚本
+banks/demo/          假题库（供 CI 与演示，不含真题）
+examples/            可直接导入的示例（含图片题）
+docs/                本文档集
+schemas/             题库 / manifest 的 JSON Schema（由 pydantic 生成，有漂移检查）
+scripts/             verify-embed / preflight-release / make-release-zip / release_body /
+                     run-admin-tests / smoke-answers
+licenses/            LGPL-3.0 / GPL-3.0 全文
+worker/              Cloudflare Worker 时间服务（**目录为空，未实现**）
 ```
 
 ---
 
-## 7. 安全边界（必读）
+## 8. 测试与验证基线（v1.3.1）
 
-### 已实现
+| 项 | 基线 |
+|---|---|
+| Rust | 246 个 `#[test]` |
+| Python | 339 用例（`pytest` 收集口径，含参数化展开） |
+| 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
+| 发布预检 | `scripts/preflight-release.sh` 14 项（非 `--full`） |
+| CI | 6 个 job：`rust` / `python` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` |
 
-- 考试包不含明文标准答案；
-- 答题卡不是明文；
-- 工程文件默认口令加密；
-- 主密钥只通过环境变量/文件传给教师工具，不进入学生端命令行；
-- 学生端不保存 master；
-- 时间门禁失败即拒绝；
-- 代码高亮只影响显示，不执行代码。
+> 数字会随提交变化，**以 CI 与脚本输出为准**。发布预检的项数看脚本最后一行
+> 「✓ 发布预检通过（N 项）」；测试数量看 `cargo test` / `pytest` 的统计行。
 
-### 已接受风险
+发布包结构（`ExamAdmin-<版本>` 解压后）：
 
-项目明确接受以下风险，不在当前 v1.x 内实现 P0 新格式（v9）：
+```text
+ExamAdmin-<版本>/
+├── 开始这里.md              ← 第一步该看什么
+├── 使用说明.md              ← 完整手册（即《教师使用手册》）
+├── 风险接受记录.md          ← 随包分发的安全决策
+├── ExamAdmin/
+│   ├── ExamAdmin.exe
+│   ├── exam-builder.exe
+│   ├── stub-template.exe    ← 打包用，不发给学生
+│   ├── _internal/
+│   ├── LICENSE
+│   ├── THIRD-PARTY-NOTICES.md
+│   └── licenses/
+└── 示例题库/
+    ├── 数学.json
+    ├── 英语.json
+    └── 图片题示例.json
+```
 
-- 同场学生可解出本场全部题干；
-- 同场学生可读取/伪造他人答题卡；
-- 默认无 PIN 时，任意已知名单内学号可解锁；
-- Header 可被重加密，时间门禁只是 UI 约束。
-
-完整决策与补偿措施见 [风险接受记录](docs/风险接受记录.md)。
-
-### 版本门禁
-
-- 普通包：容器 v4；
-- 时间令牌：v5；
-- 大题：v6；
-- 大题部分：v7；
-- 含代码简答题：v8，旧学生端会明确拒绝，需 v1.1.0+ 学生端；
-- P0 的 per-student/Header 签名方案记为 v9，当前不实现。
-
----
-
-## 8. 文档
-
-- [教师使用手册](docs/教师使用手册.md)
-- [题库 JSON 规范](docs/题库JSON规范.md)
-- [安全边界与威胁模型](docs/安全边界与威胁模型.md)
-- [风险接受记录](docs/风险接受记录.md)
-- [时间令牌协议](docs/时间令牌协议.md)
-- [发布说明](docs/release-notes.md)
-- [代码审阅报告](docs/代码审阅报告.md)
+zip 旁边附带 `SHA256SUMS.txt`；`ExamAdmin/` 内另有 `图片使用教程.md`。
 
 ---
 
-## 9. 许可与致谢
+## 9. 文档索引
 
-本项目代码以 [Apache License 2.0](LICENSE) 发布。第三方组件许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+| 文档 | 读者 | 内容 |
+|---|---|---|
+| [教师使用手册](docs/教师使用手册.md) | 出题 / 考务老师 | 六步流程、按钮名、报错对照、安全须知 |
+| [题库JSON规范](docs/题库JSON规范.md) | 出题老师 / 系统对接 | 两种格式、`body` 四形态、校验规则、错误提示 |
+| [图片使用教程](docs/图片使用教程.md) | 出题老师 | 在题干里插图、尺寸限额、自检清单 |
+| [安全边界与威胁模型](docs/安全边界与威胁模型.md) | 维护者 / 决策者 | 资产、对手分级、承诺与不承诺 |
+| [风险接受记录](docs/风险接受记录.md) | 决策者 | R-01~R-04 的事实、理由、补偿、复审条件 |
+| [时间令牌协议](docs/时间令牌协议.md) | 自建时间服务的学校 | 请求 / 响应 / 验签 / 最小服务端示例 |
+| [架构与实施方案](docs/保密考试系统_架构与实施方案.md) | 维护者 / 接手人 | 设计取舍、里程碑、踩过的坑 |
+| [代码审阅报告](docs/代码审阅报告.md) | 维护者 | 97 轮审阅的问题索引、技术无解项、复跑方式 |
+| [发布说明](docs/release-notes.md) | 教师 / 下载者 | 逐版本变更、已知限制、校验口径 |
+
+---
+
+## 10. 许可与致谢
+
+本项目代码以 **Apache License 2.0** 发布（仓库根 `LICENSE`，发布包内为 `ExamAdmin/LICENSE`）。
+第三方组件许可见 `THIRD-PARTY-NOTICES.md`，
+随包附 `licenses/LGPL-3.0.txt`、`licenses/GPL-3.0.txt`（PySide6 / Qt 为 LGPL-3.0）。
 
 - 创始人 / 仓库作者：[AlbusRiddle](https://github.com/Albusriddle)
 - 部分创意支持：[Stone](https://github.com/stone6060)
