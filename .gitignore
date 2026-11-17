@@ -72,5 +72,4 @@ examadm-*/
 pytest-win.xml
 
 # ---- 会话/实验残留 ----
-.agents/
 admin/tmp*
