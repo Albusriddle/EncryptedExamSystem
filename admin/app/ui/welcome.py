@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from app.branding import branding
 from app.ui.app_settings import settings_path
+from app.ui.widgets import compact_checkbox
 from app.version import app_version
 
 _SETTINGS_KEY = "welcome/hidden"
@@ -75,7 +76,7 @@ class WelcomeDialog(QDialog):
         label.setWordWrap(True)
         lay.addWidget(label)
 
-        self.dont_show = QCheckBox("不再提示")
+        self.dont_show = compact_checkbox(QCheckBox("不再提示"))
         lay.addWidget(self.dont_show)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)

@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from app.core.attendance import STATUS_LABELS, AttendanceResult, build_attendance, csv_rows
 from app.core.models import Session, StudentClass
-from app.ui.widgets import fit_button_text
+from app.ui.widgets import compact_checkbox, fit_button_text
 
 
 class AttendanceDialog(QDialog):
@@ -43,7 +43,8 @@ class AttendanceDialog(QDialog):
         self.resize(900, 620)
         lay = QVBoxLayout(self)
 
-        self.chk_all = QCheckBox("包含没有答题卡的场次（会把该场全员标为缺考）")
+        self.chk_all = compact_checkbox(QCheckBox("包含没有答题卡的场次"))
+        self.chk_all.setToolTip("勾选后，没有答题卡的场次里所有学生会标为缺考。")
         self.chk_all.toggled.connect(self._reload)
         lay.addWidget(self.chk_all)
 

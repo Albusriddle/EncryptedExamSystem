@@ -16,7 +16,6 @@ from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDateTimeEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -39,6 +38,12 @@ from app.core.difficulty import check_difficulty_range
 from app.core.models import Section, SectionPart, Session, SessionExam
 from app.core.state import ProjectState, match_bank_exam_id
 from app.core.timeparse import local_to_rfc3339, parse_rfc3339
+from app.ui.widgets import (
+    NoWheelComboBox,
+    NoWheelDateTimeEdit,
+    NoWheelSpinBox,
+    compact_checkbox,
+)
 
 
 @dataclass
@@ -225,21 +230,21 @@ class SessionsTab(QWidget):
         form_box = QGroupBox("场次设置")
         form = QFormLayout(form_box)
 
-        self.spin_id = QSpinBox()
+        self.spin_id = NoWheelSpinBox()
         self.spin_id.setRange(1, 2**31 - 1)
         form.addRow("场次编号", self.spin_id)
 
-        self.dt_start = QDateTimeEdit()
+        self.dt_start = NoWheelDateTimeEdit()
         self.dt_start.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.dt_start.setCalendarPopup(True)
         form.addRow("开始时间", self.dt_start)
 
-        self.dt_end = QDateTimeEdit()
+        self.dt_end = NoWheelDateTimeEdit()
         self.dt_end.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.dt_end.setCalendarPopup(True)
         form.addRow("结束时间", self.dt_end)
 
-        self.combo_roster = QComboBox()
+        self.combo_roster = NoWheelComboBox()
         self.combo_roster.addItem("使用全部学生", "all")
         self.combo_roster.addItem("按班级选择…", "by_class")
         self.combo_roster.addItem("自定义名单", "custom")
@@ -267,8 +272,13 @@ class SessionsTab(QWidget):
         # 科目 / 大题
         subj_box = QGroupBox("考试科目 / 大题")
         sl = QVBoxLayout(subj_box)
-        self.chk_sections = QCheckBox("按大题模式（每行固定题库、题数、精确难度；可上下调整顺序）")
+        self.chk_sections = compact_checkbox(QCheckBox("按大题模式"))
+        self.chk_sections.setToolTip(
+            "每行固定题库、题数、精确难度；可上下调整顺序。\n"
+            "关闭并保存后，本场已配置的大题会被清空。"
+        )
         self.chk_sections.toggled.connect(self._on_sections_toggle)
+        self.chk_sections.clicked.connect(self._on_sections_clicked)
         sl.addWidget(self.chk_sections)
 
         self.old_subject_widget = QWidget()
@@ -325,6 +335,20 @@ class SessionsTab(QWidget):
         lay.addWidget(axis_box, 1)
 
     # ---------------------------------------------------------------- 大题
+
+    def _on_sections_clicked(self, on: bool) -> None:
+        """用户点击时确认；程序化 setChecked 不弹框（测试与回填会用到）。"""
+        if on or not self.section_rows:
+            return
+        ok = QMessageBox.question(
+            self,
+            "关闭按大题模式",
+            "关闭后保存本场次会清空已配置的大题。\n确定关闭吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ok != QMessageBox.StandardButton.Yes:
+            self.chk_sections.setChecked(True)
 
     def _on_sections_toggle(self, on: bool) -> None:
         self.old_subject_widget.setVisible(not on)
@@ -429,10 +453,10 @@ class SessionsTab(QWidget):
         hl.setContentsMargins(24, 0, 0, 0)
         title = QLineEdit(part.title if part else f"第{len(section_row.parts) + 1}部分")
         title.setMinimumWidth(100)
-        count = QSpinBox()
+        count = NoWheelSpinBox()
         count.setRange(1, 9999)
         count.setValue(part.count if part else 1)
-        diff = QSpinBox()
+        diff = NoWheelSpinBox()
         diff.setRange(1, 255)
         diff.setValue(part.difficulty if part else 1)
         hint = QLabel("")
@@ -704,26 +728,21 @@ class SessionsTab(QWidget):
             row = QWidget()
             hl = QHBoxLayout(row)
             hl.setContentsMargins(0, 0, 0, 0)
-            # 外部题库导入时 title 默认等于 exam_id，此时括号里再写一遍就是重复
-            label = (
-                f"{bank.title}（题量 {len(bank.questions)}）"
-                if bank.title == exam_id
-                else f"{bank.title}（{exam_id}，题量 {len(bank.questions)}）"
-            )
-            cb = QCheckBox(label)
+            cb = compact_checkbox(QCheckBox(bank.title))
+            cb.setToolTip(f"exam_id：{exam_id}；题量：{len(bank.questions)}")
             # 整数用 QSpinBox：QDoubleSpinBox 即便 decimals=0 也会为
             # 小数点预留编辑区，把 "500" 截成 "50"。
-            pick = QSpinBox()
+            pick = NoWheelSpinBox()
             pick.setRange(1, max(len(bank.questions), 1))
             pick.setValue(min(bank.pick, len(bank.questions)))
             pick.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             pick.setMinimumWidth(pick_width(int(pick.maximum())))
-            limit = QCheckBox("限制平均难度")
+            limit = compact_checkbox(QCheckBox("限制平均难度"))
             limit.setToolTip("勾选后，抽出的这 N 题平均难度必须落在下面区间（1–255）")
-            dmin = QSpinBox()
+            dmin = NoWheelSpinBox()
             dmin.setRange(1, 255)
             dmin.setValue(1)
-            dmax = QSpinBox()
+            dmax = NoWheelSpinBox()
             dmax.setRange(1, 255)
             dmax.setValue(5)
             for w in (dmin, dmax):

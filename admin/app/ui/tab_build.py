@@ -26,7 +26,6 @@ from PySide6.QtCore import QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -38,7 +37,6 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -47,7 +45,7 @@ from app.core.banks_io import write_temp_banks
 from app.core.buildcmd import build_command, build_env, safe_pin_dir
 from app.core.state import ProjectState
 from app.core.subproc import no_window_kwargs
-from app.ui.widgets import fit_button_text
+from app.ui.widgets import NoWheelComboBox, NoWheelSpinBox, compact_checkbox, fit_button_text
 
 
 def is_frozen() -> bool:
@@ -433,29 +431,37 @@ class BuildTab(QWidget):
         self.lbl_current.setWordWrap(True)
         form.addRow("当前工程", self.lbl_current)
 
-        self.chk_pin_login = QCheckBox("每生 PIN 登录（生成 6 位 PIN，导出 CSV 发给学生）")
+        self._suspend_sync = False
+        self.chk_pin_login = compact_checkbox(QCheckBox("每生 PIN 登录"))
         self.chk_pin_login.setToolTip(
-            "包内不存 PIN 表；打包成功后选择 CSV 保存文件夹，学生凭学号+PIN 解锁"
+            "勾选后每个学生一个 6 位 PIN，打包成功时导出 CSV。\n"
+            "没把 CSV 发到学生手里，学生就无法登录。"
         )
+        self.chk_pin_login.clicked.connect(self._on_pin_login_clicked)
         form.addRow("登录方式", self.chk_pin_login)
 
-        self.chk_student_review = QCheckBox("仅教师可查看原卷（学生端不提供免授权回看）")
+        self.chk_student_review = compact_checkbox(QCheckBox("仅教师可查看原卷"))
         self.chk_student_review.setToolTip(
             "勾选（默认）：学生端无回看入口，考后由教师用 master 查看原卷；\n"
             "不勾选：学生已交卷且未到结束时间可免授权只读回看。"
         )
         self.chk_student_review.setChecked(self.state.student_review != "free")
         self.chk_student_review.toggled.connect(self._on_student_review_toggled)
+        self.chk_student_review.clicked.connect(self._on_student_review_clicked)
         form.addRow("学生回看", self.chk_student_review)
 
         from app.ui.app_settings import PROJECT_ENCRYPT, settings
 
-        self.chk_encrypt = QCheckBox("加密保存工程（含标准答案，建议开启）")
+        self.chk_encrypt = compact_checkbox(QCheckBox("加密保存工程"))
+        self.chk_encrypt.setToolTip(
+            "工程文件含标准答案，默认加密保存。\n关闭后保存工程、以及打包后自动保存，都会写成明文。"
+        )
         self.chk_encrypt.setChecked(settings().value(PROJECT_ENCRYPT, True, type=bool))
-        self.chk_encrypt.toggled.connect(lambda on: settings().setValue(PROJECT_ENCRYPT, bool(on)))
+        self.chk_encrypt.toggled.connect(self._on_encrypt_toggled)
+        self.chk_encrypt.clicked.connect(self._on_encrypt_clicked)
         form.addRow("工程加密", self.chk_encrypt)
 
-        self.cb_time_mode = QComboBox()
+        self.cb_time_mode = NoWheelComboBox()
         self.cb_time_mode.addItem("关闭（仍用 HTTPS Date）", "off")
         self.cb_time_mode.addItem("优先：有令牌就用，失败回退", "prefer")
         self.cb_time_mode.addItem("必须：没有有效令牌就不开考", "require")
@@ -470,7 +476,7 @@ class BuildTab(QWidget):
         self.edit_time_pubkey = QLineEdit(self.state.time_pubkey)
         self.edit_time_pubkey.setPlaceholderText("base64 Ed25519 公钥（32 字节）")
         form.addRow("令牌公钥", self.edit_time_pubkey)
-        self.spin_time_skew = QSpinBox()
+        self.spin_time_skew = NoWheelSpinBox()
         self.spin_time_skew.setRange(30, 3600)
         self.spin_time_skew.setValue(int(self.state.time_max_skew or 300))
         self.spin_time_skew.setSuffix(" 秒")
@@ -780,11 +786,63 @@ class BuildTab(QWidget):
 
     # ---------------------------------------------------------------- 打包
 
+    def _confirm(self, title: str, text: str) -> bool:
+        """危险方向的二次确认；默认按钮是「否」。"""
+        return (
+            QMessageBox.question(
+                self,
+                title,
+                text,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            == QMessageBox.StandardButton.Yes
+        )
+
     def _on_student_review_toggled(self, on: bool) -> None:
+        """状态同步：只有用户点击才会走确认（见 _on_student_review_clicked）。"""
         self.state.student_review = "none" if on else "free"
         self.changed.emit()
 
+    def _on_student_review_clicked(self, on: bool) -> None:
+        # 只在用户主动点击、且往"放开回看"方向时确认；程序化 setChecked 不弹框。
+        if on or self._confirm(
+            "允许学生回看原卷",
+            "关闭后，学生已交卷且未到结束时间即可免授权只读回看原卷。\n确定关闭吗？",
+        ):
+            return
+        self._suspend_sync = True
+        self.chk_student_review.setChecked(True)
+        self._suspend_sync = False
+
+    def _on_pin_login_clicked(self, on: bool) -> None:
+        if not on:
+            return
+        if not self._confirm(
+            "启用 PIN 登录",
+            "启用后每个学生需要 6 位 PIN 才能解锁。\n"
+            "请务必在打包成功后导出并分发 PIN 表，否则学生无法登录。\n确定启用吗？",
+        ):
+            self.chk_pin_login.setChecked(False)
+
+    def _on_encrypt_toggled(self, on: bool) -> None:
+        from app.ui.app_settings import PROJECT_ENCRYPT, settings
+
+        settings().setValue(PROJECT_ENCRYPT, bool(on))
+
+    def _on_encrypt_clicked(self, on: bool) -> None:
+        if on or self._confirm(
+            "关闭工程加密",
+            "关闭后，保存的工程文件（含标准答案）将以明文写入磁盘，\n"
+            "之后打包时自动保存的工程也一样。\n确定关闭吗？",
+        ):
+            return
+        self.chk_encrypt.setChecked(True)
+
     def _sync_time_config(self) -> None:
+        # 供应商：勾选框确认被拒绝时正在回滚，此时不能把控件值写回 state。
+        if getattr(self, "_suspend_sync", False):
+            return
         old = (
             self.state.student_review,
             self.state.time_mode,

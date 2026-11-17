@@ -419,7 +419,7 @@ def test_pick_spinbox_is_wide_enough(qapp, state_with_banks) -> None:
 
 
 def test_bank_label_avoids_duplicate_name(qapp, state_with_banks) -> None:
-    """title == exam_id 时不要在括号里重复显示同一个名字。"""
+    """题库勾选框只显示题库名；exam_id 与题量放进 tooltip（避免长文案被误点）。"""
     from PySide6.QtWidgets import QCheckBox
 
     from app.core.models import ExamBank, Question
@@ -435,8 +435,11 @@ def test_bank_label_avoids_duplicate_name(qapp, state_with_banks) -> None:
     editor = SessionsTab(state_with_banks)
     try:
         editor.refresh_choices()
+        boxes = [cb for cb in editor.findChildren(QCheckBox) if cb.text() == "same"]
+        assert boxes, [cb.text() for cb in editor.findChildren(QCheckBox)]
+        tip = boxes[0].toolTip()
+        assert "same" in tip and "题量" in tip and "1" in tip, tip
         labels = [cb.text() for cb in editor.findChildren(QCheckBox)]
-        assert "same（题量 1）" in labels, labels
         assert not [x for x in labels if x.count("same") > 1], f"名称重复显示：{labels}"
     finally:
         editor.deleteLater()

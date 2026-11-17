@@ -54,6 +54,7 @@ from app.ui.tab_banks import BanksTab
 from app.ui.tab_build import BuildTab
 from app.ui.tab_sessions import SessionsTab
 from app.ui.tab_students import StudentsTab
+from app.ui.widgets import NoWheelTabBar
 from app.version import app_version, watermark
 
 
@@ -134,6 +135,8 @@ class MainWindow(QMainWindow):
 
     def _build_tabs(self) -> None:
         self.tabs = QTabWidget()
+        # 滚轮停在页签上不应切页（Qt 默认会切）
+        self.tabs.setTabBar(NoWheelTabBar())
         self.banks_tab = BanksTab(self.state)
         self.students_tab = StudentsTab(self.state)
         self.sessions_tab = SessionsTab(self.state)
