@@ -13,7 +13,10 @@
         "3",
         "4"
       ],
-      "answer": "B",
+      "answer": {
+        "kind": "single",
+        "answer": "B"
+      },
       "score": 2,
       "difficulty": 1
     },
@@ -27,7 +30,10 @@
         "7",
         "8"
       ],
-      "answer": "B",
+      "answer": {
+        "kind": "single",
+        "answer": "B"
+      },
       "score": 2,
       "difficulty": 2
     },
@@ -39,7 +45,10 @@
         "对",
         "错"
       ],
-      "answer": "A",
+      "answer": {
+        "kind": "single",
+        "answer": "A"
+      },
       "score": 1,
       "difficulty": 2
     },
@@ -53,7 +62,10 @@
         "4",
         "6"
       ],
-      "answer": "B",
+      "answer": {
+        "kind": "single",
+        "answer": "B"
+      },
       "score": 2,
       "difficulty": 3
     },
@@ -67,7 +79,10 @@
         "4",
         "5"
       ],
-      "answer": "D",
+      "answer": {
+        "kind": "single",
+        "answer": "D"
+      },
       "score": 2,
       "difficulty": 3
     },
@@ -79,7 +94,10 @@
         "对",
         "错"
       ],
-      "answer": "A",
+      "answer": {
+        "kind": "single",
+        "answer": "A"
+      },
       "score": 1,
       "difficulty": 4
     }

@@ -13,7 +13,10 @@
         "橘子",
         "梨"
       ],
-      "answer": "B",
+      "answer": {
+        "kind": "single",
+        "answer": "B"
+      },
       "score": 2,
       "difficulty": 1
     },
@@ -27,7 +30,10 @@
         "gone",
         "going"
       ],
-      "answer": "B",
+      "answer": {
+        "kind": "single",
+        "answer": "B"
+      },
       "score": 2,
       "difficulty": 2
     },
@@ -41,7 +47,10 @@
         "childes",
         "child"
       ],
-      "answer": "B",
+      "answer": {
+        "kind": "single",
+        "answer": "B"
+      },
       "score": 2,
       "difficulty": 2
     },
@@ -53,7 +62,10 @@
         "对",
         "错"
       ],
-      "answer": "B",
+      "answer": {
+        "kind": "single",
+        "answer": "B"
+      },
       "score": 1,
       "difficulty": 3
     }
