@@ -1,0 +1,7 @@
+# 仓库根配置：覆盖 admin/ 之外的 Python（tools/bank_qc、.agents 等）。
+# admin/ 有自己的 pyproject 配置，按"最近配置优先"仍走 admin 的规则。
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]
