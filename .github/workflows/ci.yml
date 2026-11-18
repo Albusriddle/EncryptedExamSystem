@@ -240,6 +240,9 @@ jobs:
       - name: skill 脚本导入冒烟
         run: |
           for f in .agents/skills/question-bank-qc/scripts/*.py; do
+            # admin_validate.py 依赖管理端 app 包（pydantic 等），本 job 未安装，
+            # 由 admin 的 python job 覆盖；其余脚本必须能独立 import。
+            case "$f" in *admin_validate.py) echo "  · $f（跳过：依赖管理端）"; continue;; esac
             echo "  · $f"
             python -c "import runpy,sys; runpy.run_path(sys.argv[1], run_name='import_smoke')" "$f"
           done
