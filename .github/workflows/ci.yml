@@ -235,3 +235,6 @@ jobs:
       # 题库质检 skill 是仓库资产，脚本至少要能编译；避免长期漂移。
       - name: 编译 skill 脚本
         run: python -m compileall -q .agents/skills/question-bank-qc/scripts
+      # 行为冒烟：能 import、argparse 能启动；比只做语法检查多一层。
+      - name: skill 脚本冒烟
+        run: python .agents/skills/question-bank-qc/scripts/qc.py --help > /dev/null

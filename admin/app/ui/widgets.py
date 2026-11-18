@@ -68,12 +68,20 @@ class CompactCheckBox(QCheckBox):
 
     def __init__(self, text: str = "") -> None:
         super().__init__(text)
+        self._fitting = False
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._fit()
 
     def _fit(self) -> None:
-        self.ensurePolished()
-        self.setMaximumWidth(self.sizeHint().width())
+        # 重入保护：ensurePolished() 在极端样式下可能再次触发 StyleChange。
+        if self._fitting:
+            return
+        self._fitting = True
+        try:
+            self.ensurePolished()
+            self.setMaximumWidth(self.sizeHint().width())
+        finally:
+            self._fitting = False
 
     def changeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         super().changeEvent(event)

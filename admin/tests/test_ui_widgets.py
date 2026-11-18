@@ -92,7 +92,7 @@ def test_no_wheel_tabbar_keeps_page(qapp) -> None:
     assert tabs.currentIndex() == 1, "滚轮停在页签上不应切页"
 
 
-def test_compact_checkbox_limits_hit_area(qapp) -> None:
+def test_make_checkbox_limits_hit_area(qapp) -> None:
     from app.ui.widgets import CompactCheckBox, make_checkbox
 
     plain = QCheckBox("按大题模式")
@@ -102,7 +102,7 @@ def test_compact_checkbox_limits_hit_area(qapp) -> None:
     assert box.maximumWidth() <= plain.sizeHint().width() + 4
 
 
-def test_compact_checkbox_refits_after_font_change(qapp) -> None:
+def test_make_checkbox_refits_after_font_change(qapp) -> None:
     """字体变大后必须重算宽度，否则文字会被截断。"""
     from PySide6.QtGui import QFont
 
@@ -246,3 +246,23 @@ def test_sections_toggle_needs_confirmation(qapp, state_with_banks, monkeypatch)
         assert tab.chk_sections.isChecked() is True, "确认框选“否”后必须保持打开"
     finally:
         tab.deleteLater()
+
+
+def test_no_bare_value_widgets_in_any_ui_module() -> None:
+    """静态兜底：整个 app/ui 都不允许出现裸的可调值控件。
+
+    动态控件树测试只覆盖五个 Tab；对话框（缺考、导入、欢迎）以后加控件时
+    未必有实例化测试，这里直接扫源码补上这一层。
+    """
+    import re
+
+    ui_dir = ROOT / "admin" / "app" / "ui"
+    pattern = re.compile(r"=\s*(QComboBox|QSpinBox|QDateTimeEdit)\(\)")
+    offenders = []
+    for path in sorted(ui_dir.glob("*.py")):
+        if path.name == "widgets.py":
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{path.name}:{lineno} {line.strip()}")
+    assert not offenders, "发现裸的可调值控件：\n" + "\n".join(offenders)

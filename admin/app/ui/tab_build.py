@@ -455,7 +455,6 @@ class BuildTab(QWidget):
             "工程文件含标准答案，默认加密保存。\n关闭后保存工程、以及打包后自动保存，都会写成明文。"
         )
         self.chk_encrypt.setChecked(settings().value(PROJECT_ENCRYPT, True, type=bool))
-        self.chk_encrypt.toggled.connect(self._on_encrypt_toggled)
         self.chk_encrypt.clicked.connect(self._on_encrypt_clicked)
         form.addRow("工程加密", self.chk_encrypt)
 
@@ -825,17 +824,19 @@ class BuildTab(QWidget):
         ):
             self.chk_pin_login.setChecked(False)
 
-    def _on_encrypt_toggled(self, on: bool) -> None:
+    def _on_encrypt_clicked(self, on: bool) -> None:
+        """只在「用户确认之后」写设置，避免关闭被拒绝时先落盘 False。"""
         from app.ui.app_settings import PROJECT_ENCRYPT, settings
 
-        settings().setValue(PROJECT_ENCRYPT, bool(on))
-
-    def _on_encrypt_clicked(self, on: bool) -> None:
-        if on or self._confirm(
+        if on:
+            settings().setValue(PROJECT_ENCRYPT, True)
+            return
+        if self._confirm(
             "关闭工程加密",
             "关闭后，保存的工程文件（含标准答案）将以明文写入磁盘，\n"
             "之后打包时自动保存的工程也一样。\n确定关闭吗？",
         ):
+            settings().setValue(PROJECT_ENCRYPT, False)
             return
         self.chk_encrypt.setChecked(True)
 
