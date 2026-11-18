@@ -93,12 +93,78 @@ def test_no_wheel_tabbar_keeps_page(qapp) -> None:
 
 
 def test_compact_checkbox_limits_hit_area(qapp) -> None:
-    from app.ui.widgets import compact_checkbox
+    from app.ui.widgets import CompactCheckBox, make_checkbox
 
     plain = QCheckBox("按大题模式")
-    box = compact_checkbox(QCheckBox("按大题模式"))
+    box = make_checkbox("按大题模式")
+    assert isinstance(box, CompactCheckBox)
     assert box.maximumWidth() == box.sizeHint().width()
     assert box.maximumWidth() <= plain.sizeHint().width() + 4
+
+
+def test_compact_checkbox_refits_after_font_change(qapp) -> None:
+    """字体变大后必须重算宽度，否则文字会被截断。"""
+    from PySide6.QtGui import QFont
+
+    from app.ui.widgets import make_checkbox
+
+    box = make_checkbox("按大题模式")
+    before = box.maximumWidth()
+    font = QFont(box.font())
+    font.setPointSize(font.pointSize() + 6)
+    box.setFont(font)
+    QApplication.processEvents()
+    assert box.maximumWidth() > before, "字体变大后最大宽度应随之增加"
+
+
+def test_all_tabs_use_no_wheel_controls(qapp, state_with_banks) -> None:
+    """守护测试：界面里不允许出现裸的 QComboBox/QSpinBox/QDateTimeEdit。
+
+    v1.3.2 漏掉了「按大题模式」里的题库下拉（8 空格缩进没被批量替换命中），
+    所以这里直接遍历控件树断言类型，避免以后再漏。
+    """
+    from PySide6.QtWidgets import QComboBox, QDateTimeEdit, QSpinBox
+
+    from app.ui.tab_answers import AnswersTab
+    from app.ui.tab_banks import BanksTab
+    from app.ui.tab_build import BuildTab
+    from app.ui.tab_sessions import SessionsTab
+    from app.ui.tab_students import StudentsTab
+    from app.ui.widgets import NoWheelComboBox, NoWheelDateTimeEdit, NoWheelSpinBox
+
+    tabs = [
+        BanksTab(state_with_banks),
+        StudentsTab(state_with_banks),
+        SessionsTab(state_with_banks),
+        BuildTab(state_with_banks),
+        AnswersTab(state_with_banks),
+    ]
+    try:
+        for tab in tabs:
+            for widget in tab.findChildren(QComboBox):
+                assert isinstance(widget, NoWheelComboBox), f"{type(tab).__name__} 有裸下拉框"
+            for widget in tab.findChildren(QSpinBox):
+                assert isinstance(widget, NoWheelSpinBox), f"{type(tab).__name__} 有裸数字框"
+            for widget in tab.findChildren(QDateTimeEdit):
+                assert isinstance(widget, NoWheelDateTimeEdit), f"{type(tab).__name__} 有裸时间框"
+    finally:
+        for tab in tabs:
+            tab.deleteLater()
+
+
+def test_main_window_tabbar_ignores_wheel(qapp, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    from app.ui.main_window import MainWindow
+    from app.ui.widgets import NoWheelTabBar
+
+    win = MainWindow()
+    try:
+        assert isinstance(win.tabs.tabBar(), NoWheelTabBar)
+        win.tabs.setCurrentIndex(2)
+        _wheel(win.tabs.tabBar())
+        assert win.tabs.currentIndex() == 2, "滚轮停在页签上不应切页"
+    finally:
+        win.deleteLater()
 
 
 def test_encrypt_toggle_needs_confirmation(qapp, state_with_banks, monkeypatch, tmp_path) -> None:

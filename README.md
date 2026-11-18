@@ -4,7 +4,7 @@
 >
 > 本系统的定位是**「防误操作 + 现场监考」**，不是密码学意义上的强防作弊系统。防什么、不防什么，见 [安全边界与威胁模型](docs/安全边界与威胁模型.md)；已经明确接受、且**没有**修复的风险，见 [风险接受记录](docs/风险接受记录.md)。
 
-当前版本：**1.3.1**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
+当前版本：**1.3.3**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
 
 | 组件 | 技术形态 | 职责 |
 |---|---|---|
@@ -172,7 +172,7 @@ uv run python -m app
 
 ```bash
 cd admin && uv run python buildtools/build_exe.py
-cd .. && bash scripts/make-release-zip.sh 1.3.1
+cd .. && bash scripts/make-release-zip.sh <版本>
 ```
 
 发布前必须全绿（详见 [代码审阅报告](docs/代码审阅报告.md) 的「如何复跑」）：
@@ -212,12 +212,12 @@ worker/              Cloudflare Worker 时间服务（**目录为空，未实现
 
 ---
 
-## 8. 测试与验证基线（v1.3.1）
+## 8. 测试与验证基线（v1.3.3）
 
 | 项 | 基线 |
 |---|---|
 | Rust | 246 个 `#[test]` |
-| Python | 339 用例（`pytest` 收集口径，含参数化展开） |
+| Python | 350 用例（`pytest` 收集口径，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 14 项（非 `--full`） |
 | CI | 6 个 job：`rust` / `python` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` |
@@ -263,6 +263,7 @@ zip 旁边附带 `SHA256SUMS.txt`；`ExamAdmin/` 内另有 `图片使用教程.m
 | [架构与实施方案](docs/保密考试系统_架构与实施方案.md) | 维护者 / 接手人 | 设计取舍、里程碑、踩过的坑 |
 | [代码审阅报告](docs/代码审阅报告.md) | 维护者 | 97 轮审阅的问题索引、技术无解项、复跑方式 |
 | [发布说明](docs/release-notes.md) | 教师 / 下载者 | 逐版本变更、已知限制、校验口径 |
+| [题库质检 skill](.agents/skills/question-bank-qc/SKILL.md) | 出题 / 质检 | 题库结构、判题回放、抽样与门禁复核流程 |
 
 ---
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -54,14 +55,36 @@ class NoWheelTabBar(_NoWheelMixin, QTabBar):
     """页签栏：滚轮不切页。"""
 
 
-def compact_checkbox(cb: QCheckBox) -> QCheckBox:
-    """把勾选框宽度收窄到「方框 + 文字」，限制误点范围。
+class CompactCheckBox(QCheckBox):
+    """把宽度限制在「方框 + 文字」，限制误点范围。
 
     为什么必须限宽：Windows 11 样式下 ``SE_CheckBoxClickRect`` 等于**整个控件矩形**
     （实测 872px 宽的行点空白也会切换），只缩短文案并不会缩小可点面积。
     固定宽度后，可点面积 = 文字 + 方框，和 Fusion/vista 行为一致。
+
+    字体 / 样式变化会改变 ``sizeHint``，所以在 ``changeEvent`` 里重算，
+    避免高 DPI 切换或改主题后文字被截断。
     """
-    cb.ensurePolished()
-    cb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-    cb.setMaximumWidth(cb.sizeHint().width())
-    return cb
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__(text)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._fit()
+
+    def _fit(self) -> None:
+        self.ensurePolished()
+        self.setMaximumWidth(self.sizeHint().width())
+
+    def changeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._fit()
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt 命名)
+        super().setText(text)
+        self._fit()
+
+
+def make_checkbox(text: str = "") -> CompactCheckBox:
+    """统一入口：所有勾选框都用它，保证可点范围与平台一致。"""
+    return CompactCheckBox(text)

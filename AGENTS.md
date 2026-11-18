@@ -141,6 +141,16 @@ bash scripts/preflight-release.sh          # 全过
 - CI MUST 至少有一个 **Windows** job 跑完整测试（`admin-package` 已包含）；
   ubuntu 上的 UTF-8 locale 永远暴露不了 GBK 类问题。
 
+## 7.6 交互约定（MUST）
+
+- 可调值控件 MUST 用 `app/ui/widgets.py` 的 `NoWheelComboBox` / `NoWheelSpinBox` / `NoWheelDateTimeEdit`；
+  页签栏 MUST 用 `NoWheelTabBar`。Qt 6 下这些控件**无焦点也响应滚轮**，且会吞掉事件让页面不滚。
+- 勾选框 MUST 用 `make_checkbox()`（`CompactCheckBox`）：Windows 11 样式下整行都是点击区，
+  不限宽就会「点说明文字 = 切换状态」。长说明放 `setToolTip()`，不要写进控件文案。
+- 危险方向的状态切换（关闭加密、放开回看、启用 PIN、清空大题）MUST 有二次确认，
+  且确认 MUST 挂在 `clicked`（用户动作）而不是 `toggled`（程序化赋值也会触发）。
+- 新增控件后 MUST 更新 `tests/test_ui_widgets.py` 的控件树守护测试，否则漏一处不会有任何用例变红。
+
 ## 8. 提交与发布
 
 - 提交身份：`Albusriddle <albusriddle@foxmail.com>`。

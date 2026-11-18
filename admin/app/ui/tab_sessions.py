@@ -42,7 +42,7 @@ from app.ui.widgets import (
     NoWheelComboBox,
     NoWheelDateTimeEdit,
     NoWheelSpinBox,
-    compact_checkbox,
+    make_checkbox,
 )
 
 
@@ -272,7 +272,7 @@ class SessionsTab(QWidget):
         # 科目 / 大题
         subj_box = QGroupBox("考试科目 / 大题")
         sl = QVBoxLayout(subj_box)
-        self.chk_sections = compact_checkbox(QCheckBox("按大题模式"))
+        self.chk_sections = make_checkbox("按大题模式")
         self.chk_sections.setToolTip(
             "每行固定题库、题数、精确难度；可上下调整顺序。\n"
             "关闭并保存后，本场已配置的大题会被清空。"
@@ -384,7 +384,7 @@ class SessionsTab(QWidget):
         top = QHBoxLayout()
         title = QLineEdit(sec.title if sec else f"第{len(self.section_rows) + 1}大题")
         title.setMinimumWidth(100)
-        bank = QComboBox()
+        bank = NoWheelComboBox()
         self._fill_bank_combo(bank, sec)
         up = QPushButton("↑")
         up.setFixedWidth(28)
@@ -728,7 +728,7 @@ class SessionsTab(QWidget):
             row = QWidget()
             hl = QHBoxLayout(row)
             hl.setContentsMargins(0, 0, 0, 0)
-            cb = compact_checkbox(QCheckBox(bank.title))
+            cb = make_checkbox(bank.title)
             cb.setToolTip(f"exam_id：{exam_id}；题量：{len(bank.questions)}")
             # 整数用 QSpinBox：QDoubleSpinBox 即便 decimals=0 也会为
             # 小数点预留编辑区，把 "500" 截成 "50"。
@@ -737,7 +737,7 @@ class SessionsTab(QWidget):
             pick.setValue(min(bank.pick, len(bank.questions)))
             pick.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             pick.setMinimumWidth(pick_width(int(pick.maximum())))
-            limit = compact_checkbox(QCheckBox("限制平均难度"))
+            limit = make_checkbox("限制平均难度")
             limit.setToolTip("勾选后，抽出的这 N 题平均难度必须落在下面区间（1–255）")
             dmin = NoWheelSpinBox()
             dmin.setRange(1, 255)

@@ -48,7 +48,7 @@ from app.core.grading import (
 from app.core.state import ProjectState
 from app.core.subproc import no_window_kwargs
 from app.ui.tab_build import builder_exe
-from app.ui.widgets import compact_checkbox, fit_button_text
+from app.ui.widgets import fit_button_text, make_checkbox
 
 COLUMNS = ["文件", "学号", "场次", "题数", "已答", "未答", "交卷时间", "状态", "说明"]
 
@@ -385,7 +385,7 @@ class AnswersTab(QWidget):
             ("fill", "填空题"),
             ("fix", "改错题"),
         ):
-            cb = compact_checkbox(QCheckBox(label))
+            cb = make_checkbox(label)
             cb.setChecked(key in ("single", "multiple", "judge"))
             self.chk_types[key] = cb
             type_row.addWidget(cb)
@@ -393,11 +393,11 @@ class AnswersTab(QWidget):
         bl.addLayout(type_row)
 
         rule_row = QHBoxLayout()
-        self.chk_case = compact_checkbox(QCheckBox("忽略大小写"))
+        self.chk_case = make_checkbox("忽略大小写")
         self.chk_case.setChecked(True)
-        self.chk_space = compact_checkbox(QCheckBox("忽略空白字符"))
+        self.chk_space = make_checkbox("忽略空白字符")
         self.chk_space.setChecked(True)
-        self.chk_partial = compact_checkbox(QCheckBox("填空/改错按项给分"))
+        self.chk_partial = make_checkbox("填空/改错按项给分")
         self.chk_partial.setToolTip("默认整题全对才给分；勾上后按答对的空/行比例给分")
         rule_row.addWidget(QLabel("匹配规则："))
         rule_row.addWidget(self.chk_case)

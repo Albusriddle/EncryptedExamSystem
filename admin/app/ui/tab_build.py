@@ -25,7 +25,6 @@ from pathlib import Path
 from PySide6.QtCore import QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -45,7 +44,7 @@ from app.core.banks_io import write_temp_banks
 from app.core.buildcmd import build_command, build_env, safe_pin_dir
 from app.core.state import ProjectState
 from app.core.subproc import no_window_kwargs
-from app.ui.widgets import NoWheelComboBox, NoWheelSpinBox, compact_checkbox, fit_button_text
+from app.ui.widgets import NoWheelComboBox, NoWheelSpinBox, fit_button_text, make_checkbox
 
 
 def is_frozen() -> bool:
@@ -431,8 +430,7 @@ class BuildTab(QWidget):
         self.lbl_current.setWordWrap(True)
         form.addRow("当前工程", self.lbl_current)
 
-        self._suspend_sync = False
-        self.chk_pin_login = compact_checkbox(QCheckBox("每生 PIN 登录"))
+        self.chk_pin_login = make_checkbox("每生 PIN 登录")
         self.chk_pin_login.setToolTip(
             "勾选后每个学生一个 6 位 PIN，打包成功时导出 CSV。\n"
             "没把 CSV 发到学生手里，学生就无法登录。"
@@ -440,7 +438,7 @@ class BuildTab(QWidget):
         self.chk_pin_login.clicked.connect(self._on_pin_login_clicked)
         form.addRow("登录方式", self.chk_pin_login)
 
-        self.chk_student_review = compact_checkbox(QCheckBox("仅教师可查看原卷"))
+        self.chk_student_review = make_checkbox("仅教师可查看原卷")
         self.chk_student_review.setToolTip(
             "勾选（默认）：学生端无回看入口，考后由教师用 master 查看原卷；\n"
             "不勾选：学生已交卷且未到结束时间可免授权只读回看。"
@@ -452,7 +450,7 @@ class BuildTab(QWidget):
 
         from app.ui.app_settings import PROJECT_ENCRYPT, settings
 
-        self.chk_encrypt = compact_checkbox(QCheckBox("加密保存工程"))
+        self.chk_encrypt = make_checkbox("加密保存工程")
         self.chk_encrypt.setToolTip(
             "工程文件含标准答案，默认加密保存。\n关闭后保存工程、以及打包后自动保存，都会写成明文。"
         )
@@ -787,7 +785,11 @@ class BuildTab(QWidget):
     # ---------------------------------------------------------------- 打包
 
     def _confirm(self, title: str, text: str) -> bool:
-        """危险方向的二次确认；默认按钮是「否」。"""
+        """危险方向的二次确认；默认按钮是「否」。
+
+        **只能在 UI 线程调用**：内部用 ``QMessageBox.question`` 阻塞事件循环，
+        从定时器或 worker 回调里调用会卡死。
+        """
         return (
             QMessageBox.question(
                 self,
@@ -811,9 +813,7 @@ class BuildTab(QWidget):
             "关闭后，学生已交卷且未到结束时间即可免授权只读回看原卷。\n确定关闭吗？",
         ):
             return
-        self._suspend_sync = True
         self.chk_student_review.setChecked(True)
-        self._suspend_sync = False
 
     def _on_pin_login_clicked(self, on: bool) -> None:
         if not on:
@@ -840,23 +840,23 @@ class BuildTab(QWidget):
         self.chk_encrypt.setChecked(True)
 
     def _sync_time_config(self) -> None:
-        # 供应商：勾选框确认被拒绝时正在回滚，此时不能把控件值写回 state。
-        if getattr(self, "_suspend_sync", False):
-            return
+        """把时间令牌控件写回 state。
+
+        **不碰** ``student_review``：它由勾选框的 ``toggled`` 单独同步。
+        这里被 250ms 预览定时器反复调用，若也写回看开关，就会在确认框
+        还没关掉时把未确认的值写进 state（v1.3.2 的实现问题）。
+        """
         old = (
-            self.state.student_review,
             self.state.time_mode,
             self.state.time_url,
             self.state.time_pubkey,
             self.state.time_max_skew,
         )
-        self.state.student_review = "none" if self.chk_student_review.isChecked() else "free"
         self.state.time_mode = str(self.cb_time_mode.currentData() or "off")
         self.state.time_url = self.edit_time_url.text().strip()
         self.state.time_pubkey = self.edit_time_pubkey.text().strip()
         self.state.time_max_skew = int(self.spin_time_skew.value())
         if old != (
-            self.state.student_review,
             self.state.time_mode,
             self.state.time_url,
             self.state.time_pubkey,
