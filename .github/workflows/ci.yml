@@ -225,16 +225,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  skill-scripts:
+  tools-scripts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # 题库质检 skill 是仓库资产，脚本至少要能编译；避免长期漂移。
-      - name: 编译 skill 脚本
-        run: python -m compileall -q .agents/skills/question-bank-qc/scripts
+      - name: 安装 ruff
+        run: pip install ruff
+      # 题库相关的两套脚本都是仓库资产：.agents/skills（流程）与 tools/bank_qc（口径执行）。
+      - name: lint tools/bank_qc
+        run: ruff check tools/bank_qc
+      - name: 编译脚本
+        run: |
+          python -m compileall -q .agents/skills/question-bank-qc/scripts
+          python -m compileall -q tools/bank_qc
       # 行为冒烟：逐个脚本执行顶层代码（run_name 不是 __main__，不会进 main()），
       # 能发现缺依赖、导入期路径错误等 compileall 抓不到的问题。
       - name: skill 脚本导入冒烟
@@ -246,3 +252,17 @@ jobs:
             echo "  · $f"
             python -c "import runpy,sys; runpy.run_path(sys.argv[1], run_name='import_smoke')" "$f"
           done
+      - name: bank_qc 冒烟
+        run: |
+          python tools/bank_qc/verify_bank.py --help > /dev/null
+          python tools/bank_qc/score_bank.py --help > /dev/null
+          # 演示库按口径应当 FAIL（rc=1）；如果它突然 PASS，说明门禁被放水了。
+          if python tools/bank_qc/verify_bank.py banks/demo --no-compile > /tmp/verify.log 2>&1; then
+            echo "✗ banks/demo 不应通过门禁"
+            tail -5 /tmp/verify.log
+            exit 1
+          fi
+          tail -3 /tmp/verify.log
+          grep -q "FAIL" /tmp/verify.log
+          python tools/bank_qc/score_bank.py banks/demo > /tmp/score.log 2>&1
+          tail -2 /tmp/score.log

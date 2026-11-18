@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """题库门禁：只读校验 JSON 题库，**不修改任何题库文件**。
 
 校验范围

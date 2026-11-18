@@ -86,10 +86,95 @@ fi
 
 echo "  ✓ 示例题库/（exam_id 与文件名一致）"
 
-# 4. 手册
+# 4. 文档：全部随包发布，保证手册里的相对链接都能打开
+mkdir -p "$STAGE/docs"
+cp "$ROOT"/docs/*.md "$STAGE/docs/"
 cp "$ROOT/docs/教师使用手册.md" "$STAGE/使用说明.md"
 cp "$ROOT/docs/风险接受记录.md" "$STAGE/风险接受记录.md"
-echo "  ✓ 使用说明.md + 风险接受记录.md"
+echo "  ✓ docs/（$(ls "$STAGE/docs" | wc -l | tr -d ' ') 份）+ 使用说明.md"
+
+# 4.1 题库自检工具（手册 §2.4 要用，必须随包发布）
+mkdir -p "$STAGE/tools"
+cp -r "$ROOT/tools/bank_qc" "$STAGE/tools/bank_qc"
+rm -rf "$STAGE/tools/bank_qc/__pycache__"
+echo "  ✓ tools/bank_qc/"
+
+# 4.2 示例题库的定位说明（它不满足出题口径，门禁会 FAIL）
+cat > "$STAGE/示例题库/README.md" <<'DOC'
+# 示例题库（仅演示流程）
+
+这三个文件用来**跑通管理端流程**，不是出题模板，也**不满足**《出题质检与难度口径》：
+
+- 题量、难度分布、K/A/C 标注都是为了演示而随意填的；
+- 用 `tools/bank_qc/verify_bank.py` 检查本目录会得到 `FAIL`，这是**预期结果**；
+- 真正出题时请按 `docs/题库JSON规范.md` 与 `docs/出题质检与难度口径.md` 编写。
+
+先导入本目录的文件、走完「导入 → 场次 → 打包 → 收卷」一遍，再换成自己的题库。
+DOC
+echo "  ✓ 示例题库/README.md"
+
+# 4.3 把手册里的链接改写成发布包内的真实路径
+python - "$STAGE" <<'PYFIX'
+import re
+import sys
+from pathlib import Path
+
+stage = Path(sys.argv[1])
+doc_names = sorted(p.name for p in (stage / "docs").glob("*.md"))
+manual = stage / "使用说明.md"
+text = manual.read_text(encoding="utf-8")
+# 手册在仓库里与 docs 同级；发布包里被放到根，链接要补 docs/ 前缀。
+text = text.replace("](../tools/bank_qc/README.md)", "](tools/bank_qc/README.md)")
+for name in doc_names:
+    text = text.replace(f"]({name})", f"](docs/{name})")
+manual.write_text(text, encoding="utf-8", newline="\n")
+
+# 风险接受记录在仓库里与 docs 同级；发布包根也有一份（兼容旧链接），同样补前缀。
+risk = stage / "风险接受记录.md"
+if risk.is_file():
+    t = risk.read_text(encoding="utf-8")
+    for name in doc_names:
+        t = t.replace(f"]({name})", f"](docs/{name})")
+    risk.write_text(t, encoding="utf-8", newline="\n")
+
+# build_exe.py 会把图片教程复制到 ExamAdmin/，那里的链接同样要指向 docs/。
+tutorial = stage / "ExamAdmin" / "图片使用教程.md"
+if tutorial.is_file():
+    t = tutorial.read_text(encoding="utf-8")
+    for name in doc_names:
+        t = t.replace(f"]({name})", f"](../docs/{name})")
+    tutorial.write_text(t, encoding="utf-8", newline="\n")
+print("    链接已改写")
+PYFIX
+
+# 4.4 死链自检：发布包里任何 .md 的相对链接都必须能打开
+python - "$STAGE" <<'PYLINK'
+import re
+import sys
+from pathlib import Path
+
+stage = Path(sys.argv[1]).resolve()
+bad = []
+for path in stage.rglob("*.md"):
+    text = path.read_text(encoding="utf-8")
+    # 去掉围栏代码块与行内代码：示例里的 ![说明](地址) 不是真链接。
+    text = re.sub(r"```.*?```", "", text, flags=re.S)
+    text = re.sub(r"`[^`]*`", "", text)
+    for m in re.finditer(r"\[[^\]]*\]\(([^)#]+)(?:#[^)]*)?\)", text):
+        target = m.group(1).strip()
+        if target.startswith(("http://", "https://", "mailto:", "data:")):
+            continue
+        if not (path.parent / target).resolve().exists():
+            bad.append(f"{path.relative_to(stage)} -> {target}")
+if bad:
+    print("  ✗ 发布包内存在死链：")
+    for item in bad:
+        print(f"    - {item}")
+    sys.exit(1)
+print("    链接自检通过")
+PYLINK
+
+echo "  ✓ 使用说明.md + 风险接受记录.md + 链接自检"
 
 # 5. 入口页：告诉老师从哪开始
 cat > "$STAGE/开始这里.md" <<'DOC'

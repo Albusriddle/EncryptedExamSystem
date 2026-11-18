@@ -6,11 +6,20 @@
 - 命令行：`exam-builder`（打包、校验、导出 PIN、考后看原卷、校验答题卡）
 - 学生端：`exam-client`（单 exe，双击运行，按场次与网络时间解锁）
 
-> 当前版本 **1.3.5**。Release 正文由 `scripts/release_body.py` 从本文件提取
+> 当前版本 **1.3.6**。Release 正文由 `scripts/release_body.py` 从本文件提取
 > **当前版本那一节**，因此 `## 更新摘要（vX.Y.Z）` 小节必须存在且唯一。
 >
 > **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 39 个版本，最新在前）；
 > 更早版本（v0.13.2 及以前）未逐条整理，需要时查 `git tag` 与 `git log`。
+
+## 更新摘要（v1.3.6）
+
+- 发布包改为携带全部文档（`docs/`）与 `tools/bank_qc/`，构建时自动改写手册/图片教程的相对链接，并**做死链自检**（发现死链直接构建失败）；
+- `示例题库/README.md` 说明「仅演示、不满足出题口径、门禁 FAIL 属预期」，手册同步提示；
+- 手册注明题库自检工具随包提供、需要 Python 3.10+；
+- CI 的 `skill-scripts` 改名为 `tools-scripts`，增加 `tools/bank_qc` 的 ruff / compileall / `--help` 冒烟 / 演示库应 FAIL 的回归；
+- `tools/bank_qc/README.md` 增加与 `.agents` skill 的关系说明（口径唯一来源、工具执行、skill 流程）；
+- 新增文档《出题质检与难度口径》补适用版本；「97 轮」订正为 102 轮。
 
 ## 更新摘要（v1.3.5）
 

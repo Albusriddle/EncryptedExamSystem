@@ -4,7 +4,7 @@
 >
 > 本系统的定位是**「防误操作 + 现场监考」**，不是密码学意义上的强防作弊系统。防什么、不防什么，见 [安全边界与威胁模型](docs/安全边界与威胁模型.md)；已经明确接受、且**没有**修复的风险，见 [风险接受记录](docs/风险接受记录.md)。
 
-当前版本：**1.3.5**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
+当前版本：**1.3.6**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
 
 | 组件 | 技术形态 | 职责 |
 |---|---|---|
@@ -213,7 +213,7 @@ worker/              Cloudflare Worker 时间服务（**目录为空，未实现
 
 ---
 
-## 8. 测试与验证基线（v1.3.5）
+## 8. 测试与验证基线（v1.3.6）
 
 | 项 | 基线 |
 |---|---|
@@ -221,7 +221,7 @@ worker/              Cloudflare Worker 时间服务（**目录为空，未实现
 | Python | 351 用例（`pytest` 收集口径，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 14 项（非 `--full`） |
-| CI | 7 个 job：`rust` / `python` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `skill-scripts` |
+| CI | 7 个 job：`rust` / `python` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `tools-scripts` |
 
 > 数字会随提交变化，**以 CI 与脚本输出为准**。发布预检的项数看脚本最后一行
 > 「✓ 发布预检通过（N 项）」；测试数量看 `cargo test` / `pytest` 的统计行。
@@ -233,21 +233,25 @@ ExamAdmin-<版本>/
 ├── 开始这里.md              ← 第一步该看什么
 ├── 使用说明.md              ← 完整手册（即《教师使用手册》）
 ├── 风险接受记录.md          ← 随包分发的安全决策
+├── docs/                   ← 全部文档（手册里的链接指向这里）
+├── tools/bank_qc/          ← 题库自检工具（需 Python 3.10+）
 ├── ExamAdmin/
 │   ├── ExamAdmin.exe
 │   ├── exam-builder.exe
 │   ├── stub-template.exe    ← 打包用，不发给学生
+│   ├── 图片使用教程.md
 │   ├── _internal/
 │   ├── LICENSE
 │   ├── THIRD-PARTY-NOTICES.md
 │   └── licenses/
 └── 示例题库/
+    ├── README.md           ← 说明「仅演示、门禁会 FAIL」
     ├── 数学.json
     ├── 英语.json
     └── 图片题示例.json
 ```
 
-zip 旁边附带 `SHA256SUMS.txt`；`ExamAdmin/` 内另有 `图片使用教程.md`。
+zip 旁边附带 `SHA256SUMS.txt`；构建时会自动检查包内所有 `.md` 的相对链接，有死链直接失败。
 
 ---
 
@@ -263,10 +267,10 @@ zip 旁边附带 `SHA256SUMS.txt`；`ExamAdmin/` 内另有 `图片使用教程.m
 | [风险接受记录](docs/风险接受记录.md) | 决策者 | R-01~R-04 的事实、理由、补偿、复审条件 |
 | [时间令牌协议](docs/时间令牌协议.md) | 自建时间服务的学校 | 请求 / 响应 / 验签 / 最小服务端示例 |
 | [架构与实施方案](docs/保密考试系统_架构与实施方案.md) | 维护者 / 接手人 | 设计取舍、里程碑、踩过的坑 |
-| [代码审阅报告](docs/代码审阅报告.md) | 维护者 | 97 轮审阅的问题索引、技术无解项、复跑方式 |
+| [代码审阅报告](docs/代码审阅报告.md) | 维护者 | 102 轮审阅的问题索引、技术无解项、复跑方式 |
 | [发布说明](docs/release-notes.md) | 教师 / 下载者 | 逐版本变更、已知限制、校验口径 |
 | [题库质检 skill](.agents/skills/question-bank-qc/SKILL.md) | 出题 / 质检 | 双盲生产、门禁复核、修复复审流程 |
-| [bank_qc 工具](tools/bank_qc/README.md) | 出题 / 质检 | `verify_bank.py` / `score_bank.py` 的命令行用法与能力边界 |
+| [bank_qc 工具](tools/bank_qc/README.md) | 出题 / 质检 | 口径的唯一执行者；`verify_bank.py` / `score_bank.py` 用法与能力边界 |
 
 ---
 
