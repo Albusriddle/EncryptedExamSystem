@@ -252,17 +252,34 @@ def test_no_bare_value_widgets_in_any_ui_module() -> None:
     """静态兜底：整个 app/ui 都不允许出现裸的可调值控件。
 
     动态控件树测试只覆盖五个 Tab；对话框（缺考、导入、欢迎）以后加控件时
-    未必有实例化测试，这里直接扫源码补上这一层。
+    未必有实例化测试，这里用 AST 扫描补上这一层。
+
+    覆盖写法：
+    - ``= QComboBox()``
+    - ``addWidget(QSpinBox())``
+    - ``QtWidgets.QDateTimeEdit()``
     """
-    import re
+    import ast
 
     ui_dir = ROOT / "admin" / "app" / "ui"
-    pattern = re.compile(r"=\s*(QComboBox|QSpinBox|QDateTimeEdit)\(\)")
-    offenders = []
+    banned = {"QComboBox", "QSpinBox", "QDateTimeEdit"}
+    offenders: list[str] = []
+
+    def _call_name(node: ast.Call) -> str | None:
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return None
+
     for path in sorted(ui_dir.glob("*.py")):
         if path.name == "widgets.py":
             continue
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if pattern.search(line):
-                offenders.append(f"{path.name}:{lineno} {line.strip()}")
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = _call_name(node)
+                if name in banned:
+                    offenders.append(f"{path.name}:{node.lineno} {name}()")
     assert not offenders, "发现裸的可调值控件：\n" + "\n".join(offenders)

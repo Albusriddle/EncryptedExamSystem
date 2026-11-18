@@ -74,7 +74,7 @@ class CompactCheckBox(QCheckBox):
 
     def _fit(self) -> None:
         # 重入保护：ensurePolished() 在极端样式下可能再次触发 StyleChange。
-        if self._fitting:
+        if getattr(self, "_fitting", False):
             return
         self._fitting = True
         try:

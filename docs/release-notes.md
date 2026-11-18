@@ -6,11 +6,21 @@
 - 命令行：`exam-builder`（打包、校验、导出 PIN、考后看原卷、校验答题卡）
 - 学生端：`exam-client`（单 exe，双击运行，按场次与网络时间解锁）
 
-> 当前版本 **1.3.4**。Release 正文由 `scripts/release_body.py` 从本文件提取
+> 当前版本 **1.3.5**。Release 正文由 `scripts/release_body.py` 从本文件提取
 > **当前版本那一节**，因此 `## 更新摘要（vX.Y.Z）` 小节必须存在且唯一。
 >
 > **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 39 个版本，最新在前）；
 > 更早版本（v0.13.2 及以前）未逐条整理，需要时查 `git tag` 与 `git log`。
+
+## 更新摘要（v1.3.5）
+
+- 文档版本口径统一：架构 cargo 注释、题库规范标题、图片教程、时间令牌协议的适用版本全部更新到 v1.3.5；
+- README 说明 `.agents` 下的题库质检 skill 不在 `docs/`；
+- 题库规范注明「纯字母答案在 v1.3.5 仍未在导入层拦截」；
+- `CompactCheckBox._fitting` 改用 `getattr` 默认值，避免构造期事件提前触发 `_fit` 时抛 `AttributeError`；
+- 静态守护测试改为 **AST 扫描**，覆盖 `addWidget(QComboBox())`、`QtWidgets.QComboBox()` 等写法；
+- CI 的 skill 冒烟改为逐个脚本 **import 执行**（`runpy`，跳过 `__main__`），覆盖 `score.py / verify.py / check_choice.py` 等；
+- AGENTS 交互约定补充「AST 扫描」这一层。
 
 ## 更新摘要（v1.3.4）
 

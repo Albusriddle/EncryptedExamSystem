@@ -149,7 +149,7 @@ bash scripts/preflight-release.sh          # 全过
   不限宽就会「点说明文字 = 切换状态」。长说明放 `setToolTip()`，不要写进控件文案。
 - 危险方向的状态切换（关闭加密、放开回看、启用 PIN、清空大题）MUST 有二次确认，
   且确认 MUST 挂在 `clicked`（用户动作）而不是 `toggled`（程序化赋值也会触发）。
-- 新增控件后 MUST 更新 `tests/test_ui_widgets.py` 的控件树守护测试，否则漏一处不会有任何用例变红。
+- 新增控件后 MUST 同时更新 `tests/test_ui_widgets.py` 的两层守护：五个 Tab 的控件树断言 + 整个 `app/ui` 的 AST 扫描（含对话框）。
 
 ## 8. 提交与发布
 
