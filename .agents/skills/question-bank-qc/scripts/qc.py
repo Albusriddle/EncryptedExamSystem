@@ -17,7 +17,7 @@
    V7 judge.harness 写当前目录（fopen/remove/rename/system…）
    V8 fill 空位未钉死（错误值注入；--blank-audit 时实跑，一律 REVIEW：由复核人判“域内等价/真漏判”）
 
-退出码：0 = 0 error（可交付）；1 = 有 error；2 = 用法/环境错误。
+退出码：0 = 0 error（仍需逐条裁决 REVIEW）；1 = 有 error；2 = 用法/环境错误。
 题库目录只读；所有临时文件落在系统 temp。
 """
 from __future__ import annotations

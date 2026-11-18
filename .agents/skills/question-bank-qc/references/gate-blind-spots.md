@@ -36,7 +36,7 @@
 | **缺 `meta.scoring`** | `if sc:` 才校验；未标注的题静默通过 | `qc.py` V4 报 REVIEW；`score.py` 会用启发式补算（`source=heuristic`） |
 | **多选真实 S 越界** | 多选跳过 S↔档；`score.py` 对多选一律按 `{3,2,1}` 输出 2.15 | `qc.py` V4 直接读 `meta.scoring` 复算，越界 error |
 | 选项“屏幕同形”：仅差尾随空格、NBSP、零宽字符 | 只看选项文本是否 `!=`，不做可见性归一 | `qc.py` V1（去空白/不可见字符后比较） |
-| 空位是否被测试钉死 | 只验“官方答案通过”，不验“错误值失败” | `fill_inject.py` 注入错误值（全量权威）；`qc.py` V8 只是小候选表子集 |
+| 空位是否被测试钉死 | 只验“官方答案通过”，不验“错误值失败” | `fill_inject.py` 注入错误值（全量权威）；`qc.py` V8 是小候选表子集且一律记 REVIEW，须逐条裁决 |
 | 句式族（同壳换标识符） | 骨架算法只看数字/代码块，随机函数名会逃逸 | `qc.py` V3：掩掉标识符后再聚类 |
 | harness 写文件 | `verify.py` 只 warning（且只认 `fopen/fprintf/freopen`） | `qc.py` V7：`remove/rename/system/fwrite/fputs/tmpnam` 也拦，记 error |
 | 难度标注语义 | 只验“标注 ↔ 档位自洽”，不验标注是否真实 | 抽 15 题/库按 K/A/C 独立打分（偏差 >1 档即 FAIL） |
