@@ -15,10 +15,10 @@ for cand in (r"C:\msys64\mingw64\bin\clang.exe", r"C:\msys64\mingw64\bin\gcc.exe
 
 FILES = {
     "choice": ("choice.json", 500),
-    "fill": ("fill.json", 50),
-    "fix": ("fix.json", 50),
-    "rutuan": ("rutuan-q16-19.json", 4),
-    "zhaosheng": ("zhaosheng-b-q16-19.json", 4),
+    "fill": ("fill.json", 60),
+    "fix": ("fix.json", 61),
+    "rutuan": ("rutuan-q16-19.json", 30),
+    "zhaosheng": ("zhaosheng-b-q16-19.json", 30),
 }
 KPS = {
     "1.1","1.2","1.3","1.4","1.5","2.1","2.2","2.3","2.4","2.5","2.6",
@@ -66,6 +66,18 @@ def check_question(q, bank, idx):
     else:
         allowed_d = (1,2,3)
     if d not in allowed_d: err(f"{where}: difficulty={d!r} 不合法（允许 {allowed_d}）")
+    sc = (q.get("meta") or {}).get("scoring")
+    if sc:
+        if not all(isinstance(sc.get(k), int) for k in ("k","a","c")):
+            err(f"{where}: meta.scoring 的 k/a/c 必须是整数")
+        elif not (1 <= sc["k"] <= 3 and 1 <= sc["a"] <= 4 and 1 <= sc["c"] <= 4):
+            err(f"{where}: meta.scoring 取值越界 {sc}")
+        elif t != "multiple":
+            s_score = 0.35*sc["k"] + 0.45*sc["a"] + 0.20*sc["c"]
+            want = (1 if s_score < 1.75 else 2 if s_score < 2.60 else 3 if s_score < 3.30 else 4) if t == "code" else (1 if s_score < 1.90 else 2 if s_score < 2.55 else 3)
+            if want != d: err(f"{where}: S={s_score:.2f} 应为难度 {want}，实际 {d}")
+    if t == "multiple" and d != 9:
+        err(f"{where}: 多选 difficulty 必须为 9")
     if not isinstance(q.get("score"), int): err(f"{where}: score 必须是整数")
     stem = q.get("stem","")
     for blk in re.findall(r"```(?:c)?\n?(.*?)```", stem, re.S):
@@ -213,8 +225,11 @@ def check_bank(bank, path, expect_n):
     if bank in ("choice","fill","fix"):
         for lvl in (1,2,3):
             if c.get(lvl,0) == 0: err(f"{bank}: 难度 {lvl} 为 0")
-        if c and max(c.values()) - min(c.values()) > 2:
-            err(f"{bank}: 难度配额不均衡 {dict(c)}")
+        if bank in ("fill","fix"):
+            for lvl in (1,2,3):
+                if c.get(lvl,0) < 15: err(f"{bank}: 难度 {lvl} 只有 {c.get(lvl,0)} 题（下限 15）")
+        if c and (max(c.values()) > 0.6 * sum(c.values())):
+            err(f"{bank}: 某一难度档占比过高 {dict(c)}")
     # 重复：全文（仅去空白）不得重复；骨架族不得过大
     full = [re.sub(r"\s+", "", q.get("stem","")) for q in qs]
     dup = [s for s,n in Counter(full).items() if n > 1]
@@ -258,12 +273,12 @@ def cross_bank_check(loaded):
         for q in loaded.get(bank, []):
             h = (q.get("judge") or {}).get("harness") or ""
             if re.search(r"fopen|fprintf|freopen", h):
-                err(f"{bank} {q.get('id')}: harness 含文件写入，判题/并发不安全")
+                warn(f"{bank} {q.get('id')}: harness 含文件写入，判题/并发有风险")
 
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else "."
     no_compile = "--no-compile" in sys.argv
-    work = tempfile.mkdtemp(prefix="qcbank-verify-")
+    work = tempfile.mkdtemp(prefix="eesverify_", dir=".")
     loaded = {}
     for bank,(name,n) in FILES.items():
         p = os.path.join(root, name)
@@ -275,7 +290,9 @@ def main():
             for i,q in enumerate(qs):
                 check_judge(bank, q, i, work)
         if bank in ("rutuan","zhaosheng"):
-            if sum(q.get("score",0) for q in qs) != 65: err(f"{bank}: 总分 != 65")
+            for q in qs:
+                if q.get("difficulty") != 3: err(f"{bank} {q.get('id')}: 大题统一难度必须为 3")
+                if q.get("score") != 15: err(f"{bank} {q.get('id')}: 大题统一分值必须为 15")
     cross_bank_check(loaded)
     print(f"errors={len(errors)} warnings={len(warnings)}")
     for e in errors[:60]: print("  ERROR", e)

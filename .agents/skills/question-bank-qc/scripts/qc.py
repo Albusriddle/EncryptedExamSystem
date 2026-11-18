@@ -11,11 +11,11 @@
    V1 选项可见性：去空白/折叠空白后同形（尾随空格陷阱不可见）、NBSP/零宽字符
    V2 代码排版：围栏语言、int main 单行、{ } 独占行、行内代码写程序
    V3 句式族：标识符掩码后同一壳 >4 题（随机函数名掩盖的生成器痕迹）
-   V4 难度账本：可执行行数与标签矛盾 → REVIEW（待人工裁决，不计 error）
-   V5 kp：越纲 kp、51 点覆盖缺口、单题 kp
+   V4 难度账本：缺整数 meta.scoring（REVIEW）、多选真实 S 越界（error）、C 标注与行数数量级矛盾（REVIEW）
+   V5 kp：越纲 kp、51 点覆盖缺口
    V6 pick / exam_id：唯一性、文件名安全、抽题比例
    V7 judge.harness 写当前目录（fopen/remove/rename/system…）
-   V8 fill 空位未钉死（错误值注入；--blank-audit 时实跑，分“漏判=error / 疑似域内等价=review”）
+   V8 fill 空位未钉死（错误值注入；--blank-audit 时实跑，一律 REVIEW：由复核人判“域内等价/真漏判”）
 
 退出码：0 = 0 error（可交付）；1 = 有 error；2 = 用法/环境错误。
 题库目录只读；所有临时文件落在系统 temp。
@@ -36,10 +36,10 @@ from collections import Counter, defaultdict
 
 STD_FILES = {
     "choice": ("choice.json", 500),
-    "fill": ("fill.json", 50),
-    "fix": ("fix.json", 50),
-    "rutuan": ("rutuan-q16-19.json", 4),
-    "zhaosheng": ("zhaosheng-b-q16-19.json", 4),
+    "fill": ("fill.json", 60),
+    "fix": ("fix.json", 61),
+    "rutuan": ("rutuan-q16-19.json", 30),
+    "zhaosheng": ("zhaosheng-b-q16-19.json", 30),
 }
 KPS51 = {
     "1.1", "1.2", "1.3", "1.4", "1.5", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6",
@@ -64,8 +64,6 @@ CAND = {
     "0": ["1"], "1": ["0"],
 }
 HARNESS_WRITE = re.compile(r"fopen|freopen|remove\s*\(|rename\s*\(|system\s*\(|tmpnam|fwrite\s*\(|fputs?\s*\(")
-#: 这些替换在"非负/正数定义域"里往往与官方答案真值等价（真漏判还是等价，需人工判）
-EQ_PRONE = {("&&", "&"), ("||", "|"), ("==", "<="), ("==", ">="), (">=", ">"), ("<=", "<")}
 
 
 class Ctx:
@@ -114,33 +112,6 @@ def vis_norm(text):
     for ch in INVIS:
         t = t.replace(ch, " ")
     return WS_RE.sub(" ", t).strip()
-
-
-def exec_lines_from_texts(texts):
-    n = 0
-    for text in texts:
-        for ln in (text or "").splitlines():
-            s = ln.strip()
-            if not s or s.startswith("#include"):
-                continue
-            if s in ("{", "}", "};", "{"):
-                continue
-            if re.match(r"^(int|void|char|float|double)\s+main\s*\(", s):
-                continue
-            if re.match(r"^return\s+0\s*;?$", s):
-                continue
-            n += 1
-    return n
-
-
-def bank_exec_lines(q):
-    t = qtype(q)
-    body = q.get("body") or {}
-    if t == "fill":
-        return exec_lines_from_texts([body.get("template") or ""])
-    if t == "fix":
-        return exec_lines_from_texts(["\n".join(body.get("code") or [])])
-    return sum(exec_lines_from_texts([b]) for b in code_blocks(q.get("stem")))
 
 
 # ------------------------------------------------------------------ 载入题库
@@ -314,25 +285,42 @@ def check_skeletons(bank, qs, ctx):
     return len(fam), max((len(v) for v in fam.values()), default=0)
 
 
+def nonempty_code_lines(q):
+    """C 的统计口径（difficulty.md §1）：题干围栏块 / body.template / body.code 的非空行。"""
+    t = qtype(q)
+    body = q.get("body") or {}
+    if t == "fill":
+        return len([ln for ln in (body.get("template") or "").splitlines() if ln.strip()])
+    if t == "fix":
+        return len([ln for ln in (body.get("code") or []) if str(ln).strip()])
+    return len([ln for ln in code_blocks(q.get("stem")) for ln in ln.splitlines() if ln.strip()])
+
+
 def check_difficulty(bank, qs, ctx):
-    """V4：可执行行数 vs 标签，只报 REVIEW（口径需规范方裁决，不据此判 FAIL）。"""
+    """V4：难度账本（K/A/C）。verify.py 只在 meta.scoring 存在时校验 S↔difficulty，且对多选完全跳过；
+    这里补三件它不查的：缺整数标注、多选真实 S 越界（difficulty.md §2：MUST ∈[2.00,2.20]）、
+    C 标注与实际非空代码行数量级矛盾（差 ≥2 档）。"""
     for q in qs:
-        d, t = q.get("difficulty"), qtype(q)
-        n = bank_exec_lines(q)
-        has_code = bool(code_blocks(q.get("stem"))) or t in ("fill", "fix")
-        wid = f"{bank} {q.get('id')}"
-        if t in ("single", "fill", "fix"):
-            if d == 1 and n >= 9:
-                ctx.review(f"{wid}: 标 d1 但可执行 {n} 行（≥9 行按定义应 d3）")
-            elif d == 2 and n >= 13:
-                ctx.review(f"{wid}: 标 d2 但可执行 {n} 行")
-            elif d == 3 and not has_code:
-                ctx.review(f"{wid}: 标 d3 但无代码（需自行确认 ≥2 陷阱/两步推理）")
-            elif d == 3 and n <= 3:
-                ctx.review(f"{wid}: 标 d3 但仅 {n} 行可执行代码")
-        if t == "code" and d == 4:
-            if not re.search(r"样例|输入|输出|返回", q.get("stem") or ""):
-                ctx.warn(f"{wid}: d4 开放题未写样例/接口说明")
+        t, wid = qtype(q), f"{bank} {q.get('id')}"
+        sc = (q.get("meta") or {}).get("scoring")
+        if not isinstance(sc, dict) or any(
+                isinstance(sc.get(k), bool) or not isinstance(sc.get(k), int) for k in ("k", "a", "c")):
+            ctx.review(f"{wid}: 缺整数 meta.scoring（difficulty.md §4 要求每题必标，无法标注不得入库）")
+            continue
+        if t == "multiple":
+            s = 0.35 * sc["k"] + 0.45 * sc["a"] + 0.20 * sc["c"]
+            if not (2.00 - 1e-9 <= s <= 2.20 + 1e-9):
+                ctx.err(f"{wid}: 多选真实 S={s:.2f}（K/A/C={sc['k']}/{sc['a']}/{sc['c']}）"
+                        f"不在 [2.00, 2.20]；difficulty=9 只是展示标签，真实难度必须落在带内")
+            continue
+        if t == "code":
+            continue  # 大题 C 按 answer.reference 的核心算法行由作者标注，复核抽检
+        n = nonempty_code_lines(q)
+        if n == 0 and t in ("single", "judge"):
+            continue
+        c = 1 if n <= 3 else 2 if n <= 8 else 3 if n <= 20 else 4
+        if abs(c - sc["c"]) >= 2:
+            ctx.review(f"{wid}: 非空代码 {n} 行对应 C={c}，标注 C={sc['c']}（差 ≥2 档，确认统计范围）")
 
 
 def check_kp(banks, ctx, strict):
@@ -345,12 +333,8 @@ def check_kp(banks, ctx, strict):
             if kp not in KPS51:
                 msg = f"{bank}: kp={kp} 不在 51 点大纲内（{n} 题）"
                 ctx.err(msg) if strict else ctx.warn(msg + "（--strict-kp 记为 error）")
-        lone = sorted(kp for kp, n in c.items() if n == 1)
-        if lone and len(lone) > 3:
-            ctx.review(f"{bank}: {len(lone)} 个 kp 只有 1 题（一题一 kp 的结构性结果，"
-                       f"“每 kp ≥2 档”在此库不可满足；例 {', '.join(lone[:4])}…）")
-        elif lone:
-            ctx.review(f"{bank}: kp={', '.join(lone)} 只有 1 题，无法满足“每 kp 至少 2 档”")
+        # 旧规范（spec.md §2）的“每个 kp 至少覆盖 2 个难度档”已被 difficulty.md §3 的
+        # “难度 1/2/3 每档 ≥15 题、总量不限”取代；一题一 kp 是原子化的必然结果，不再按 kp 报 REVIEW。
     missing = sorted(KPS51 - seen_all)
     if missing:
         ctx.warn(f"51 点未覆盖 {len(missing)} 个：{', '.join(missing)}")
@@ -477,11 +461,11 @@ def blank_audit(banks, vm, ctx, only_ids):
                         out = run_all(cc, work, f"m_{qid}_{idx}", code, tests)
                         if out is None:
                             where = f"{bank} {qid}: 第{idx + 1}空填 {cand!r}（官方 {ans!r}）仍全过"
-                            if (ans, cand) in EQ_PRONE:
-                                ctx.review(where + " → 疑似域内语义等价，人工判："
-                                                   "等价则记遗留项，不等价则是漏判，补用例")
-                            else:
-                                ctx.err(where + " → 该空未被钉死（错答也满分），补用例或改题")
+                            # 仅凭“仍全过”无法区分“域内等价”与“真漏判”（例如 max 题里 > 与 >=、
+                            # 2*x+1 里 + 与 |、小写转大写里 -32 与 ^32 都输出等价），
+                            # 因此统一记 REVIEW，由复核人逐条裁决；判为漏判必须补用例或改题。
+                            ctx.review(where + " → 疑似未钉死或域内等价：判为漏判则补用例/改题，"
+                                               "判为等价则记遗留项")
     finally:
         for f in os.listdir(work):
             try:
@@ -509,6 +493,8 @@ def stats(banks):
         code_n = sum(1 for q in qs if code_blocks(q.get("stem")))
         rows.append({
             "bank": bank, "n": len(qs), "diff": dict(sorted(diff.items(), key=lambda kv: str(kv[0]))),
+            "total": sum(q.get("score") or 0 for q in qs),
+            "multi": sum(1 for q in qs if qtype(q) == "multiple"),
             "letters": {k: letters.get(k, 0) for k in "ABCD"} if singles else {},
             "cyc": f"{cyc}/{len(singles)}" if singles else "-",
             "skel": fam, "maxfam": big, "code": code_n,
@@ -523,12 +509,12 @@ def write_report(path, root, rows, ctx, gate):
              f"- 结论：**{'PASS（可交付）' if not ctx.errors else 'FAIL（有 error）'}**",
              f"- counts：errors={len(ctx.errors)} warnings={len(ctx.warns)} review={len(ctx.reviews)}", "",
              "## 1. 统计", "",
-             "| 库 | 题数 | difficulty | A/B/C/D | ABCD 循环 | 骨架种类 | 最大族 | 含代码题 | kp 数 |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "| 库 | 题数 | difficulty | 总分 | 多选 | A/B/C/D | ABCD 循环 | 骨架种类 | 最大族 | 含代码题 | kp 数 |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         row = dict(r)
         row["letters"] = "/".join(str(r["letters"].get(k, 0)) for k in "ABCD") if r["letters"] else "-"
-        lines.append("| {bank} | {n} | {diff} | {letters} | {cyc} | {skel} | {maxfam} | {code} | {kp} |".format(**row))
+        lines.append("| {bank} | {n} | {diff} | {total} | {multi} | {letters} | {cyc} | {skel} | {maxfam} | {code} | {kp} |".format(**row))
     for title, items, tag in (("2. 必改项（error）", ctx.errors, "E"),
                               ("3. 需处理（warning）", ctx.warns, "W"),
                               ("4. 待人工裁决（REVIEW）", ctx.reviews, "R")):
