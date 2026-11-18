@@ -232,8 +232,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # 与 admin/uv.lock 的 ruff 版本保持一致，避免"本地绿、CI 红"。
       - name: 安装 ruff
-        run: pip install ruff
+        run: pip install ruff==0.17.1
       # 题库相关的两套脚本都是仓库资产：.agents/skills（流程）与 tools/bank_qc（口径执行）。
       - name: lint tools/bank_qc
         run: ruff check tools/bank_qc
