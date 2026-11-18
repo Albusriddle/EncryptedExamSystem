@@ -202,7 +202,8 @@ admin/app/ui/        PySide6 界面：题库、学生、场次、打包、收卷
 admin/buildtools/    PyInstaller 打包脚本
 banks/demo/          假题库（供 CI 与演示，不含真题）
 examples/            可直接导入的示例（含图片题）
-docs/                本文档集
+docs/                本文档集（含题库规范、出题质检与难度口径）
+tools/bank_qc/       题库门禁与难度评分（verify_bank / score_bank）
 schemas/             题库 / manifest 的 JSON Schema（由 pydantic 生成，有漂移检查）
 scripts/             verify-embed / preflight-release / make-release-zip / release_body /
                      run-admin-tests / smoke-answers
@@ -255,7 +256,8 @@ zip 旁边附带 `SHA256SUMS.txt`；`ExamAdmin/` 内另有 `图片使用教程.m
 | 文档 | 读者 | 内容 |
 |---|---|---|
 | [教师使用手册](docs/教师使用手册.md) | 出题 / 考务老师 | 六步流程、按钮名、报错对照、安全须知 |
-| [题库JSON规范](docs/题库JSON规范.md) | 出题老师 / 系统对接 | 两种格式、`body` 四形态、校验规则、错误提示 |
+| [题库JSON规范](docs/题库JSON规范.md) | 出题老师 / 系统对接 | 原生与 v2 两种格式、字段、难度/语言/判题材料、导入与打包行为 |
+| [出题质检与难度口径](docs/出题质检与难度口径.md) | 出题 / 质检 | K/A/C 加权、阈值、题量分布、原子化、判题回放与工具用法 |
 | [图片使用教程](docs/图片使用教程.md) | 出题老师 | 在题干里插图、尺寸限额、自检清单 |
 | [安全边界与威胁模型](docs/安全边界与威胁模型.md) | 维护者 / 决策者 | 资产、对手分级、承诺与不承诺 |
 | [风险接受记录](docs/风险接受记录.md) | 决策者 | R-01~R-04 的事实、理由、补偿、复审条件 |
@@ -263,7 +265,8 @@ zip 旁边附带 `SHA256SUMS.txt`；`ExamAdmin/` 内另有 `图片使用教程.m
 | [架构与实施方案](docs/保密考试系统_架构与实施方案.md) | 维护者 / 接手人 | 设计取舍、里程碑、踩过的坑 |
 | [代码审阅报告](docs/代码审阅报告.md) | 维护者 | 97 轮审阅的问题索引、技术无解项、复跑方式 |
 | [发布说明](docs/release-notes.md) | 教师 / 下载者 | 逐版本变更、已知限制、校验口径 |
-| [题库质检 skill](.agents/skills/question-bank-qc/SKILL.md) | 出题 / 质检 | 题库结构、判题回放、抽样与门禁复核流程 |
+| [题库质检 skill](.agents/skills/question-bank-qc/SKILL.md) | 出题 / 质检 | 双盲生产、门禁复核、修复复审流程 |
+| [bank_qc 工具](tools/bank_qc/README.md) | 出题 / 质检 | `verify_bank.py` / `score_bank.py` 的命令行用法与能力边界 |
 
 ---
 
