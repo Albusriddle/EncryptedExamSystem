@@ -1653,6 +1653,15 @@ fn render_body(ui: &mut egui::Ui, item: &common::picker::PaperItem) {
     }
 }
 
+/// 小题之间的分隔：上下留白 + 一条跟随主题的细线。
+///
+/// 只画在两道题之间（本大题第一题之前不画），避免和【大题】标题叠在一起。
+fn question_divider(ui: &mut egui::Ui) {
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(12.0);
+}
+
 /// 渲染试卷。返回滚动区域的当前偏移，便于诊断验证"跳转是否真的滚动了"。
 #[allow(clippy::too_many_arguments)]
 fn render_paper(
@@ -1752,8 +1761,17 @@ fn render_paper(
         ui.separator();
 
         let mut seq = 0usize;
+        let mut first_section = true;
         for sec in &unlocked.paper.sections {
-            ui.add_space(10.0);
+            if first_section {
+                first_section = false;
+                ui.add_space(10.0);
+            } else {
+                // 大题之间也拉开：先留白、画线，再写标题。
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+            }
             ui.label(
                 egui::RichText::new(format!(
                     "【{}】共 {} 题，{} 分",
@@ -1765,7 +1783,10 @@ fn render_paper(
                 .strong(),
             );
             ui.add_space(6.0);
-            for item in &sec.items {
+            for (i, item) in sec.items.iter().enumerate() {
+                if i > 0 {
+                    question_divider(ui);
+                }
                 seq += 1;
                 let this_index = qidx;
                 qidx += 1;
@@ -1790,7 +1811,7 @@ fn render_paper(
                     })
                     .response;
                 nav.record(seq, resp.rect);
-                ui.add_space(8.0);
+                ui.add_space(6.0);
             }
         }
         // 底部留白：让**最后一题也能真正置顶**。
@@ -2327,6 +2348,38 @@ mod tests {
         );
         run_code_editor_frame(&ctx, &mut text, vec![egui::Event::Text("XY".into())], false);
         assert_eq!(text, "XY", "Ctrl+A 后输入应替换选中文本");
+    }
+
+    #[test]
+    fn question_divider_draws_line_and_adds_space() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(600.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        let mut before = 0.0_f32;
+        let mut after = 0.0_f32;
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                before = ui.cursor().top();
+                question_divider(ui);
+                after = ui.cursor().top();
+            });
+        });
+        let lines = output
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::LineSegment { .. }))
+            .count();
+        assert!(lines >= 1, "小题分隔必须画出一条线");
+        assert!(
+            after - before >= 20.0,
+            "分隔线上下要留出间距，实测 {}",
+            after - before
+        );
     }
 
     #[test]

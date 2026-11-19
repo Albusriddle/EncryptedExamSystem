@@ -877,6 +877,10 @@ def check_meta_scoring(q: dict, where: str, report: Report, bank: Bank, qtype: s
         return
     s100 = 35 * k + 45 * a + 20 * c  # S×100，整数比较
     declared = q.get("difficulty")
+    if qtype == "code":
+        # 大题统一难度 3 / 15 分（2026-11-18 起）；meta.scoring 只是逐题诊断值，
+        # 不用 S 反推档位（否则“统一 3”与“诚实 S”会互相矛盾）。
+        return
     if qtype == "multiple":
         low, high = MULTI_S_RANGE
         if not (low <= s100 <= high):
