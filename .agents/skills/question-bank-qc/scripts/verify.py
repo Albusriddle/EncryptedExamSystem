@@ -72,9 +72,14 @@ def check_question(q, bank, idx):
             err(f"{where}: meta.scoring 的 k/a/c 必须是整数")
         elif not (1 <= sc["k"] <= 3 and 1 <= sc["a"] <= 4 and 1 <= sc["c"] <= 4):
             err(f"{where}: meta.scoring 取值越界 {sc}")
-        elif t != "multiple":
+        elif t == "code":
+            # 大题统一难度 3/15；meta.scoring 是逐题诊断值，不用 S 反推档位
+            pass
+        elif t == "multiple":
+            pass
+        else:
             s_score = 0.35*sc["k"] + 0.45*sc["a"] + 0.20*sc["c"]
-            want = (1 if s_score < 1.75 else 2 if s_score < 2.60 else 3 if s_score < 3.30 else 4) if t == "code" else (1 if s_score < 1.90 else 2 if s_score < 2.55 else 3)
+            want = 1 if s_score < 1.90 else 2 if s_score < 2.55 else 3
             if want != d: err(f"{where}: S={s_score:.2f} 应为难度 {want}，实际 {d}")
     if t == "multiple" and d != 9:
         err(f"{where}: 多选 difficulty 必须为 9")

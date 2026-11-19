@@ -89,7 +89,7 @@ def main():
             if q.get("type") == "multiple":
                 nd = 9
             elif q.get("type") == "code":
-                nd = diff_of(s, True)
+                nd = 3  # 大题统一难度 3/15；S 仅诊断
             else:
                 nd = diff_of(s, False)
             dist[nd] += 1

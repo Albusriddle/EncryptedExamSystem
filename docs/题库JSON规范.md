@@ -609,7 +609,7 @@ Windows 保留名（`CON` / `NUL` / `COM1-9` / `LPT1-9` 等）。
 | `kp` 是否存在且形如 `N.M`（1.1–12.9） | ERROR | 产品层允许省略 `kp`；项目要求每题都有 |
 | `score` 是否显式写、在 0–1000 | WARN / ERROR | 产品层允许省略（默认 2 分） |
 | `difficulty` 是否在本项目口径内（1–3、多选 9、大题 3） | ERROR | 格式层只要求 `0–255`，缺省 = 未标注 |
-| `meta.scoring` 形状与 `S` 是否对得上 `difficulty` | ERROR / WARN | 缺失只 WARN（产品不读 `meta`） |
+| `meta.scoring` 形状与 `S` 是否对得上 `difficulty` | ERROR / WARN | 小库校验；大题只查整数/范围（统一 3/15，S 仅诊断）；缺失只 WARN |
 | 大题 `score=15`、`rubric` 合计、`reference`/`samples` | ERROR / WARN | 样例 <2 组只 WARN |
 | `judge` 是否存在、`tests ≥ 3`、官方回放/原始必败/逐处可测 | ERROR | 需要本地 C 编译器 |
 | 重复：逐字题干、骨架族 ≤4、骨架种类下限、跨库同题干 | ERROR | 文本归一，查不出语义重复 |
