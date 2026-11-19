@@ -1,6 +1,6 @@
 # 题库 JSON 规范
 
-> 适用版本：**v1.3.7**。格式或校验规则变化必须同步更新 `schemas/` 与 `tools/bank_qc`。
+> 适用版本：**v1.3.8**。格式或校验规则变化必须同步更新 `schemas/` 与 `tools/bank_qc`。
 
 本文是**题库文件的唯一格式说明**。手写题库、用脚本生成题库、或让其它系统导出题库时照抄即可。
 `schemas/exam-bank.schema.json` 是本规范的机器可读版本（由 pydantic 模型生成，

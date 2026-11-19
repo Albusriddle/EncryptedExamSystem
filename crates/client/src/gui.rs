@@ -1653,13 +1653,34 @@ fn render_body(ui: &mut egui::Ui, item: &common::picker::PaperItem) {
     }
 }
 
+/// 小题分隔线的颜色：比 egui 默认的 `bg_stroke` 略深，避免长题干下看不见。
+///
+/// 默认分隔线暗色是 `gray(60)`、亮色是 `gray(190)`；这里各加深一档，
+/// 仍然跟随主题（不用硬编码同一个灰值）。
+fn divider_color(visuals: &egui::Visuals) -> egui::Color32 {
+    if visuals.dark_mode {
+        egui::Color32::from_gray(85)
+    } else {
+        egui::Color32::from_gray(170)
+    }
+}
+
 /// 小题之间的分隔：上下留白 + 一条跟随主题的细线。
 ///
 /// 只画在两道题之间（本大题第一题之前不画），避免和【大题】标题叠在一起。
+fn draw_divider_line(ui: &mut egui::Ui) {
+    let rect = ui.available_rect_before_wrap();
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top(),
+        egui::Stroke::new(1.0_f32, divider_color(ui.visuals())),
+    );
+}
+
 fn question_divider(ui: &mut egui::Ui) {
     ui.add_space(12.0);
-    ui.separator();
-    ui.add_space(12.0);
+    draw_divider_line(ui);
+    ui.add_space(13.0);
 }
 
 /// 渲染试卷。返回滚动区域的当前偏移，便于诊断验证"跳转是否真的滚动了"。
@@ -1767,9 +1788,9 @@ fn render_paper(
                 first_section = false;
                 ui.add_space(10.0);
             } else {
-                // 大题之间也拉开：先留白、画线，再写标题。
+                // 大题之间也拉开：先留白、画线，再写标题（与小题线同色）。
                 ui.add_space(10.0);
-                ui.separator();
+                draw_divider_line(ui);
                 ui.add_space(10.0);
             }
             ui.label(
@@ -2348,6 +2369,126 @@ mod tests {
         );
         run_code_editor_frame(&ctx, &mut text, vec![egui::Event::Text("XY".into())], false);
         assert_eq!(text, "XY", "Ctrl+A 后输入应替换选中文本");
+    }
+
+    fn divider_test_item(id: &str) -> common::picker::PaperItem {
+        common::picker::PaperItem {
+            id: id.to_string(),
+            qtype: "essay".to_string(),
+            stem: format!("题目 {id}"),
+            options: Vec::new(),
+            body: common::model::QuestionBody::Text,
+            code_languages: Vec::new(),
+            score: 2,
+        }
+    }
+
+    fn divider_test_paper(sections: usize, items_per_section: usize) -> common::picker::Paper {
+        let mut paper = common::picker::Paper {
+            student_id: 1,
+            session_id: 1,
+            sections: Vec::new(),
+        };
+        for s in 0..sections {
+            let items = (0..items_per_section)
+                .map(|i| divider_test_item(&format!("s{s}i{i}")))
+                .collect();
+            paper.sections.push(common::picker::PaperSection {
+                exam_id: format!("sec{s}"),
+                title: format!("第{}大题", s + 1),
+                items,
+                parts: Vec::new(),
+            });
+        }
+        paper
+    }
+
+    /// 数一帧里画了多少条直线；用来断言"题间到底加了几条分隔线"。
+    fn divider_line_count(sections: usize, items_per_section: usize) -> usize {
+        let paper = divider_test_paper(sections, items_per_section);
+        let mut sheet = common::answer_sheet::AnswerSheet::from_paper(&paper, 1, 1, 0);
+        let unlocked = workflow::Unlocked {
+            student_id: 1,
+            session_id: 1,
+            start: "2026-01-01T09:00:00+08:00".to_string(),
+            end: "2026-01-01T11:00:00+08:00".to_string(),
+            end_unix: 0,
+            net: None,
+            paper,
+            key_source: workflow::KeySource::Package,
+            k_manifest: [0u8; 32],
+            student_review: common::model::StudentReviewPolicy::None,
+        };
+        let mut nav = crate::nav::NavState::default();
+        let mut confirm = false;
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = render_paper(
+                    ui,
+                    &unlocked,
+                    &mut nav,
+                    None,
+                    &mut sheet,
+                    true,
+                    &mut confirm,
+                    0,
+                );
+            });
+        });
+        // 只数"分隔线颜色"的线段：页面上还有其他分隔线（状态栏、交卷按钮区），
+        // 直接数 LineSegment 会被它们干扰。
+        let divider = divider_color(&egui::Visuals::dark());
+        output
+            .shapes
+            .iter()
+            .filter(|s| match &s.shape {
+                egui::Shape::LineSegment { stroke, .. } => {
+                    matches!(&stroke.color, egui::epaint::ColorMode::Solid(c) if *c == divider)
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    #[test]
+    fn question_divider_only_between_items_and_sections() {
+        let base = divider_line_count(1, 1);
+        assert_eq!(
+            divider_line_count(1, 2),
+            base + 1,
+            "同一大题的两道题之间应正好多一条线"
+        );
+        assert_eq!(
+            divider_line_count(2, 1),
+            base + 1,
+            "两个大题之间应正好多一条线"
+        );
+        assert_eq!(
+            divider_line_count(2, 2),
+            base + 3,
+            "两个大题各两题：大题间 1 条 + 每大题内部 1 条，共 3 条"
+        );
+    }
+
+    #[test]
+    fn divider_color_has_visible_contrast() {
+        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+            let line = divider_color(&visuals);
+            let bg = visuals.panel_fill;
+            let delta = (line.r() as i32 - bg.r() as i32).abs();
+            assert!(
+                delta >= 45,
+                "分隔线与背景对比度不足：line={line:?} bg={bg:?} delta={delta}"
+            );
+        }
     }
 
     #[test]
