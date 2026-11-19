@@ -207,12 +207,16 @@ done
 
 head_ "8. 管理端测试"
 if command -v uv >/dev/null 2>&1 && [ -d "$ROOT/admin" ]; then
-  if (cd "$ROOT" && bash scripts/run-admin-tests.sh >/tmp/ees-preflight-pytest.log 2>&1); then
+  # 不用 /tmp：Windows 的 MSYS 环境可能没有 /tmp（实测会直接 no such file），
+  # 写到仓库 target/ 下更稳，也不会污染系统临时目录。
+  mkdir -p "$ROOT/target"
+  PYTEST_LOG="$ROOT/target/preflight-pytest.log"
+  if (cd "$ROOT" && bash scripts/run-admin-tests.sh >"$PYTEST_LOG" 2>&1); then
     ok "pytest 全部通过"
   else
-    bad "pytest 失败：$(tail -3 /tmp/ees-preflight-pytest.log | tr '\n' ' ')"
+    bad "pytest 失败：$(tail -3 "$PYTEST_LOG" | tr '\n' ' ')"
   fi
-  rm -f /tmp/ees-preflight-pytest.log
+  rm -f "$PYTEST_LOG"
 else
   echo "  （跳过：没有 uv/admin）"
 fi

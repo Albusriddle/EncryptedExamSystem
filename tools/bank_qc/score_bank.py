@@ -306,9 +306,7 @@ def scoring_of(q: dict) -> tuple[int, int, int, str, str]:
     return k, a, c, "heuristic", note
 
 
-def target_difficulty(
-    qtype: str, v100: int, *, big_mode: str, big_uniform: int
-) -> tuple[int, str]:
+def target_difficulty(qtype: str, v100: int, *, big_mode: str, big_uniform: int) -> tuple[int, str]:
     """返回 (目标 difficulty, 说明)。``v100`` 是 S×100 的整数。"""
     if qtype == "multiple":
         low, high = MULTIPLE_S_RANGE

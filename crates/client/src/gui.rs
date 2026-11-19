@@ -1658,28 +1658,31 @@ fn render_body(ui: &mut egui::Ui, item: &common::picker::PaperItem) {
 /// 默认分隔线暗色是 `gray(60)`、亮色是 `gray(190)`；这里各加深一档，
 /// 仍然跟随主题（不用硬编码同一个灰值）。
 fn divider_color(visuals: &egui::Visuals) -> egui::Color32 {
+    // 以主题自带的分隔线颜色为基准：暗色提亮、亮色压暗，各约 15–40 灰阶。
+    // 这样以后换主题/高对比度时，线条会跟着变，而不是钉死两个灰值。
+    let base = visuals.widgets.noninteractive.bg_stroke.color;
     if visuals.dark_mode {
-        egui::Color32::from_gray(85)
+        base.gamma_multiply(1.4)
     } else {
-        egui::Color32::from_gray(170)
+        base.gamma_multiply(0.9)
     }
 }
 
 /// 小题之间的分隔：上下留白 + 一条跟随主题的细线。
 ///
 /// 只画在两道题之间（本大题第一题之前不画），避免和【大题】标题叠在一起。
-fn draw_divider_line(ui: &mut egui::Ui) {
+fn draw_divider_line(ui: &mut egui::Ui, width: f32) {
     let rect = ui.available_rect_before_wrap();
     ui.painter().hline(
         rect.x_range(),
         rect.top(),
-        egui::Stroke::new(1.0_f32, divider_color(ui.visuals())),
+        egui::Stroke::new(width, divider_color(ui.visuals())),
     );
 }
 
 fn question_divider(ui: &mut egui::Ui) {
     ui.add_space(12.0);
-    draw_divider_line(ui);
+    draw_divider_line(ui, 1.0);
     ui.add_space(13.0);
 }
 
@@ -1790,7 +1793,8 @@ fn render_paper(
             } else {
                 // 大题之间也拉开：先留白、画线，再写标题（与小题线同色）。
                 ui.add_space(10.0);
-                draw_divider_line(ui);
+                // 大题线比小题线粗一档，长卷里两级层次一眼能分开。
+                draw_divider_line(ui, 2.0);
                 ui.add_space(10.0);
             }
             ui.label(
@@ -2403,8 +2407,8 @@ mod tests {
         paper
     }
 
-    /// 数一帧里画了多少条直线；用来断言"题间到底加了几条分隔线"。
-    fn divider_line_count(sections: usize, items_per_section: usize) -> usize {
+    /// 渲染一份测试卷，收集所有"分隔线颜色"的线段（不含状态栏等其他线）。
+    fn divider_strokes(sections: usize, items_per_section: usize) -> Vec<f32> {
         let paper = divider_test_paper(sections, items_per_section);
         let mut sheet = common::answer_sheet::AnswerSheet::from_paper(&paper, 1, 1, 0);
         let unlocked = workflow::Unlocked {
@@ -2422,10 +2426,12 @@ mod tests {
         let mut nav = crate::nav::NavState::default();
         let mut confirm = false;
         let ctx = egui::Context::default();
+        // 视口要足够大：内容被滚动区裁剪后，线段会从 shapes 里消失，
+        // 数量断言会随字体/DPI 变化而误报。
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
+                egui::vec2(1600.0, 1200.0),
             )),
             ..Default::default()
         };
@@ -2443,19 +2449,22 @@ mod tests {
                 );
             });
         });
-        // 只数"分隔线颜色"的线段：页面上还有其他分隔线（状态栏、交卷按钮区），
-        // 直接数 LineSegment 会被它们干扰。
         let divider = divider_color(&egui::Visuals::dark());
         output
             .shapes
             .iter()
-            .filter(|s| match &s.shape {
-                egui::Shape::LineSegment { stroke, .. } => {
-                    matches!(&stroke.color, egui::epaint::ColorMode::Solid(c) if *c == divider)
-                }
-                _ => false,
+            .filter_map(|s| match &s.shape {
+                egui::Shape::LineSegment { stroke, .. } => match &stroke.color {
+                    egui::epaint::ColorMode::Solid(c) if *c == divider => Some(stroke.width),
+                    _ => None,
+                },
+                _ => None,
             })
-            .count()
+            .collect()
+    }
+
+    fn divider_line_count(sections: usize, items_per_section: usize) -> usize {
+        divider_strokes(sections, items_per_section).len()
     }
 
     #[test]
@@ -2475,6 +2484,25 @@ mod tests {
             divider_line_count(2, 2),
             base + 3,
             "两个大题各两题：大题间 1 条 + 每大题内部 1 条，共 3 条"
+        );
+    }
+
+    #[test]
+    fn section_divider_is_thicker_than_question_divider() {
+        let section = divider_strokes(2, 1);
+        assert_eq!(section.len(), 1, "两个大题之间应只有一条分隔线");
+        assert!(
+            section[0] >= 1.5,
+            "大题分隔线要比小题粗，实测 {}",
+            section[0]
+        );
+
+        let question = divider_strokes(1, 2);
+        assert_eq!(question.len(), 1);
+        assert!(
+            question[0] <= 1.1,
+            "小题分隔线保持 1px，实测 {}",
+            question[0]
         );
     }
 

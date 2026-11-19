@@ -157,8 +157,23 @@ stage = Path(sys.argv[1]).resolve()
 bad = []
 for path in stage.rglob("*.md"):
     text = path.read_text(encoding="utf-8")
-    # 去掉围栏代码块与行内代码：示例里的 ![说明](地址) 不是真链接。
-    text = re.sub(r"```.*?```", "", text, flags=re.S)
+    # 用按行状态机剥掉围栏代码块：非贪婪正则在"围栏未闭合"时会一路剥到文末，
+    # 让后面的真链接静默跳过检查。围栏数量必须成对，否则直接失败。
+    lines = text.splitlines(keepends=True)
+    fences = sum(1 for line in lines if line.lstrip().startswith("```"))
+    if fences % 2:
+        print(f"  ✗ {path.relative_to(stage)} 的代码围栏没有成对（共 {fences} 个）")
+        sys.exit(1)
+    kept = []
+    in_code = False
+    for line in lines:
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+            continue
+        if not in_code:
+            kept.append(line)
+    text = "".join(kept)
+    # 行内代码同样不是链接。
     text = re.sub(r"`[^`]*`", "", text)
     for m in re.finditer(r"\[[^\]]*\]\(([^)#]+)(?:#[^)]*)?\)", text):
         target = m.group(1).strip()

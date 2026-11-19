@@ -382,9 +382,13 @@ class Compiler:
         if proc.returncode != 0:
             text = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()
             first = [line for line in text.splitlines() if line.strip()]
-            detail = first[0] if first else (
-                f"退出码 {proc.returncode}，且编译器没有任何输出"
-                "（这个编译器可能在本机根本跑不起来，先用 --clang 换一个试试）"
+            detail = (
+                first[0]
+                if first
+                else (
+                    f"退出码 {proc.returncode}，且编译器没有任何输出"
+                    "（这个编译器可能在本机根本跑不起来，先用 --clang 换一个试试）"
+                )
             )
             return None, f"编译失败：{detail[:200]}"
         return str(out), None
@@ -585,7 +589,7 @@ def convert_legacy_pair(q_payload: dict, a_payload: dict, qname: str, aname: str
             if legacy_multi != (verdict.get("kind") == "multi"):
                 raise QCError(
                     f"{where}: difficulty={difficulty}"
-                f"（{'多选' if legacy_multi else '单选'}）与 verdict.kind="
+                    f"（{'多选' if legacy_multi else '单选'}）与 verdict.kind="
                     f"{verdict.get('kind')!r} 矛盾"
                 )
         elif qtype == "fill_blank":
@@ -1912,9 +1916,7 @@ def bank_names(bank: Bank) -> set[str]:
     } - {""}
 
 
-def apply_expect(
-    banks: list[Bank], expect: dict[str, int], report: Report, limit: int = 0
-) -> None:
+def apply_expect(banks: list[Bank], expect: dict[str, int], report: Report, limit: int = 0) -> None:
     """按 ``--expect`` 核对题数。
 
     名字先精确匹配（主干 / 文件名 / ``exam_id``）；都不中时按"主干前缀"匹配，

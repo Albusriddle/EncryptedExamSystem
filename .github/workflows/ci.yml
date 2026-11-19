@@ -238,6 +238,11 @@ jobs:
       # 题库相关的两套脚本都是仓库资产：.agents/skills（流程）与 tools/bank_qc（口径执行）。
       - name: lint tools/bank_qc
         run: ruff check tools/bank_qc
+      - name: 格式检查 tools/bank_qc
+        run: ruff format --check tools/bank_qc
+      # skill 脚本不强制全量风格，但 pyflakes 级错误（未定义名/未用导入）必须为零。
+      - name: lint skill 脚本（F 规则）
+        run: ruff check --select F .agents/skills/question-bank-qc/scripts
       - name: 编译脚本
         run: |
           python -m compileall -q .agents/skills/question-bank-qc/scripts

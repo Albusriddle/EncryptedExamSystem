@@ -4,8 +4,8 @@
 用法： python verify.py <题库目录> [--no-compile]
 通过： 退出码 0，最后一行 PASS；否则 FAIL 并列出错误。
 """
-import json, io, os, re, sys, subprocess, hashlib, tempfile
-from collections import Counter, defaultdict
+import json, io, os, re, sys, subprocess, tempfile
+from collections import Counter
 
 CC = None
 for cand in (r"C:\msys64\mingw64\bin\clang.exe", r"C:\msys64\mingw64\bin\gcc.exe"):
