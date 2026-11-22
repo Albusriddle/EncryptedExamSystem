@@ -13,12 +13,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use common::{answer_sheet, container, picker, timegate};
+use common::{answer_sheet, container, crypto, picker, timegate};
 use rand::RngCore;
 use serde_json::{Value, json};
 
@@ -61,6 +61,7 @@ struct App {
     answers_dir: PathBuf,
     state_dir: PathBuf,
     forced_session: Option<u32>,
+    gate: Gate,
     state: Mutex<State>,
 }
 
@@ -89,6 +90,7 @@ struct Request {
     path: String,
     headers: HashMap<String, String>,
     body: Vec<u8>,
+    peer: IpAddr,
 }
 
 struct Response {
@@ -129,6 +131,35 @@ impl Response {
     fn with_cookie(mut self, cookie: String) -> Self {
         self.headers.push(("Set-Cookie".into(), cookie));
         self
+    }
+}
+
+/// 限制同时进行的 Argon2 登录数：每人 64 MiB，150 人并发会打爆内存。
+struct Gate {
+    slots: Mutex<usize>,
+    cv: Condvar,
+    max: usize,
+}
+
+impl Gate {
+    fn new(max: usize) -> Self {
+        Self {
+            slots: Mutex::new(0),
+            cv: Condvar::new(),
+            max,
+        }
+    }
+    fn acquire(&self) -> std::sync::MutexGuard<'_, usize> {
+        let mut n = self.slots.lock().unwrap();
+        while *n >= self.max {
+            n = self.cv.wait(n).unwrap();
+        }
+        *n += 1;
+        n
+    }
+    fn release(&self, mut guard: std::sync::MutexGuard<'_, usize>) {
+        *guard -= 1;
+        self.cv.notify_one();
     }
 }
 
@@ -186,7 +217,8 @@ fn main() -> Result<()> {
         k_manifest,
         answers_dir: cli.answers_dir.clone(),
         state_dir,
-        forced_session: cli.session.or(Some(session_id)),
+        forced_session: cli.session,
+        gate: Gate::new(4),
         state: Mutex::new(State::default()),
     });
 
@@ -198,6 +230,16 @@ fn main() -> Result<()> {
         cli.answers_dir.display()
     );
     println!("（阶段 0 原型：仅内存保存、无管理端界面；Ctrl+C 结束）");
+
+    {
+        let sweep = Arc::clone(&app);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(15));
+                sweep_tick(&sweep);
+            }
+        });
+    }
 
     for stream in listener.incoming() {
         match stream {
@@ -263,11 +305,8 @@ fn route(app: &App, req: &Request) -> Response {
 }
 
 fn login(app: &App, req: &Request) -> Response {
-    let ip = req
-        .headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    // 只信 TCP 对端地址：x-forwarded-for 可伪造，用来绕过 IP 限速。
+    let ip = req.peer;
     {
         let mut state = app.state.lock().unwrap();
         let now = now_unix();
@@ -303,7 +342,11 @@ fn login(app: &App, req: &Request) -> Response {
         entry.0 += 1;
     }
 
-    match app.unlock(student_id, pin.as_deref()) {
+    let slot = app.gate.acquire();
+    let unlocked = app.unlock(student_id, pin.as_deref());
+    app.gate.release(slot);
+
+    match unlocked {
         Ok((token, mut student)) => {
             // 断线重连：从磁盘恢复已保存答案与交卷状态。
             if let Some((answers, submitted, exported)) =
@@ -337,75 +380,73 @@ impl App {
     fn unlock(&self, student_id: u64, pin: Option<&str>) -> Result<(String, Student), String> {
         let (header, blob) = container::parse_header(&self.payload, &self.k_manifest)
             .map_err(|e| format!("包解析失败：{e}"))?;
-        let session_id = self
-            .forced_session
-            .ok_or_else(|| "未指定场次".to_string())?;
-        let session = header
-            .sessions
-            .iter()
-            .find(|s| s.session_id == session_id)
-            .ok_or_else(|| "场次不存在".to_string())?;
-
         let now = now_unix();
-        let start = timegate::parse_rfc3339(&session.start)
-            .ok_or_else(|| "场次开始时间非法".to_string())?;
-        let end =
-            timegate::parse_rfc3339(&session.end).ok_or_else(|| "场次结束时间非法".to_string())?;
-        if now < start {
-            return Err("考试尚未开始".into());
-        }
-        if now > end {
-            return Err("考试已结束".into());
-        }
-
-        let salt = hex::decode(&header.salt).map_err(|e| format!("salt 解码失败：{e}"))?;
-        let unlocked =
-            container::try_unlock_session_with_pin(session, &header, blob, student_id, &salt, pin)
-                .map_err(|e| format!("解锁失败：{e}"))?
-                .ok_or_else(|| "学号或 PIN 不正确".to_string())?;
-
-        let data = container::decrypt_data(&unlocked.session_secret, &salt, &unlocked.data_ct)
-            .map_err(|e| format!("解密题库失败：{e}"))?;
-        let paper = if unlocked.sections.is_empty() {
-            picker::generate_paper_ranged(
-                student_id,
-                unlocked.session_id,
-                &salt,
-                &data.banks,
-                |exam_id, fallback| (data.pick_for(exam_id, fallback), data.range_for(exam_id)),
-            )
-        } else if unlocked.sections.iter().any(|s| !s.parts.is_empty()) {
-            picker::generate_paper_parts(
-                student_id,
-                unlocked.session_id,
-                &salt,
-                &data.banks,
-                &unlocked.sections,
-            )
-        } else {
-            picker::generate_paper_sections(
-                student_id,
-                unlocked.session_id,
-                &salt,
-                &data.banks,
-                &unlocked.sections,
-            )
-        }
-        .map_err(|e| format!("抽题失败：{e}"))?;
-
-        let mut token_bytes = [0u8; 32];
-        rand::rng().fill_bytes(&mut token_bytes);
-        let token = hex::encode(token_bytes);
-        let student = Student {
-            student_id,
-            session_id: unlocked.session_id,
-            paper,
-            answers: BTreeMap::new(),
-            submitted: false,
-            exported: None,
-            last_seen: now,
+        let ids: Vec<u32> = match self.forced_session {
+            Some(id) => vec![id],
+            None => header.sessions.iter().map(|s| s.session_id).collect(),
         };
-        Ok((token, student))
+        let salt = hex::decode(&header.salt).map_err(|e| format!("salt 解码失败：{e}"))?;
+        for sid in ids {
+            let Some(session) = header.sessions.iter().find(|s| s.session_id == sid) else {
+                continue;
+            };
+            let (Some(start), Some(end)) = (
+                timegate::parse_rfc3339(&session.start),
+                timegate::parse_rfc3339(&session.end),
+            ) else {
+                continue;
+            };
+            if now < start || now > end {
+                continue;
+            }
+            let Ok(Some(unlocked)) = container::try_unlock_session_with_pin(
+                session, &header, blob, student_id, &salt, pin,
+            ) else {
+                continue;
+            };
+            let data = container::decrypt_data(&unlocked.session_secret, &salt, &unlocked.data_ct)
+                .map_err(|e| format!("解密题库失败：{e}"))?;
+            let paper = if unlocked.sections.is_empty() {
+                picker::generate_paper_ranged(
+                    student_id,
+                    unlocked.session_id,
+                    &salt,
+                    &data.banks,
+                    |exam_id, fallback| (data.pick_for(exam_id, fallback), data.range_for(exam_id)),
+                )
+            } else if unlocked.sections.iter().any(|s| !s.parts.is_empty()) {
+                picker::generate_paper_parts(
+                    student_id,
+                    unlocked.session_id,
+                    &salt,
+                    &data.banks,
+                    &unlocked.sections,
+                )
+            } else {
+                picker::generate_paper_sections(
+                    student_id,
+                    unlocked.session_id,
+                    &salt,
+                    &data.banks,
+                    &unlocked.sections,
+                )
+            }
+            .map_err(|e| format!("抽题失败：{e}"))?;
+            let mut token_bytes = [0u8; 32];
+            rand::rng().fill_bytes(&mut token_bytes);
+            let token = hex::encode(token_bytes);
+            let student = Student {
+                student_id,
+                session_id: unlocked.session_id,
+                paper,
+                answers: BTreeMap::new(),
+                submitted: false,
+                exported: None,
+                last_seen: now,
+            };
+            return Ok((token, student));
+        }
+        Err("学号或 PIN 不正确，或不在考试时间窗内".into())
     }
 }
 
@@ -530,8 +571,11 @@ fn submit(app: &App, req: &Request) -> Response {
 /// 冻结并写出答题卡，同时把状态落盘；幂等。
 fn finalize(app: &App, st: &mut Student) -> Result<String, String> {
     if let Some(name) = &st.exported {
-        st.submitted = true;
-        return Ok(name.clone());
+        if app.answers_dir.join(name).is_file() {
+            st.submitted = true;
+            return Ok(name.clone());
+        }
+        st.exported = None;
     }
     let now = now_unix();
     let mut sheet =
@@ -578,8 +622,9 @@ impl App {
         student_id: u64,
         session_id: u32,
     ) -> Option<(BTreeMap<String, String>, bool, Option<String>)> {
-        let text = std::fs::read_to_string(self.state_path(student_id, session_id)).ok()?;
-        let v: Value = serde_json::from_str(&text).ok()?;
+        let raw = std::fs::read(self.state_path(student_id, session_id)).ok()?;
+        let plain = crypto::decrypt(&self.k_manifest, &raw, b"web-state").ok()?;
+        let v: Value = serde_json::from_slice(&plain).ok()?;
         let answers = v
             .get("answers")?
             .as_object()?
@@ -604,7 +649,10 @@ impl App {
         });
         let path = self.state_path(st.student_id, st.session_id);
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, payload.to_string())?;
+        let plain = payload.to_string().into_bytes();
+        let sealed = crypto::encrypt(&self.k_manifest, &plain, b"web-state")
+            .map_err(|e| std::io::Error::other(format!("加密状态失败：{e}")))?;
+        std::fs::write(&tmp, sealed)?;
         std::fs::rename(&tmp, &path)?;
         let _ = std::fs::File::open(&path).and_then(|f| f.sync_all());
         Ok(())
@@ -642,6 +690,26 @@ fn time_info(app: &App, req: &Request) -> Response {
             "remaining": end.saturating_sub(now_unix()),
         }),
     )
+}
+
+fn sweep_tick(app: &App) {
+    let mut state = app.state.lock().unwrap();
+    let now = now_unix();
+    let mut expired = Vec::new();
+    for (token, st) in state.students.iter_mut() {
+        let (_, end) = session_window(app, st.session_id);
+        if end != 0 && now > end && !st.submitted {
+            let _ = finalize(app, st);
+        }
+        if now.saturating_sub(st.last_seen) > 7200 {
+            expired.push(token.clone());
+        }
+    }
+    for token in expired {
+        if let Some(st) = state.students.remove(&token) {
+            state.tokens_by_student.remove(&st.student_id);
+        }
+    }
 }
 
 fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
@@ -695,6 +763,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
         path,
         headers,
         body,
+        peer: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
     }))
 }
 
@@ -748,6 +817,7 @@ mod tests {
                 "a=1; ees_token=deadbeef; b=2".to_string(),
             )]),
             body: Vec::new(),
+            peer: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         };
         assert_eq!(cookie_token(&req).as_deref(), Some("deadbeef"));
     }

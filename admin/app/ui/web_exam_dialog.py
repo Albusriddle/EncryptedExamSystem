@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from app.core.webexam import DEFAULT_PORT, access_url, validate_inputs, web_command
+from app.core.webexam import DEFAULT_PORT, access_url, port_available, validate_inputs, web_command
 from app.ui.widgets import NoWheelSpinBox, fit_button_text
 
 
@@ -32,6 +32,8 @@ class WebExamDialog(QDialog):
         self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.proc.readyReadStandardOutput.connect(self._read_output)
         self.proc.finished.connect(self._on_finished)
+        self.proc.started.connect(self._on_started)
+        self.proc.errorOccurred.connect(self._on_error)
 
         form = QFormLayout()
         self.edit_package = QLineEdit(package)
@@ -97,6 +99,11 @@ class WebExamDialog(QDialog):
         if err:
             QMessageBox.warning(self, "无法启动", err)
             return
+        if not port_available(self.spin_port.value()):
+            QMessageBox.warning(
+                self, "端口被占用", f"端口 {self.spin_port.value()} 已被其他程序占用"
+            )
+            return
         server = self._server_path()
         if not server.is_file():
             QMessageBox.warning(self, "找不到服务端", f"缺少 exam-server：{server}")
@@ -115,13 +122,21 @@ class WebExamDialog(QDialog):
         )
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        self.lbl_url.setText(access_url(self.spin_port.value()))
+        self.lbl_url.setText("正在启动…")
 
     def stop_server(self) -> None:
         if self.proc.state() != QProcess.ProcessState.NotRunning:
             self.proc.terminate()
             if not self.proc.waitForFinished(5000):
                 self.proc.kill()
+
+    def _on_started(self) -> None:
+        self.lbl_url.setText(access_url(self.spin_port.value()))
+
+    def _on_error(self, _err) -> None:
+        self.lbl_url.setText("启动失败，见下方日志")
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
 
     def _on_finished(self) -> None:
         self.btn_start.setEnabled(True)

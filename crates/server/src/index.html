@@ -95,7 +95,16 @@ function render(data) {
       const q = document.createElement('div'); q.className = 'card q';
       const no = document.createElement('div'); no.className = 'qno'; no.textContent = `${n}. （${item.score} 分）`; q.appendChild(no);
       const stem = document.createElement('pre'); stem.className = 'stem'; stem.textContent = item.stem; q.appendChild(stem);
-      if (item.options && item.options.length) {
+      const body = item.body || {};
+      if (body.kind === 'options' && body.options && body.options.length) {
+        const ol = document.createElement('pre'); ol.className = 'stem';
+        ol.textContent = body.options.map(o => `${o.key}. ${o.text}`).join('\n');
+        q.appendChild(ol);
+      } else if (body.kind === 'template') {
+        const pre = document.createElement('pre'); pre.className = 'stem'; pre.textContent = body.template || ''; q.appendChild(pre);
+      } else if (body.kind === 'code' && body.code) {
+        const pre = document.createElement('pre'); pre.className = 'stem'; pre.textContent = body.code.join('\n'); q.appendChild(pre);
+      } else if (item.options && item.options.length) {
         const ol = document.createElement('pre'); ol.className = 'stem'; ol.textContent = item.options.map((o, i) => `${String.fromCharCode(65+i)}. ${o}`).join('\n'); q.appendChild(ol);
       }
       const ta = document.createElement('textarea');
@@ -132,17 +141,20 @@ function updateClock(data) {
   if (!data) data = { server_time: Date.now()/1000|0, end_unix: 0 };
   const end = data.end_unix || 0;
   const tick = async () => {
-    try { const t = await api('/api/time'); $('clock').textContent = '剩余 ' + fmt(t.end_unix - t.server_time); }
-    catch { $('clock').textContent = ''; }
+    try {
+      const t = await api('/api/time');
+      $('clock').textContent = '剩余 ' + fmt(t.end_unix - t.server_time);
+      if (t.remaining <= 0 && !submitted) { submitted = true; await submit(true); }
+    } catch { $('clock').textContent = ''; }
   };
   tick(); setInterval(tick, 15000);
 }
 
 function lockAll() { document.querySelectorAll('textarea').forEach(t => t.disabled = true); $('submitBtn').disabled = true; }
 
-async function submit() {
-  if (submitted) return;
-  if (!confirm('交卷后不可再修改，确定交卷吗？')) return;
+async function submit(auto = false) {
+  if (submitted && !auto) return;
+  if (!auto && !confirm('交卷后不可再修改，确定交卷吗？')) return;
   await saveDirty();
   try { await api('/api/submit', { method: 'POST', body: '{}' }); submitted = true; lockAll(); toast('已交卷'); }
   catch (e) { toast('交卷失败：' + e.message); }

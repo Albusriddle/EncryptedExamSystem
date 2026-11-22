@@ -48,6 +48,16 @@ def validate_inputs(package: Path, keyfile: Path, port: int) -> str | None:
     return None
 
 
+def port_available(port: int) -> bool:
+    """检查端口能否绑定（避免启动后才发现被占用）。"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("0.0.0.0", port))
+        return True
+    except OSError:
+        return False
+
+
 def local_ip() -> str:
     """教师机在局域网里的地址（用于展示访问 URL）。"""
     try:

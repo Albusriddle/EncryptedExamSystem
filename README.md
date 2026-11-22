@@ -4,7 +4,7 @@
 >
 > 本系统的定位是**「防误操作 + 现场监考」**，不是密码学意义上的强防作弊系统。防什么、不防什么，见 [安全边界与威胁模型](docs/安全边界与威胁模型.md)；已经明确接受、且**没有**修复的风险，见 [风险接受记录](docs/风险接受记录.md)。
 
-当前版本：**1.4.0**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
+当前版本：**1.4.1**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
 
 | 组件 | 技术形态 | 职责 |
 |---|---|---|
@@ -213,7 +213,7 @@ worker/              Cloudflare Worker 时间服务（**目录为空，未实现
 
 ---
 
-## 8. 测试与验证基线（v1.4.0）
+## 8. 测试与验证基线（v1.4.1）
 
 | 项 | 基线 |
 |---|---|
@@ -239,6 +239,7 @@ ExamAdmin-<版本>/
 │   ├── ExamAdmin.exe
 │   ├── exam-builder.exe
 │   ├── stub-template.exe    ← 打包用，不发给学生
+│   ├── exam-server.exe      ← 网页考试服务端（可选）
 │   ├── 图片使用教程.md
 │   ├── _internal/
 │   ├── LICENSE
