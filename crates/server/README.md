@@ -59,13 +59,23 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `POST` | `/api/submit` | 冻结并写出 `.eea` |
 | `GET` | `/api/time` | 服务器时间与剩余秒数 |
 
-## 已知限制（阶段 0）
+## 已具备（阶段 1 进行中）
 
-- 答案只在内存：服务重启即丢；
+- 答案落盘：`<answers-dir>/state/<学号>-<场次>.json`，原子写 + 交卷幂等；
+- 服务重启后重新登录会恢复答案与交卷状态；
+- CSRF：所有写接口要求 `X-EES-CSRF: 1`；
+- 单会话：同一学号重新登录会顶掉旧 token；
+- 登录限速：按 IP 与学号各一分钟窗口；
+- 到点自动冻结：过期后首次请求会自动导出答题卡；
+- 事件日志：`<answers-dir>/events.jsonl`；
+- 代码题：CodeMirror 5（行号 + C/C++/Java/JS/Go/Rust/Python 高亮），静态资源内嵌。
+
+## 已知限制
+
 - 没有管理端界面（命令行启动）；
-- 没有 HTTPS / CSRF / 正式限速（仅按 IP 简单计数）；
-- 代码题是纯 textarea，没有 CodeMirror 行号与高亮；
-- 没有断线重连/多标签页限制；
+- 没有 HTTPS（按约定只用于隔离局域网）；
+- SQLite 尚未替换（当前是 JSON 状态文件）；
+- 没有多标签页限制、没有管理端监控页面；
 - 只按 `--session` 或“当前时间窗内第一个场次”工作。
 
 ## 下一步（阶段 1）

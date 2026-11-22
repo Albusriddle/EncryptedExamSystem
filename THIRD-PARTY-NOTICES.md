@@ -41,6 +41,11 @@
 `syntect`（MIT）、`fancy-regex`（MIT）、`regex`（MIT OR Apache-2.0）、
 `bincode`（MIT）、`plist`（MIT）、`yaml-rust`（MIT OR Apache-2.0）。
 
+## 3.1 网页版前端（阶段 1）
+
+`CodeMirror 5.65.16`（MIT）——仅用于网页版学生的代码编辑器（行号与语法高亮），
+静态资源内嵌在 `exam-server` 中，来源：<https://codemirror.net/5/>。
+
 完整依赖树与版本见 `Cargo.lock`；各 crate 的许可原文在其发布页可查。
 
 ## 4. 字体

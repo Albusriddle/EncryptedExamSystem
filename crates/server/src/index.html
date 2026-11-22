@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>保密考试系统 · 在线作答</title>
+<link rel="stylesheet" href="/assets/codemirror.css">
+<script src="/assets/codemirror.js"></script>
+<script src="/assets/clike.js"></script>
+<script src="/assets/python.js"></script>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans CJK SC", sans-serif; margin: 0; background: #f6f7f9; color: #1d1e20; }
@@ -59,7 +63,7 @@ function toast(text) { const t = $('toast'); t.textContent = text; t.classList.a
 function fmt(sec) { if (sec <= 0) return '已结束'; const h = Math.floor(sec/3600), m = Math.floor(sec%3600/60), s = sec%60; return `${h? h+'时':''}${m}分${s}秒`; }
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...opts });
+  const res = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-EES-CSRF': '1' }, ...opts });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
   return data;
@@ -99,7 +103,15 @@ function render(data) {
       if (item.qtype === 'code') ta.className = 'code';
       ta.placeholder = '在此作答（自动保存）';
       ta.addEventListener('input', () => { answers[item.id] = ta.value; dirty.add(item.id); scheduleSave(); });
-      q.appendChild(ta); box.appendChild(q);
+      q.appendChild(ta);
+      if (item.qtype === 'code' && window.CodeMirror) {
+        const lang = (item.code_languages && item.code_languages[0]) || '';
+        const mode = lang === 'python' ? 'python' : ['c','cpp','java','javascript','typescript','go','rust'].includes(lang) ? 'text/x-csrc' : null;
+        const cm = CodeMirror.fromTextArea(ta, { lineNumbers: true, mode, indentUnit: 4, tabSize: 4, lineWrapping: false });
+        cm.setSize('100%', '260px');
+        cm.on('change', () => { answers[item.id] = cm.getValue(); dirty.add(item.id); scheduleSave(); });
+      }
+      box.appendChild(q);
     }
   }
   updateClock(data);
