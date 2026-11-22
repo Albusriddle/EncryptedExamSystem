@@ -67,6 +67,7 @@ def find_artifact(name: str, root: Path | None = None) -> Path | None:
 
 
 BUILDER = find_artifact(f"exam-builder{EXE}")
+SERVER = find_artifact(f"exam-server{EXE}")
 
 
 def copy_legal_files(dest: Path, root: Path | None = None) -> list[str]:
@@ -106,6 +107,10 @@ def main() -> int:
         print("✗ 找不到 exam-builder 可执行文件")
         print("  请先运行：cargo build --release -p builder")
         print("  （已搜索 target/release 与 target/*/release）")
+        return 1
+
+    if SERVER is None or not SERVER.is_file():
+        print("✗ 找不到 exam-server（网页考试服务端）")
         return 1
 
     # 确认 builder 能跑，避免把坏二进制打进去
@@ -149,6 +154,8 @@ def main() -> int:
         # 把 builder 作为数据文件带进去，运行时从 sys._MEIPASS 取
         "--add-binary",
         f"{BUILDER}{sep}.",
+        "--add-binary",
+        f"{SERVER}{sep}.",
         # 版本号文件：两端水印都读它，必须打进包里，
         # 否则冻结后 app_version() 只能返回 0.0.0。
         "--add-data",

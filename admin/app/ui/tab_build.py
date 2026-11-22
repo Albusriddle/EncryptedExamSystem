@@ -523,10 +523,14 @@ class BuildTab(QWidget):
         ops = QHBoxLayout()
         self.btn_build = QPushButton("开始打包")
         self.btn_build.clicked.connect(self.start_build)
+        self.btn_web = QPushButton("网页考试…")
+        self.btn_web.setToolTip("在隔离局域网里启动网页版考试（需要已导出 K_manifest 的考试包）")
+        self.btn_web.clicked.connect(self.open_web_exam)
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self.cancel_build)
         ops.addWidget(self.btn_build)
+        ops.addWidget(self.btn_web)
         ops.addWidget(self.btn_cancel)
         ops.addStretch(1)
         lay.addLayout(ops)
@@ -561,6 +565,16 @@ class BuildTab(QWidget):
         return default_out()
 
     # ---------------------------------------------------------------- 交互
+
+    def open_web_exam(self) -> None:
+        from app.ui.web_exam_dialog import WebExamDialog
+
+        pkg = self.edit_out.text().strip()
+        key = self.edit_keyfile.text().strip()
+        dlg = WebExamDialog(self, pkg, key)
+        dlg.setModal(False)
+        dlg.show()
+        self._web_dialog = dlg
 
     def _pick_file(self, target: QLineEdit, title: str, save: bool = False) -> None:
         if save:
