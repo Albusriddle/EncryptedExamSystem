@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>保密考试系统 · 在线作答</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans CJK SC", sans-serif; margin: 0; background: #f6f7f9; color: #1d1e20; }
+  @media (prefers-color-scheme: dark) { body { background: #17181a; color: #e6e6e6; } .card { background:#1f2023; border-color:#2e3034; } }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 20px; }
+  .card { background:#fff; border:1px solid #e2e4e8; border-radius:8px; padding:18px; margin:12px 0; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  .muted { color:#777; font-size: 13px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+  input[type=text], input[type=password] { font-size:16px; padding:8px 10px; border:1px solid #c9ccd2; border-radius:6px; width: 220px; }
+  button { font-size:15px; padding:8px 14px; border-radius:6px; border:1px solid #2f6fed; background:#2f6fed; color:#fff; cursor:pointer; }
+  button.secondary { background:transparent; color:#2f6fed; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .q { border-top:1px solid #e2e4e8; padding:16px 0; }
+  .q:first-child { border-top:0; }
+  .qno { font-weight:600; margin-bottom:8px; }
+  pre.stem { white-space:pre-wrap; font-family:inherit; margin:0 0 10px; }
+  textarea { width:100%; box-sizing:border-box; min-height:120px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size:14px; padding:10px; border:1px solid #c9ccd2; border-radius:6px; }
+  textarea.code { min-height:220px; }
+  .bar { position:sticky; top:0; z-index:2; background:inherit; padding:10px 0; display:flex; gap:12px; align-items:center; }
+  .ok { color:#1f8a4c; } .warn { color:#b03030; }
+  .toast { position:fixed; right:16px; bottom:16px; background:#222; color:#fff; padding:10px 14px; border-radius:6px; opacity:0; transition:opacity .2s; }
+  .toast.show { opacity:.92; }
+  #login { max-width: 420px; margin: 12vh auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <section id="login" class="card">
+    <h1>保密考试系统</h1>
+    <p class="muted">请输入学号与 PIN（未启用 PIN 时留空）。</p>
+    <div class="row"><input id="sid" type="text" inputmode="numeric" placeholder="学号"></div>
+    <div class="row" style="margin-top:10px"><input id="pin" type="password" inputmode="numeric" placeholder="6 位 PIN（可留空）"></div>
+    <div class="row" style="margin-top:14px"><button id="loginBtn">登录</button><span id="loginMsg" class="warn"></span></div>
+    <p class="muted" style="margin-top:14px">本页面只用于隔离局域网内的现场考试；请勿关闭标签页。</p>
+  </section>
+
+  <section id="exam" style="display:none">
+    <div class="bar"><strong id="title">考试</strong><span id="clock" class="muted"></span><span id="saveState" class="muted"></span><button id="submitBtn" class="secondary" style="margin-left:auto">交卷</button></div>
+    <div id="questions"></div>
+  </section>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+let paper = null;
+let answers = {};
+let dirty = new Set();
+let submitted = false;
+
+const $ = (id) => document.getElementById(id);
+function toast(text) { const t = $('toast'); t.textContent = text; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1600); }
+function fmt(sec) { if (sec <= 0) return '已结束'; const h = Math.floor(sec/3600), m = Math.floor(sec%3600/60), s = sec%60; return `${h? h+'时':''}${m}分${s}秒`; }
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...opts });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+
+async function login() {
+  $('loginMsg').textContent = '';
+  try {
+    const student_id = Number($('sid').value.trim());
+    if (!student_id) throw new Error('请输入学号');
+    const pin = $('pin').value.trim();
+    await api('/api/login', { method: 'POST', body: JSON.stringify({ student_id, pin: pin || null }) });
+    const data = await api('/api/paper');
+    paper = data.paper; answers = data.answers || {}; submitted = data.submitted;
+    render(data);
+    $('login').style.display = 'none'; $('exam').style.display = 'block';
+    if (submitted) { lockAll(); }
+  } catch (e) { $('loginMsg').textContent = e.message; }
+}
+
+function render(data) {
+  $('title').textContent = `学号 ${data.student_id} · 场次 #${data.session_id}`;
+  const box = $('questions'); box.innerHTML = '';
+  let n = 0;
+  for (const sec of paper.sections) {
+    const h = document.createElement('h2'); h.textContent = sec.title; h.style.fontSize = '16px'; h.style.margin = '18px 0 6px'; box.appendChild(h);
+    for (const item of sec.items) {
+      n++;
+      const q = document.createElement('div'); q.className = 'card q';
+      const no = document.createElement('div'); no.className = 'qno'; no.textContent = `${n}. （${item.score} 分）`; q.appendChild(no);
+      const stem = document.createElement('pre'); stem.className = 'stem'; stem.textContent = item.stem; q.appendChild(stem);
+      if (item.options && item.options.length) {
+        const ol = document.createElement('pre'); ol.className = 'stem'; ol.textContent = item.options.map((o, i) => `${String.fromCharCode(65+i)}. ${o}`).join('\n'); q.appendChild(ol);
+      }
+      const ta = document.createElement('textarea');
+      ta.dataset.qid = item.id; ta.value = answers[item.id] || '';
+      if (item.qtype === 'code') ta.className = 'code';
+      ta.placeholder = '在此作答（自动保存）';
+      ta.addEventListener('input', () => { answers[item.id] = ta.value; dirty.add(item.id); scheduleSave(); });
+      q.appendChild(ta); box.appendChild(q);
+    }
+  }
+  updateClock(data);
+}
+
+let saveTimer = null;
+function scheduleSave() { if (submitted) return; clearTimeout(saveTimer); saveTimer = setTimeout(saveDirty, 600); }
+async function saveDirty() {
+  if (!dirty.size) return;
+  const items = [...dirty]; dirty.clear();
+  try {
+    for (const qid of items) await api('/api/answer', { method: 'PUT', body: JSON.stringify({ qid, value: answers[qid] || '' }) });
+    $('saveState').textContent = '已保存 ' + new Date().toLocaleTimeString();
+  } catch (e) { items.forEach(q => dirty.add(q)); $('saveState').textContent = '保存失败：' + e.message; }
+}
+
+function updateClock(data) {
+  if (!data) data = { server_time: Date.now()/1000|0, end_unix: 0 };
+  const end = data.end_unix || 0;
+  const tick = async () => {
+    try { const t = await api('/api/time'); $('clock').textContent = '剩余 ' + fmt(t.end_unix - t.server_time); }
+    catch { $('clock').textContent = ''; }
+  };
+  tick(); setInterval(tick, 15000);
+}
+
+function lockAll() { document.querySelectorAll('textarea').forEach(t => t.disabled = true); $('submitBtn').disabled = true; }
+
+async function submit() {
+  if (submitted) return;
+  if (!confirm('交卷后不可再修改，确定交卷吗？')) return;
+  await saveDirty();
+  try { await api('/api/submit', { method: 'POST', body: '{}' }); submitted = true; lockAll(); toast('已交卷'); }
+  catch (e) { toast('交卷失败：' + e.message); }
+}
+
+$('loginBtn').addEventListener('click', login);
+$('pin').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+$('submitBtn').addEventListener('click', submit);
+window.addEventListener('beforeunload', e => { if (!submitted) { e.preventDefault(); e.returnValue = ''; } });
+</script>
+</body>
+</html>
