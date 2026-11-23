@@ -558,7 +558,10 @@ fn save_answer(app: &App, req: &Request) -> Response {
     // 否则收卷判分会把它们当空。
     let normalized = match item.qtype.as_str() {
         "fill" => {
-            let parts: Vec<String> = value.lines().map(|l| l.trim().to_string()).collect();
+            let parts: Vec<String> = value
+                .lines()
+                .map(|l| l.trim_end_matches('\r').to_string())
+                .collect();
             encode_parts(&parts)
         }
         "fix" => {
