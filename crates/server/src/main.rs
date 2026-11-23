@@ -27,6 +27,7 @@ const INDEX_HTML: &str = include_str!("index.html");
 const MAX_BODY: usize = 20 * 1024 * 1024;
 
 mod clock;
+mod secure_fs;
 
 #[derive(Parser)]
 #[command(
@@ -239,6 +240,7 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| cli.answers_dir.join("state"));
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("创建状态目录 {}", state_dir.display()))?;
+    harden_state_dir(&state_dir);
 
     let state_key = *crypto::hkdf_derive(&k_manifest, b"web-state", "web-state");
     let app = Arc::new(App {
@@ -298,6 +300,31 @@ fn local_ip() -> String {
         })
         .map(|a| a.ip().to_string())
         .unwrap_or_else(|_| "127.0.0.1".into())
+}
+
+/// 启动时收紧状态目录，并给升级前已经落盘的旧状态文件补一次权限。
+///
+/// 目录上的继承位决定「之后新建的文件自动受限」，但**之前**写下的文件仍带着旧
+/// ACL（例如 Everyone 可读），只收紧目录不会回收它们。这里逐个补一遍。
+///
+/// 失败只告警：状态内容本身是加密的，权限是第二道防线；因为权限问题拒绝开考，
+/// 造成的损失比风险本身更大。
+fn harden_state_dir(dir: &std::path::Path) {
+    if let Err(e) = secure_fs::harden_dir(dir) {
+        eprintln!("⚠ 状态目录权限收紧失败 {}：{e}", dir.display());
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Err(e) = secure_fs::harden_file(&path) {
+            eprintln!("⚠ 旧状态文件权限收紧失败 {}：{e}", path.display());
+        }
+    }
 }
 
 fn handle(app: Arc<App>, mut stream: TcpStream) -> Result<()> {
@@ -731,22 +758,29 @@ impl App {
         let sealed = crypto::encrypt(&self.state_key, &plain, b"web-state")
             .map_err(|e| std::io::Error::other(format!("加密状态失败：{e}")))?;
         std::fs::write(&tmp, sealed)?;
+        // 先收紧临时文件、再改名：rename 保留文件自身的 ACL，目标文件从出现的
+        // 第一刻起就是「仅当前用户」。目录 DACL 的继承本来也管用，这里是双保险
+        // （覆盖目录被替换成继承位不同、或状态目录被 --state-dir 指到别处的情况）。
+        if let Err(e) = secure_fs::harden_file(&tmp) {
+            // 内容已经加密；权限收紧失败只告警，不阻断交卷（否则学生会因此丢卡）。
+            eprintln!("⚠ 状态文件权限收紧失败 {}：{e}", tmp.display());
+        }
         std::fs::rename(&tmp, &path)?;
         let _ = std::fs::File::open(&path).and_then(|f| f.sync_all());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
         Ok(())
     }
 
     fn log_event(&self, student_id: u64, kind: &str, detail: &str) -> std::io::Result<()> {
         use std::io::Write as _;
+        let path = self.answers_dir.join("events.jsonl");
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.answers_dir.join("events.jsonl"))?;
+            .open(&path)?;
+        // 事件日志含学号与交卷时间，同样只留当前用户可读；失败只告警。
+        if let Err(e) = secure_fs::harden_file(&path) {
+            eprintln!("⚠ 事件日志权限收紧失败 {}：{e}", path.display());
+        }
         writeln!(
             f,
             "{}",

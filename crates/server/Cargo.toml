@@ -16,3 +16,14 @@ anyhow = { workspace = true }
 hex = { workspace = true }
 clap = { workspace = true }
 rand = { workspace = true }
+
+# 状态文件权限收紧（secure_fs.rs）：Windows 上直接调用 advapi32 设受保护 DACL，
+# 不走 `icacls.exe` 子进程（其输出是本地化文本，解析它等于依赖系统语言）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
