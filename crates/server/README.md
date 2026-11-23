@@ -52,6 +52,8 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `--login-rate-limit` | 同一 IP 每分钟登录尝试上限，默认 `60`；`0` = 不限制（演练/同 NAT 时用） |
 
 启动时会先做一次三源网络时间校验并打印结论（本地时间 / 网络时间 / 偏差 / 生效偏移）。
+管理端「网页考试…」对话框可以直接设置 `--time-check` 与 `--login-rate-limit`，
+并在服务打印出「考试服务已启动」之后才显示访问地址。
 默认 `warn`：没有外网的隔离局域网会打印「取时失败，仅告警」后继续启动；
 `require` 适合确实有外网、又要求时间强一致的考场。
 
