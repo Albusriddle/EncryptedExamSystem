@@ -75,7 +75,8 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 - CSRF：所有写接口要求 `X-EES-CSRF: 1`；
 - 单会话：同一学号重新登录会顶掉旧 token；
 - 登录限速：按 IP 与学号各一分钟窗口；
-- 到点自动冻结：过期后首次请求会自动导出答题卡；
+- 到点自动冻结：过期后首次请求会自动导出答题卡；后台线程每 15 秒收一轮，加密与写盘
+  在全局状态锁**之外**进行（v1.4.4），不会堵住其他学生的请求；
 - 事件日志：`<answers-dir>/events.jsonl`；
 - 代码题：CodeMirror 5（行号 + C/C++/Java/JS/Go/Rust/Python 高亮），静态资源内嵌；
 - **启动校时（v1.4.3）**：三源中位数校验网络时间，偏差存成时钟偏移供场次判定使用；
