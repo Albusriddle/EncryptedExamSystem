@@ -97,6 +97,12 @@ struct Cli {
     /// 本机时钟与网络时间的允许偏差（秒），实际夹取到 30–86400
     #[arg(long, default_value_t = clock::DEFAULT_TOLERANCE_SECS)]
     time_tolerance: i64,
+    /// 同一 IP 每分钟允许的登录尝试次数（0 = 不限制）
+    ///
+    /// 默认 60：一个考场 50 人，正常每 IP 只有一两次；留出余量给「学生在同一 NAT 后面」
+    /// 或老师复测的场景。真正防 PIN 爆破的是按学号的 10 次/分钟。
+    #[arg(long, default_value_t = 60)]
+    login_rate_limit: u32,
 }
 
 struct App {
@@ -110,6 +116,14 @@ struct App {
     clock: clock::Clock,
     /// 启动时的校验档位，只用于 `/api/time` 的诊断输出。
     time_mode: clock::TimeMode,
+    /// 同一 IP 每分钟的登录尝试上限（0 = 不限制）。
+    login_rate_limit: u32,
+    /// 事件日志的写锁。
+    ///
+    /// `events.jsonl` 由交卷 / 保存并发写入。多个线程各持一个 append 句柄时，一次
+    /// `write` 若被拆成两次（`writeln!` 就是先写正文再写换行），两行会在字节层面
+    /// 交错成无法解析的乱码——v1.4.5 的 12 人并发演练实测到：12 条交卷只解析出 2 条。
+    event_log: Mutex<()>,
     conns: std::sync::atomic::AtomicUsize,
     gate: Gate,
     state: Mutex<State>,
@@ -283,8 +297,10 @@ fn main() -> Result<()> {
         forced_session: cli.session,
         clock: server_clock,
         time_mode: cli.time_check,
+        login_rate_limit: cli.login_rate_limit,
         conns: std::sync::atomic::AtomicUsize::new(0),
         gate: Gate::new(4),
+        event_log: Mutex::new(()),
         state: Mutex::new(State::default()),
     });
 
@@ -428,7 +444,7 @@ fn login(app: &App, req: &Request) -> Response {
         if now.saturating_sub(entry.1) > 60 {
             *entry = (0, now);
         }
-        if entry.0 >= 20 {
+        if app.login_rate_limit != 0 && entry.0 >= app.login_rate_limit {
             return Response::error(429, "登录尝试过多，请一分钟后再试");
         }
         entry.0 += 1;
@@ -656,67 +672,87 @@ fn save_answer(app: &App, req: &Request) -> Response {
         return Response::error(413, "单题答案超过 1 MiB");
     }
 
-    let mut state = app.state.lock().unwrap();
-    let Some(st) = state.students.get_mut(&token) else {
-        return Response::error(401, "登录已失效");
-    };
-    if st.submitted {
-        return Response::error(409, "已交卷，不能再修改");
-    }
-    let (_, end) = session_window(app, st.session_id);
-    if end != 0 && app.now() > end {
-        return Response::error(409, "考试已结束");
-    }
-    let Some(item) = st
-        .paper
-        .sections
-        .iter()
-        .flat_map(|s| &s.items)
-        .find(|i| i.id == qid)
-    else {
-        return Response::error(400, "题目不在本卷中");
-    };
-    // 填空/改错在离线客户端是 JSON 编码；网页端按“每行一个答案”转换，
-    // 否则收卷判分会把它们当空。
-    let normalized = match item.qtype.as_str() {
-        "fill" => {
-            let parts: Vec<String> = value
-                .lines()
-                .map(|l| l.trim_end_matches('\r').to_string())
-                .collect();
-            encode_parts(&parts)
+    // 校验与写入内存都在锁内完成；**克隆答案**也只是内存操作，真正的写盘放到锁外。
+    // 交卷路径在 v1.4.4 已经把写盘挪出锁，保存路径同理（它是全场频率最高的写操作）。
+    let (student_id, session_id, answers) = {
+        let mut state = app.state.lock().unwrap();
+        let Some(st) = state.students.get_mut(&token) else {
+            return Response::error(401, "登录已失效");
+        };
+        if st.submitted {
+            return Response::error(409, "已交卷，不能再修改");
         }
-        "fix" => {
-            let mut fixes: Vec<(String, String)> = Vec::new();
-            for line in value.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let (no, ans) = line.split_once([' ', '\t', ':']).unwrap_or((line, ""));
-                fixes.push((no.trim().to_string(), ans.trim().to_string()));
+        let (_, end) = session_window(app, st.session_id);
+        if end != 0 && app.now() > end {
+            return Response::error(409, "考试已结束");
+        }
+        let Some(item) = st
+            .paper
+            .sections
+            .iter()
+            .flat_map(|s| &s.items)
+            .find(|i| i.id == qid)
+        else {
+            return Response::error(400, "题目不在本卷中");
+        };
+        // 填空/改错在离线客户端是 JSON 编码；网页端按“每行一个答案”转换，
+        // 否则收卷判分会把它们当空。
+        let normalized = match item.qtype.as_str() {
+            "fill" => {
+                let parts: Vec<String> = value
+                    .lines()
+                    .map(|l| l.trim_end_matches('\r').to_string())
+                    .collect();
+                encode_parts(&parts)
             }
-            encode_fixes(&fixes)
+            "fix" => {
+                let mut fixes: Vec<(String, String)> = Vec::new();
+                for line in value.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let (no, ans) = line.split_once([' ', '\t', ':']).unwrap_or((line, ""));
+                    fixes.push((no.trim().to_string(), ans.trim().to_string()));
+                }
+                encode_fixes(&fixes)
+            }
+            _ => value.to_string(),
+        };
+        let value = normalized.as_str();
+        // 先算「换成这一题之后」的总量，再决定写不写：v1.4.3 及以前是先 insert 再算总量，
+        // 返回 413 时那份超限答案已经留在内存里了——下次交卷会被写进答题卡与状态文件、
+        // 重启后还会被恢复，「拒绝」等于没拒绝。
+        let previous = st.answers.get(qid).map_or(0, String::len);
+        let total: usize = st
+            .answers
+            .values()
+            .map(String::len)
+            .sum::<usize>()
+            .saturating_sub(previous)
+            .saturating_add(value.len());
+        if total > 16 * 1024 * 1024 {
+            return Response::error(413, "整卡答案超过 16 MiB");
         }
-        _ => value.to_string(),
+        st.answers.insert(qid.to_string(), value.to_string());
+        st.last_seen = app.now();
+        (st.student_id, st.session_id, st.answers.clone())
     };
-    let value = normalized.as_str();
-    // 先算「换成这一题之后」的总量，再决定写不写：v1.4.3 及以前是先 insert 再算总量，
-    // 返回 413 时那份超限答案已经留在内存里了——下次交卷会被写进答题卡与状态文件、
-    // 重启后还会被恢复，「拒绝」等于没拒绝。
-    let previous = st.answers.get(qid).map_or(0, String::len);
-    let total: usize = st
-        .answers
-        .values()
-        .map(String::len)
-        .sum::<usize>()
-        .saturating_sub(previous)
-        .saturating_add(value.len());
-    if total > 16 * 1024 * 1024 {
-        return Response::error(413, "整卡答案超过 16 MiB");
+
+    // 每次保存都落盘（v1.4.5）。
+    //
+    // 为什么：交卷前答案只在内存里时，教师机崩溃、断电、误杀进程都会让**整场作答全部丢失**，
+    // 而文档一直写着「答案实时落盘」。现在每次保存写一份加密状态（原子替换），重登即可恢复。
+    //
+    // 这里用 durable=false：保存是前端 600ms 防抖一次的高频操作，每次都 fsync 会把磁盘打满；
+    // 进程崩溃不丢（页缓存还在），只有断电可能丢最近几秒——仍远好于「只在交卷时落盘」。
+    if let Err(e) = app.write_state(student_id, session_id, &answers, false, None, false) {
+        // 内存里已经有了，但磁盘上没有：必须让学生知道，让他重试这一题。
+        return Response::error(
+            500,
+            format!("答案已收下但状态写盘失败：{e}（请重试这一题）"),
+        );
     }
-    st.answers.insert(qid.to_string(), value.to_string());
-    st.last_seen = app.now();
     Response::json(200, json!({"ok": true}))
 }
 
@@ -833,7 +869,7 @@ fn seal_and_export(
     );
     std::fs::write(app.answers_dir.join(&name), &bytes)
         .map_err(|e| format!("写入答题卡失败：{e}"))?;
-    app.write_state(student_id, session_id, answers, true, Some(&name))
+    app.write_state(student_id, session_id, answers, true, Some(&name), true)
         .map_err(|e| format!("保存状态失败：{e}"))?;
     let _ = app.log_event(student_id, "submit", &name);
     #[cfg(test)]
@@ -884,8 +920,11 @@ impl App {
 
     /// 把作答状态写盘（加密 + 原子替换 + 收紧权限）。
     ///
-    /// 参数是**数据**而不是 `&Student`：交卷与自动收卷都要在锁外写状态，拿不到
-    /// `&mut Student`；传引用字段又能避免为了写盘把整份作答再克隆一次。
+    /// 参数是**数据**而不是 `&Student`：交卷、自动收卷与每次保存都要在锁外写状态，
+    /// 拿不到 `&mut Student`；传引用字段又能避免为了写盘把整份作答再克隆一次。
+    ///
+    /// `durable`：只有交卷（含自动收卷）需要 `fsync`——那一份写不下去就等于学生丢卡；
+    /// 高频的「保存一题」用 `false`，否则每 600 ms 一次 fsync 会把教师机磁盘打满。
     fn write_state(
         &self,
         student_id: u64,
@@ -893,6 +932,7 @@ impl App {
         answers: &BTreeMap<String, String>,
         submitted: bool,
         exported: Option<&str>,
+        durable: bool,
     ) -> std::io::Result<()> {
         let payload = json!({
             "student_id": student_id,
@@ -911,16 +951,25 @@ impl App {
         // 第一刻起就是「仅当前用户」。目录 DACL 的继承本来也管用，这里是双保险
         // （覆盖目录被替换成继承位不同、或状态目录被 --state-dir 指到别处的情况）。
         if let Err(e) = secure_fs::harden_file(&tmp) {
-            // 内容已经加密；权限收紧失败只告警，不阻断交卷（否则学生会因此丢卡）。
+            // 内容已经加密；权限收紧失败只告警，不阻断落盘（否则学生会因此丢卡）。
             eprintln!("⚠ 状态文件权限收紧失败 {}：{e}", tmp.display());
         }
         std::fs::rename(&tmp, &path)?;
-        let _ = std::fs::File::open(&path).and_then(|f| f.sync_all());
+        if durable {
+            let _ = std::fs::File::open(&path).and_then(|f| f.sync_all());
+        }
         Ok(())
     }
 
     fn log_event(&self, student_id: u64, kind: &str, detail: &str) -> std::io::Result<()> {
         use std::io::Write as _;
+        // 先拿写锁：事件日志由交卷 / 保存等多条线程并发追加，没有锁时一次 `writeln!`
+        // 拆出的两次 `write` 会与别人的写入在字节层面交错，整行变成无法解析的乱码
+        // （v1.4.5 的 12 人并发演练实测：12 条交卷只解析出 2 条）。
+        let _guard = self
+            .event_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let path = self.answers_dir.join("events.jsonl");
         let mut f = std::fs::OpenOptions::new()
             .create(true)
@@ -930,11 +979,13 @@ impl App {
         if let Err(e) = secure_fs::harden_file(&path) {
             eprintln!("⚠ 事件日志权限收紧失败 {}：{e}", path.display());
         }
-        writeln!(
-            f,
-            "{}",
+        // 自己拼好整行、一次 `write_all` 落盘：即使将来有人去掉这把锁，单次写也比
+        // `writeln!` 的两段写安全得多。
+        let line = format!(
+            "{}\n",
             json!({"at": self.now(), "student_id": student_id, "kind": kind, "detail": detail})
-        )
+        );
+        f.write_all(line.as_bytes())
     }
 }
 
@@ -1101,8 +1152,22 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
         path,
         headers,
         body,
-        peer: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        peer: peer_ip(stream),
     }))
+}
+
+/// 请求的真实来源 IP。
+///
+/// 必须是 TCP 对端地址——**不能**用 `X-Forwarded-For`（可伪造，等于让攻击者自选限速桶）。
+/// v1.4.5 及以前这里被硬编码成 `127.0.0.1`：于是全场所有学生共用一个登录限速桶，
+/// 第 21 个学生起就集体 429（40 人演练直接暴露）；「按 IP 限速」形同虚设。
+///
+/// 取不到对端地址（连接已断）时退回本机地址，宁可少限制一次也不要 panic。
+fn peer_ip(stream: &TcpStream) -> IpAddr {
+    stream
+        .peer_addr()
+        .map(|addr| addr.ip())
+        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
 }
 
 fn find_head_end(buf: &[u8]) -> Option<usize> {

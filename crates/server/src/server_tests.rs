@@ -96,6 +96,9 @@ impl Fixture {
             time_mode: clock::TimeMode::Off,
             conns: std::sync::atomic::AtomicUsize::new(0),
             gate: Gate::new(4),
+            event_log: Mutex::new(()),
+            // 真实默认是 60；这里收窄到 20，让「第 21 次 429」的用例短一点。
+            login_rate_limit: 20,
             state: Mutex::new(State::default()),
         });
 
@@ -110,6 +113,27 @@ impl Fixture {
 
     fn route(&self, req: &Request) -> Response {
         route(&self.app, req)
+    }
+
+    /// 模拟「进程重启」：内存状态清零、换一个全新的 `App`，但磁盘上的答题卡与状态
+    /// 文件原样保留。用来验证「教师机崩溃 / 断电 / 误杀进程后重登能否拿回作答」。
+    fn restart(&mut self) {
+        let old = Arc::clone(&self.app);
+        self.app = Arc::new(App {
+            payload: old.payload.clone(),
+            k_manifest: old.k_manifest,
+            answers_dir: old.answers_dir.clone(),
+            state_dir: old.state_dir.clone(),
+            forced_session: old.forced_session,
+            state_key: old.state_key,
+            clock: clock::Clock::system(),
+            time_mode: clock::TimeMode::Off,
+            conns: std::sync::atomic::AtomicUsize::new(0),
+            gate: Gate::new(4),
+            event_log: Mutex::new(()),
+            login_rate_limit: old.login_rate_limit,
+            state: Mutex::new(State::default()),
+        });
     }
 
     fn login_from(&self, peer: IpAddr, student: u64, pin: Option<&str>) -> Response {
@@ -165,6 +189,17 @@ impl Fixture {
                 .csrf()
                 .token(token),
         )
+    }
+
+    /// 直接往内存里的作答表塞一题（不走 HTTP）。
+    ///
+    /// 只给「整卡超限」这类**需要先有 16 MiB 卡片**的用例用：走 HTTP 逐题填满会写 16 次
+    /// 状态文件（合计 136 MB），在 Windows 上被杀毒扫描拖到 27 秒；这里只造内存态，
+    /// 真正被测的 413 判定与回滚仍走一次真实请求。
+    fn seed_answer(&self, token: &str, qid: &str, value: &str) {
+        let mut state = self.app.state.lock().unwrap();
+        let st = state.students.get_mut(token).expect("token 应有效");
+        st.answers.insert(qid.to_string(), value.to_string());
     }
 
     fn state_path(&self) -> PathBuf {
@@ -714,6 +749,44 @@ fn port_conflict_reports_actionable_error() {
     );
 }
 
+/// 限速按「真实对端 IP」分桶，而不是一个全局桶。
+///
+/// 为什么重要：v1.4.5 及以前 `Request.peer` 被硬编码成 `127.0.0.1`——全场所有学生
+/// 共用一个登录限速桶，40 人演练里第 21 个学生起全部 429，「按 IP 限速」等于没有。
+/// 这条用例走真实 TCP：监听 `0.0.0.0`，用本机的**非回环地址**连进去，断言
+/// `read_request` 报出来的是那个地址，而不是硬编码的回环地址。
+#[test]
+fn request_peer_comes_from_the_socket() {
+    use std::io::Write as _;
+    use std::net::{TcpListener, TcpStream};
+
+    let target = local_ip();
+    if target == "127.0.0.1" {
+        // 没有非回环网卡（极少见）：这条用例没有判别力，直接返回而不是假绿。
+        eprintln!("跳过：本机没有非回环地址，无法区分 127.0.0.1 与真实对端");
+        return;
+    }
+    let listener = TcpListener::bind("0.0.0.0:0").expect("绑定监听端口");
+    let port = listener.local_addr().expect("取监听地址").port();
+
+    let mut client = TcpStream::connect((target.as_str(), port)).expect("连接自己的局域网地址");
+    let (mut accepted, _) = listener.accept().expect("接受连接");
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: drill\r\n\r\n")
+        .expect("发送请求");
+    let req = read_request(&mut accepted)
+        .expect("解析请求")
+        .expect("应解析出一个请求");
+
+    let expected: IpAddr = target.parse().expect("本机地址应能解析");
+    assert_eq!(req.peer, expected, "peer 必须是 TCP 对端地址");
+    assert_ne!(
+        req.peer,
+        IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        "不得是硬编码的回环地址（那样全场共用一个限速桶）"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 5. 写接口：CSRF / 鉴权 / 请求体 / qid / 容量
 // ---------------------------------------------------------------------------
@@ -814,13 +887,11 @@ fn whole_card_over_sixteen_mib_is_rejected() {
     let qids = f.qids(&token);
     assert_eq!(qids.len(), 20, "抽题数应等于题库题量");
 
+    // 前 16 题各 1 MB 直接铺进内存（见 `seed_answer` 的注释：走 HTTP 会写 136 MB 状态文件，
+    // 在 Windows 上被杀毒扫描拖到 27 秒；这里要测的是 413 判定本身，不是写盘性能）。
     let chunk = "x".repeat(1_000_000); // < 1 MiB，单题合法
     for qid in &qids[..16] {
-        assert_status(
-            &f.save(&token, qid, &chunk),
-            200,
-            "前 16 题各 1 MB 应允许（累计 16 MB < 16 MiB）",
-        );
+        f.seed_answer(&token, qid, &chunk);
     }
     let overflow = f.save(&token, &qids[16], &chunk);
     assert_status(&overflow, 413, "累计超过 16 MiB 必须 413");
@@ -836,6 +907,78 @@ fn whole_card_over_sixteen_mib_is_rejected() {
     assert!(
         answers.get(&qids[16]).is_none(),
         "413 拒绝后该题答案不得留在内存，实际：{answers}"
+    );
+}
+
+/// 保存过的答案必须在**进程重启后**还在（教师机崩溃 / 断电 / 误杀进程）。
+///
+/// 为什么重要：v1.4.4 及以前，作答只在**交卷时**落盘，交卷前全在内存里——教师机崩一次，
+/// 整场作答全丢，而文档一直写着「答案实时落盘」。这条用例模拟重启（同一批目录 + 全新
+/// `App`，内存清零），重新登录后答案必须回来，且不能变成「已交卷」。
+#[test]
+fn answers_survive_a_restart_before_submit() {
+    let mut f = Fixture::new("restart-recovery");
+    let token = f.login_ok(STUDENT);
+    let qids = f.qids(&token);
+    assert_status(&f.save(&token, &qids[0], "B"), 200, "保存第一题应成功");
+    assert_status(
+        &f.save(&token, &qids[1], "第一行\n第二行"),
+        200,
+        "保存第二题应成功",
+    );
+    // 题目顺序由卷面决定，不假设题型：直接比对「重启前 / 重启后」两张卷的 answers。
+    let before = f.paper_json(&token)["answers"].clone();
+    assert_eq!(
+        before.as_object().map_or(0, |m| m.len()),
+        2,
+        "保存后应有两题答案，实际：{before}"
+    );
+    assert!(
+        f.state_path().is_file(),
+        "保存后就该有加密状态文件：{}",
+        f.state_path().display()
+    );
+
+    f.restart();
+
+    let token2 = f.login_ok(STUDENT);
+    let paper = f.paper_json(&token2);
+    assert_eq!(paper["submitted"], false, "重启后不得变成已交卷");
+    let after = paper["answers"].clone();
+    assert_eq!(after, before, "重启后答案必须逐题恢复");
+}
+
+/// 事件日志必须能承受并发追加：每行都得是**完整 JSON**，不能丢行、不能拼行。
+///
+/// 为什么重要：交卷与保存由多个线程并发写 `events.jsonl`。v1.4.5 之前一次
+/// `writeln!` 会拆成两次 `write`（正文 + 换行），并发时两行在字节层面交错——
+/// 12 人同时交卷的演练里，12 条事件只有 2 条能解析，审计日志等于失效。
+#[test]
+fn concurrent_event_log_lines_stay_parseable() {
+    let f = Fixture::new("event-log-race");
+    let writers = 20;
+    let per_writer = 5;
+    std::thread::scope(|scope| {
+        for writer in 0..writers {
+            let app = Arc::clone(&f.app);
+            scope.spawn(move || {
+                for k in 0..per_writer {
+                    app.log_event(2021001, "submit", &format!("answers-{writer}-{k}.eea"))
+                        .expect("写事件日志失败");
+                }
+            });
+        }
+    });
+    let events = f.events(); // 每行都 `serde_json::from_str`，解析失败会 panic
+    assert_eq!(
+        events.len(),
+        writers * per_writer,
+        "并发写事件不得丢行或拼行，实际 {} 行",
+        events.len()
+    );
+    assert!(
+        events.iter().all(|e| e["kind"] == "submit"),
+        "每行都应带 kind=submit"
     );
 }
 
