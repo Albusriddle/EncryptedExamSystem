@@ -81,10 +81,13 @@ def selftest() -> int:
 
         from app.branding import branding
         from app.core import secure
+        from app.core.default_banks import new_demo_project
         from app.core.models import Manifest  # noqa: F401
         from app.core.state import ProjectState  # noqa: F401
         from app.ui.main_window import MainWindow  # noqa: F401
 
+        # 防止源码正常、发布包漏带默认题库却仍通过依赖自检。
+        new_demo_project()
         blob = secure.seal(secure.MAGIC_KEY, "selftest-pass", b"x" * 32)
         if secure.unseal(secure.MAGIC_KEY, "selftest-pass", blob) != b"x" * 32:
             raise RuntimeError("secure.seal/unseal 自检失败")
@@ -148,6 +151,16 @@ def main() -> int:
             "label_geom": [lbl.x(), lbl.y(), lbl.width(), lbl.height()] if lbl else None,
             "label_visible": lbl.isVisible() if lbl else None,
             "style": lbl.styleSheet() if lbl else None,
+            "banks": [
+                {
+                    "exam_id": win.banks_tab.table.item(row, 0).text(),
+                    "title": win.banks_tab.table.item(row, 1).text(),
+                    "questions": int(win.banks_tab.table.item(row, 2).text()),
+                    "pick": int(win.banks_tab.table.item(row, 3).text()),
+                }
+                for row in range(win.banks_tab.table.rowCount())
+            ],
+            "status": win.statusBar().currentMessage(),
         }
         (out / "info.json").write_text(
             json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -164,7 +177,7 @@ def main() -> int:
     install_excepthook()
     app.setApplicationName(f"{branding().product} · 管理端")
     # 中文字体：Windows 下默认字体即可；Linux 若缺失由系统配置决定
-    win = MainWindow()  # 正常启动：空白工程（上次工程由工具栏按钮打开）
+    win = MainWindow()  # 正常启动：自带示例题库的新工程（上次工程由工具栏按钮打开）
     win.show()
     # 欢迎弹窗：放在主窗口显示之后，避免"弹窗背后一片空白"。
     # 之前这行因为注释被格式化而漏掉，导致教师端根本没弹窗。

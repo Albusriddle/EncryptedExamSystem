@@ -37,6 +37,8 @@ from PySide6.QtWidgets import (
 
 from app.branding import branding
 from app.core.audit import AuditLog, verify_file
+from app.core.bank_import import BankImportError
+from app.core.default_banks import new_demo_project
 from app.core.models import Manifest
 from app.core.state import ProjectLocked, ProjectState
 from app.ui.app_settings import (
@@ -61,7 +63,7 @@ from app.version import app_version, watermark
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.state = ProjectState()
+        self.state, note = self._new_project_defaults()
         self.project_path: Path | None = None
         #: 是否有未保存的改动。没有它的话，只要导入过题库/建过场次，
         #: 每次新建或打开工程都会问"未保存的修改会丢失"——哪怕刚保存过。
@@ -77,7 +79,16 @@ class MainWindow(QMainWindow):
         self._build_tabs()
         self._build_statusbar()
         self._refresh_status()
-        self.statusBar().showMessage("已新建空白工程" + self._last_project_hint(), 10000)
+        self.statusBar().showMessage(note + self._last_project_hint(), 20000)
+
+    @staticmethod
+    def _new_project_defaults() -> tuple[ProjectState, str]:
+        try:
+            state = new_demo_project()
+        except (BankImportError, OSError, ValueError) as exc:
+            # 资源缺失不能让管理端打不开；保留手动导入的入口并说明补救方法。
+            return ProjectState(), f"默认示例题库加载失败：{exc}；请重新安装或使用「导入题库」。"
+        return state, f"新工程：已加载 {len(state.banks)} 个示例题库（仅供演示，正式考试请替换）"
 
     # ---------------------------------------------------------------- 构建
 
@@ -210,7 +221,7 @@ class MainWindow(QMainWindow):
     def new_project(self) -> None:
         if not self._confirm_discard():
             return
-        self.state = ProjectState()
+        self.state, default_note = self._new_project_defaults()
         self.project_path = None
         self.project_passphrase = None
         self._dirty = False
@@ -218,7 +229,7 @@ class MainWindow(QMainWindow):
         self.project_passphrase: str | None = None
         note = self._ensure_project_dir()
         self._reload_tabs()
-        self.statusBar().showMessage(note or "已新建工程", 8000)
+        self.statusBar().showMessage(note or default_note, 20000)
 
     def _ensure_project_dir(self) -> str | None:
         """目录失效（U 盘拔出/共享盘离线）时回退到默认位置。"""

@@ -1,4 +1,4 @@
-"""启动空白工程 + 打开上次工程 + 打包自动保存。"""
+"""启动含默认示例题库的新工程 + 打开上次工程 + 打包自动保存。"""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def _mute(monkeypatch) -> None:
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0, raising=False)
 
 
-def test_startup_is_blank_even_with_last_project(qapp, local_appdata, monkeypatch) -> None:
+def test_startup_uses_defaults_instead_of_last_project(qapp, local_appdata, monkeypatch) -> None:
     from app.ui.app_settings import LAST_PROJECT, settings
     from app.ui.main_window import MainWindow
 
@@ -59,12 +59,14 @@ def test_startup_is_blank_even_with_last_project(qapp, local_appdata, monkeypatc
 
     win = MainWindow()
     try:
-        assert win.project_path is None, "启动必须是空白工程"
+        assert win.project_path is None, "启动不能自动打开上次工程"
+        assert win.banks_tab.table.rowCount() > 0, "新工程应加载默认示例题库"
         assert win.act_last.isEnabled(), "有上次工程时按钮应可用"
 
         win.open_last_project()
         assert win.project_path == proj
         assert win.state.students == [7]
+        assert win.banks_tab.table.rowCount() == 0, "不能把示例混入上次工程"
     finally:
         win.deleteLater()
 
@@ -108,7 +110,7 @@ def test_autosave_saves_project_and_last_project(qapp, local_appdata, monkeypatc
         proj = found[0]
         assert settings().value(LAST_PROJECT, "", type=str) == str(proj)
 
-        # 下次启动是空白；点"打开上次工程"能读回
+        # 下次启动是默认新工程；点"打开上次工程"能读回
         win2 = MainWindow()
         try:
             assert win2.project_path is None

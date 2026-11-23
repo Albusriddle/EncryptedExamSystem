@@ -58,8 +58,13 @@ uv sync --locked --python 3.13 --extra gui --extra build --group dev
 uv run --locked python -m app
 ```
 
-In the GUI, import banks, configure students/sessions, generate a master key and
-build the student package. On Linux the default output is `dist/StudentClient`
+New projects automatically load the repository's math, English and question-type
+showcase banks from `banks/demo/`, including in the standalone bundle. These are
+**demo content only**, not production exam banks. Remove them before importing
+your own banks for a real exam. Opening a saved project keeps its banks unchanged.
+
+In the GUI, configure students/sessions, generate a master key and build the
+student package. On Linux the default output is `dist/StudentClient`
 (without `.exe`). The template is `target/release/exam-client`; the builder sets
 the output's executable permission. Keep the master key private using the GUI's
 explicit copy/export workflow; never distribute it with student packages.
