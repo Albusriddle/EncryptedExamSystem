@@ -575,6 +575,38 @@ fn ip_login_limit_blocks_the_21st_attempt() {
     assert_status(&other, 200, "另一个 IP 不应受影响");
 }
 
+/// 格式错误的请求不应消耗「按 IP」的登录配额。
+///
+/// 为什么重要：同一 NAT 后面全班共用一个 IP 桶。旧客户端、浏览器插件、扫描器
+/// 发几个坏请求就把名额占满，真实学生会被 429 挡在门外一分钟——现场表现为
+/// 「全班突然都登不上，过一会儿又好了」，极难排查。
+#[test]
+fn malformed_requests_do_not_consume_login_quota() {
+    let f = Fixture::new("bad-json-quota");
+    let limit = f.app.login_rate_limit as usize;
+
+    for _ in 0..limit + 5 {
+        let bad = f.route(&request(
+            "POST",
+            "/api/login",
+            peer(3),
+            b"not json".to_vec(),
+        ));
+        assert_status(&bad, 400, "非法 JSON 应 400");
+    }
+    // 合法 JSON 但缺学号：同样不是一次「登录尝试」。
+    for _ in 0..limit + 5 {
+        let missing = f.route(&post_json("/api/login", json!({"pin": "1"}), peer(3)));
+        assert_status(&missing, 400, "缺学号应 400");
+    }
+
+    assert_status(
+        &f.login_from(peer(3), STUDENT, None),
+        200,
+        "坏请求不得占用登录配额",
+    );
+}
+
 /// 同一学号（不同 IP）第 11 次必须 429。
 ///
 /// 为什么重要：只按 IP 限速挡不住「换 IP 继续试同一个学号的 PIN」。

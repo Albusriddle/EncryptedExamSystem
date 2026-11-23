@@ -437,6 +437,21 @@ fn route(app: &App, req: &Request) -> Response {
 fn login(app: &App, req: &Request) -> Response {
     // 只信 TCP 对端地址：x-forwarded-for 可伪造，用来绕过 IP 限速。
     let ip = req.peer;
+
+    let body: Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(_) => return Response::error(400, "请求不是合法 JSON"),
+    };
+    let Some(student_id) = body.get("student_id").and_then(Value::as_u64) else {
+        return Response::error(400, "缺少 student_id");
+    };
+    let pin = body.get("pin").and_then(Value::as_str).map(str::to_string);
+
+    // 按 IP 的计数放在「请求体解析成功、学号已拿到」之后。
+    //
+    // 为什么：同一 NAT 后面全班共用一个 IP 桶。旧客户端、浏览器插件、扫描器发几个
+    // 坏请求就把 60 个名额占满，真实学生会被 429 挡在门外一分钟（现场表现：
+    // 「全班突然都登不上，过一会儿又好了」）。挡 PIN 爆破靠的是下面的「每学号 10 次」。
     {
         let mut state = app.state.lock().unwrap();
         let now = app.now();
@@ -449,15 +464,6 @@ fn login(app: &App, req: &Request) -> Response {
         }
         entry.0 += 1;
     }
-
-    let body: Value = match serde_json::from_slice(&req.body) {
-        Ok(v) => v,
-        Err(_) => return Response::error(400, "请求不是合法 JSON"),
-    };
-    let Some(student_id) = body.get("student_id").and_then(Value::as_u64) else {
-        return Response::error(400, "缺少 student_id");
-    };
-    let pin = body.get("pin").and_then(Value::as_str).map(str::to_string);
 
     {
         let mut state = app.state.lock().unwrap();
