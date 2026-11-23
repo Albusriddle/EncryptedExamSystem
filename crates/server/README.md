@@ -30,7 +30,7 @@ exam-builder build --manifest live.json --banks banks \
 
 # 2. 启动服务（教师机）
 exam-server --package StudentClient.exe --keyfile key.txt \
-  --port 8080 --answers-dir answers
+  --port 8080 --answers-dir answers --time-check warn
 
 # 3. 学生浏览器访问
 #    http://<教师机 IP>:8080/
@@ -46,6 +46,13 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `--port` | 端口，默认 `8080` |
 | `--session` | 指定场次；默认选当前时间窗内的场次 |
 | `--answers-dir` | 交卷答题卡输出目录，默认 `answers/` |
+| `--state-dir` | 作答状态目录，默认 `<answers-dir>/state` |
+| `--time-check` | `off` / `warn`（默认，只告警）/ `require`（不通过拒绝启动） |
+| `--time-tolerance` | 允许的本机与网络时间偏差，默认 `120` 秒（夹取到 30–86400） |
+
+启动时会先做一次三源网络时间校验并打印结论（本地时间 / 网络时间 / 偏差 / 生效偏移）。
+默认 `warn`：没有外网的隔离局域网会打印「取时失败，仅告警」后继续启动；
+`require` 适合确实有外网、又要求时间强一致的考场。
 
 ## 接口（原型）
 
@@ -56,7 +63,7 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `GET` | `/api/paper` | 本人试卷 + 已保存答案（不含标准答案） |
 | `PUT` | `/api/answer` | `{qid, value}`，单题 ≤1 MiB，整卡 ≤16 MiB |
 | `POST` | `/api/submit` | 冻结并写出 `.eea` |
-| `GET` | `/api/time` | 服务器时间与剩余秒数 |
+| `GET` | `/api/time` | 服务器时间与剩余秒数；附带 `time_mode` / `clock_offset_secs` 便于排障 |
 
 ## 已具备（阶段 1 进行中）
 
@@ -67,14 +74,19 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 - 登录限速：按 IP 与学号各一分钟窗口；
 - 到点自动冻结：过期后首次请求会自动导出答题卡；
 - 事件日志：`<answers-dir>/events.jsonl`；
-- 代码题：CodeMirror 5（行号 + C/C++/Java/JS/Go/Rust/Python 高亮），静态资源内嵌。
+- 代码题：CodeMirror 5（行号 + C/C++/Java/JS/Go/Rust/Python 高亮），静态资源内嵌；
+- **启动校时（v1.4.3）**：三源中位数校验网络时间，偏差存成时钟偏移供场次判定使用；
+- **状态文件权限收紧（v1.4.3）**：Windows 受保护 DACL（仅当前用户）/ Unix `0600`、`0700`，
+  旧文件在启动时补收紧。
 
 ## 已知限制
 
 - HTTP 明文（按约定只用于隔离局域网）；
 - 状态文件是加密 JSON（不是 SQLite）；没有管理端监控页；
 - 多标签页只靠单会话 token 顶掉旧页面，没有强制关闭；
-- 网络时间未校验，依赖教师机系统时钟。
+- 隔离局域网没有外网时取时必然失败：默认档只告警，此时场次判定退回教师机系统时钟，
+  需要现场确认时钟（`--time-check require` 可让它在取时失败时拒绝启动）；
+- 换一个 Windows 账户启动服务会读不到旧状态文件（受保护 DACL 只给原账户），断线恢复随之失效。
 
 ## 下一步（阶段 1）
 
