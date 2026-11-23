@@ -208,7 +208,8 @@ docs/                本文档集（含题库规范、出题质检与难度口�
 tools/bank_qc/       题库门禁与难度评分（verify_bank / score_bank）
 schemas/             题库 / manifest 的 JSON Schema（由 pydantic 生成，有漂移检查）
 scripts/             verify-embed / preflight-release / make-release-zip / release_body /
-                     run-admin-tests / smoke-answers / smoke-web / drill-web
+                     run-admin-tests / smoke-answers / smoke-web / drill-web /
+                     bump-version（发版只改标记位）
 licenses/            LGPL-3.0 / GPL-3.0 全文
 worker/              Cloudflare Worker 时间服务（**目录为空，未实现**）
 ```
@@ -222,7 +223,7 @@ worker/              Cloudflare Worker 时间服务（**目录为空，未实现
 | Rust | 291 个 `#[test]` |
 | Python | 372 用例（`pytest` 收集口径，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
-| 发布预检 | `scripts/preflight-release.sh` 14 项（非 `--full`） |
+| 发布预检 | `scripts/preflight-release.sh` 15 项（非 `--full`） |
 | CI | 8 个 job：`rust` / `python` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `tools-scripts` / `web-smoke` |
 
 > 数字会随提交变化，**以 CI 与脚本输出为准**。发布预检的项数看脚本最后一行
