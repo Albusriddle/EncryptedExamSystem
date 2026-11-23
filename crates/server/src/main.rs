@@ -29,6 +29,9 @@ const MAX_BODY: usize = 20 * 1024 * 1024;
 mod clock;
 mod secure_fs;
 
+#[cfg(test)]
+mod server_tests;
+
 /// 仅测试用的「密封阶段」观察点。
 ///
 /// 用来证明 [`seal_and_export`]（加密答题卡 + 写盘）**没有**在持有 `App::state` 锁时执行。
@@ -698,11 +701,21 @@ fn save_answer(app: &App, req: &Request) -> Response {
         _ => value.to_string(),
     };
     let value = normalized.as_str();
-    st.answers.insert(qid.to_string(), value.to_string());
-    let total: usize = st.answers.values().map(String::len).sum();
+    // 先算「换成这一题之后」的总量，再决定写不写：v1.4.3 及以前是先 insert 再算总量，
+    // 返回 413 时那份超限答案已经留在内存里了——下次交卷会被写进答题卡与状态文件、
+    // 重启后还会被恢复，「拒绝」等于没拒绝。
+    let previous = st.answers.get(qid).map_or(0, String::len);
+    let total: usize = st
+        .answers
+        .values()
+        .map(String::len)
+        .sum::<usize>()
+        .saturating_sub(previous)
+        .saturating_add(value.len());
     if total > 16 * 1024 * 1024 {
         return Response::error(413, "整卡答案超过 16 MiB");
     }
+    st.answers.insert(qid.to_string(), value.to_string());
     st.last_seen = app.now();
     Response::json(200, json!({"ok": true}))
 }
