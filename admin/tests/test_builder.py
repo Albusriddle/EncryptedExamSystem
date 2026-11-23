@@ -21,6 +21,7 @@ MASTER = "ab" * 32  # 64 hex
 # stub 文件名与平台相关（tab_build.default_stub 用 os.name 判断）。
 # 测试若写死 ".exe"，在 Linux CI 上必然失败——这正是真跑 UI 测试后才暴露的。
 STUB_NAME = "stub-template.exe" if os.name == "nt" else "stub-template"
+OUTPUT_NAME = "StudentClient.exe" if os.name == "nt" else "StudentClient"
 
 
 def _paths(tmp_path: Path) -> dict[str, Path]:
@@ -222,7 +223,7 @@ def test_default_out_when_frozen_is_writable_user_dir(
 
     out = tab_build.default_out()
     assert out.parent == desktop
-    assert out.name.endswith(".exe")
+    assert out.name == OUTPUT_NAME
 
 
 def test_default_paths_not_frozen_use_repo_layout(
@@ -235,7 +236,7 @@ def test_default_paths_not_frozen_use_repo_layout(
 
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     assert "target" in str(tab_build.default_stub())
-    assert tab_build.default_out().name == "StudentClient.exe"
+    assert tab_build.default_out().name == OUTPUT_NAME
 
 
 def test_default_out_skips_unwritable_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

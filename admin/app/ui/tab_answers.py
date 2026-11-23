@@ -45,6 +45,7 @@ from app.core.grading import (
     score_table,
     summarize,
 )
+from app.core.paths import package_file_filter
 from app.core.state import ProjectState
 from app.core.subproc import no_window_kwargs
 from app.ui.tab_build import builder_exe
@@ -490,9 +491,7 @@ class AnswersTab(QWidget):
     # ---------------------------------------------------------------- 文件
 
     def _pick_package(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择学生端包", "", "可执行文件 (*.exe);;所有文件 (*)"
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "选择学生端包", "", package_file_filter())
         if path:
             self.pkg.setText(path)
 

@@ -223,6 +223,23 @@
 
 ## 6. 从源码构建
 
+### Arch Linux（原生运行，无需 Wine）
+
+安装 Arch 依赖后，在仓库根执行：
+
+```bash
+bash scripts/build-linux.sh              # Rust 产物 + 隔离的 Python GUI 环境 + 自检
+bash scripts/run-admin.sh                # 教师管理端
+# 可选：生成 dist/ExamAdmin-<版本>-linux.zip
+bash scripts/build-linux.sh --package
+```
+
+依赖安装、Wayland/X11、学生端运行、XDG 数据目录与排错见
+**[Arch Linux 指南](docs/arch-linux.md)**。Linux 学生端是无扩展名的原生 ELF，
+不是 Windows `.exe`；请为不同操作系统分别构建和分发。
+
+### 通用构建
+
 前置：Rust（见 `rust-toolchain.toml`）、Python 3.11+、[uv](https://github.com/astral-sh/uv)；Windows 管理端另需 PySide6 / PyInstaller。
 
 ```bash
@@ -362,6 +379,7 @@ ExamAdmin-<版本>/
 | [架构与实施方案](docs/保密考试系统_架构与实施方案.md) | 维护者 / 接手人 | 设计取舍、里程碑、踩过的坑 |
 | [代码审阅报告](docs/代码审阅报告.md) | 维护者 | 129 轮审阅的问题索引、技术无解项、复跑方式（轮次以该报告为准） |
 | [发布说明](docs/release-notes.md) | 教师 / 下载者 | 逐版本变更、已知限制、校验口径 |
+| [Arch Linux 指南](docs/arch-linux.md) | Linux 教师 / 学生 / 维护者 | 原生构建、依赖、发布包、Wayland/X11、XDG 路径与排错 |
 | [题库质检 skill](.agents/skills/question-bank-qc/SKILL.md) | 出题 / 质检 | 双盲生产、门禁复核、修复复审流程 |
 | [bank_qc 工具](tools/bank_qc/README.md) | 出题 / 质检 | 口径的唯一执行者；`verify_bank.py` / `score_bank.py` 用法与能力边界 |
 

@@ -19,14 +19,10 @@ from app.ui.main_window import MainWindow
 
 
 def log_dir() -> Path:
-    """崩溃日志目录：优先 %LOCALAPPDATA%，不可写则退回程序所在目录。"""
-    import os
+    """崩溃日志优先写入用户状态目录，不可写再回退。"""
+    from app.core.paths import state_dir
 
-    base = os.environ.get("LOCALAPPDATA")
-    candidates = []
-    if base:
-        candidates.append(Path(base) / "ExamSystem")
-    candidates.append(Path(sys.executable).parent)
+    candidates = [state_dir(), Path(sys.executable).parent]
     for c in candidates:
         try:
             c.mkdir(parents=True, exist_ok=True)
