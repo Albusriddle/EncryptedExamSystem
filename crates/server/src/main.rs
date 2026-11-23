@@ -29,6 +29,34 @@ const MAX_BODY: usize = 20 * 1024 * 1024;
 mod clock;
 mod secure_fs;
 
+/// 仅测试用的「密封阶段」观察点。
+///
+/// 用来证明 [`seal_and_export`]（加密答题卡 + 写盘）**没有**在持有 `App::state` 锁时执行。
+/// 同线程里 `try_lock` 对自己的锁必然失败，所以这个断言是确定性的，不靠计时：
+/// 旧实现（锁内冻结）会让 `state.try_lock()` 返回 `Err`，新实现则成功。
+///
+/// 只在测试构建里存在，release 二进制里没有任何开关。
+#[cfg(test)]
+pub(crate) mod seal_hook {
+    use std::sync::{Arc, Mutex};
+
+    pub(crate) type Observer = Arc<dyn Fn(bool) + Send + Sync>;
+
+    static OBSERVER: Mutex<Option<Observer>> = Mutex::new(None);
+
+    pub(crate) fn set(observer: Option<Observer>) {
+        *OBSERVER.lock().unwrap() = observer;
+    }
+
+    /// `started = true` 表示刚进入密封阶段，`false` 表示即将返回。
+    pub(crate) fn notify(started: bool) {
+        let observer = OBSERVER.lock().unwrap().as_ref().cloned();
+        if let Some(observer) = observer {
+            observer(started);
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "exam-server",
@@ -257,8 +285,7 @@ fn main() -> Result<()> {
         state: Mutex::new(State::default()),
     });
 
-    let addr = format!("{}:{}", cli.bind, cli.port);
-    let listener = TcpListener::bind(&addr).with_context(|| format!("监听 {addr} 失败"))?;
+    let listener = bind_listener(&cli.bind, cli.port)?;
     println!("考试服务已启动：http://{}:{}/", local_ip(), cli.port);
     println!(
         "场次 #{session_id}；答题卡输出到 {}",
@@ -300,6 +327,18 @@ fn local_ip() -> String {
         })
         .map(|a| a.ip().to_string())
         .unwrap_or_else(|_| "127.0.0.1".into())
+}
+
+/// 绑定监听端口。
+///
+/// 抽成函数是为了让「端口被占用」这条失败分支能被测试直接覆盖——`main` 里没法在
+/// 同一进程内先占住端口再调一次 `bind`。错误信息要说清「怎么办」：占用是现场最常见的
+/// 启动失败原因，只抛 `Address already in use` 老师看不懂。
+fn bind_listener(bind: &str, port: u16) -> Result<TcpListener> {
+    let addr = format!("{bind}:{port}");
+    TcpListener::bind(&addr).with_context(|| {
+        format!("监听 {addr} 失败：端口可能已被其他程序占用（换端口或先关掉占用它的程序）")
+    })
 }
 
 /// 启动时收紧状态目录，并给升级前已经落盘的旧状态文件补一次权限。
@@ -562,17 +601,35 @@ fn paper(app: &App, req: &Request) -> Response {
     )
 }
 
+/// 某场次的时间窗；场次不存在或包坏了返回 `(0, 0)`（调用方按「没有窗口」处理）。
 fn session_window(app: &App, session_id: u32) -> (u64, u64) {
+    session_windows(app)
+        .get(&session_id)
+        .copied()
+        .unwrap_or((0, 0))
+}
+
+/// 一次解析出所有场次的时间窗。
+///
+/// 解析 header 要解密 + 反序列化，单个请求量级还好，但 `sweep_tick` 是按学生循环的：
+/// 每个学生解一次 header 纯属浪费（50 人就是 50 次 AES-GCM），所以那里先解一次。
+fn session_windows(app: &App) -> HashMap<u32, (u64, u64)> {
     let Ok((header, _)) = container::parse_header(&app.payload, &app.k_manifest) else {
-        return (0, 0);
+        return HashMap::new();
     };
-    let Some(s) = header.sessions.iter().find(|s| s.session_id == session_id) else {
-        return (0, 0);
-    };
-    (
-        timegate::parse_rfc3339(&s.start).unwrap_or(0),
-        timegate::parse_rfc3339(&s.end).unwrap_or(0),
-    )
+    header
+        .sessions
+        .iter()
+        .map(|s| {
+            (
+                s.session_id,
+                (
+                    timegate::parse_rfc3339(&s.start).unwrap_or(0),
+                    timegate::parse_rfc3339(&s.end).unwrap_or(0),
+                ),
+            )
+        })
+        .collect()
 }
 
 fn save_answer(app: &App, req: &Request) -> Response {
@@ -657,42 +714,98 @@ fn submit(app: &App, req: &Request) -> Response {
     let Some(token) = cookie_token(req) else {
         return Response::error(401, "未登录");
     };
-    let mut state = app.state.lock().unwrap();
-    let Some(st) = state.students.get_mut(&token) else {
-        return Response::error(401, "登录已失效");
+
+    // 第一段（持锁）：判重 + 抢占 + 克隆快照。
+    //
+    // 交卷是全场最容易撞车的一刻（下课铃一响所有人一起点），所以这里和自动收卷一样
+    // 把「加密 + 写盘」放到锁外：否则 50 个人同时交卷时，第一个人加密答题卡的几十毫秒里
+    // 其余 49 个请求全堵在锁上，页面表现为「点了没反应」。
+    let snapshot = {
+        let mut state = app.state.lock().unwrap();
+        let Some(st) = state.students.get_mut(&token) else {
+            return Response::error(401, "登录已失效");
+        };
+        if st.submitted {
+            if let Some(name) = st.exported.clone() {
+                if app.answers_dir.join(&name).is_file() {
+                    return Response::json(200, json!({"ok": true, "already": true, "file": name}));
+                }
+                // 状态说已交卷，但答题卡文件不见了（被手工删掉、盘符换了、目录被清）。
+                // 退回去重写一份：学生没有卡比重复写一份严重得多。
+                st.exported = None;
+                st.submitted = false;
+            } else {
+                return Response::json(200, json!({"ok": true, "already": true, "file": null}));
+            }
+        }
+        // 抢占：先把 submitted 置位，避免与自动收卷同时冻结（会写出两份同名校验一致的
+        // .eea，事件日志也会重复）。失败时回滚，见第三段。
+        st.submitted = true;
+        FreezeSnapshot {
+            token: token.clone(),
+            student_id: st.student_id,
+            session_id: st.session_id,
+            paper: st.paper.clone(),
+            answers: st.answers.clone(),
+        }
     };
-    if st.submitted {
-        return Response::json(
-            200,
-            json!({"ok": true, "already": true, "file": st.exported}),
-        );
-    }
-    match finalize(app, st) {
-        Ok(name) => Response::json(200, json!({"ok": true, "file": name})),
-        Err(e) => Response::error(500, e),
+
+    // 第二段（不持锁）：密封 + 写盘 + 写状态 + 记事件。
+    let now = app.now();
+    let result = seal_and_export(
+        app,
+        snapshot.student_id,
+        snapshot.session_id,
+        &snapshot.paper,
+        &snapshot.answers,
+        now,
+    );
+
+    // 第三段（持锁）：回填结果。
+    let mut state = app.state.lock().unwrap();
+    let Some(st) = state.students.get_mut(&snapshot.token) else {
+        // 锁外被重新登录顶掉：卡已经写出、事件也记了，无需回填。
+        return match result {
+            Ok(name) => Response::json(200, json!({"ok": true, "file": name})),
+            Err(e) => Response::error(500, e),
+        };
+    };
+    match result {
+        Ok(name) => {
+            st.exported = Some(name.clone());
+            st.last_seen = now;
+            Response::json(200, json!({"ok": true, "file": name}))
+        }
+        Err(e) => {
+            st.submitted = false; // 撤回抢占：让学生能再试一次
+            Response::error(500, e)
+        }
     }
 }
 
-/// 冻结并写出答题卡，同时把状态落盘；幂等。
-fn finalize(app: &App, st: &mut Student) -> Result<String, String> {
-    if let Some(name) = &st.exported {
-        if app.answers_dir.join(name).is_file() {
-            st.submitted = true;
-            return Ok(name.clone());
-        }
-        st.exported = None;
-    }
-    let now = app.now();
-    let mut sheet =
-        answer_sheet::AnswerSheet::from_paper(&st.paper, st.student_id, st.session_id, now);
-    let qids: Vec<String> = st
-        .paper
+/// 生成答题卡 → 落盘 → 写状态 → 记事件，**全程不接触 `App::state` 锁**。
+///
+/// 交卷接口与自动收卷都走这里：加密答题卡（AES-GCM）、写 `.eea`、加密写状态文件、
+/// 收紧文件 ACL，几十毫秒量级。攥着全局状态锁做的话（v1.4.3 及以前），这期间**所有
+/// 学生**的每次请求都堵在锁上，表现为「页面点了没反应」且日志里什么都没有。
+fn seal_and_export(
+    app: &App,
+    student_id: u64,
+    session_id: u32,
+    paper: &picker::Paper,
+    answers: &BTreeMap<String, String>,
+    now: u64,
+) -> Result<String, String> {
+    #[cfg(test)]
+    seal_hook::notify(true);
+    let mut sheet = answer_sheet::AnswerSheet::from_paper(paper, student_id, session_id, now);
+    let qids: Vec<String> = paper
         .sections
         .iter()
         .flat_map(|s| s.items.iter().map(|i| i.id.clone()))
         .collect();
     for (idx, qid) in qids.iter().enumerate() {
-        if let Some(v) = st.answers.get(qid) {
+        if let Some(v) = answers.get(qid) {
             sheet.set_answer(idx, Some(v.clone()), now);
         }
     }
@@ -701,19 +814,31 @@ fn finalize(app: &App, st: &mut Student) -> Result<String, String> {
         answer_sheet::seal(&app.k_manifest, &sheet).map_err(|e| format!("生成答题卡失败：{e}"))?;
     let name = format!(
         "answers-{}-{}-{}.eea",
-        st.student_id,
-        st.session_id,
+        student_id,
+        session_id,
         &sheet.paper_fingerprint[..8]
     );
     std::fs::write(app.answers_dir.join(&name), &bytes)
         .map_err(|e| format!("写入答题卡失败：{e}"))?;
-    st.submitted = true;
-    st.exported = Some(name.clone());
-    st.last_seen = now;
-    app.save_state(st)
+    app.write_state(student_id, session_id, answers, true, Some(&name))
         .map_err(|e| format!("保存状态失败：{e}"))?;
-    let _ = app.log_event(st.student_id, "submit", &name);
+    let _ = app.log_event(student_id, "submit", &name);
+    #[cfg(test)]
+    seal_hook::notify(false);
     Ok(name)
+}
+
+/// 待冻结学生的数据快照（交卷接口与自动收卷共用）。
+///
+/// 克隆代价是卷面 + 作答（通常几十到几百 KB，上限 16 MiB）；换来的是加密与写盘
+/// 全部在锁外进行。拷的是**值**而不是引用，因为锁一放，`Student` 可能被另一条路径改、
+/// 被重新登录顶掉、或被当作长时间无活动清掉。
+struct FreezeSnapshot {
+    token: String,
+    student_id: u64,
+    session_id: u32,
+    paper: picker::Paper,
+    answers: BTreeMap<String, String>,
 }
 
 impl App {
@@ -744,15 +869,26 @@ impl App {
         Some((answers, submitted, exported))
     }
 
-    fn save_state(&self, st: &Student) -> std::io::Result<()> {
+    /// 把作答状态写盘（加密 + 原子替换 + 收紧权限）。
+    ///
+    /// 参数是**数据**而不是 `&Student`：交卷与自动收卷都要在锁外写状态，拿不到
+    /// `&mut Student`；传引用字段又能避免为了写盘把整份作答再克隆一次。
+    fn write_state(
+        &self,
+        student_id: u64,
+        session_id: u32,
+        answers: &BTreeMap<String, String>,
+        submitted: bool,
+        exported: Option<&str>,
+    ) -> std::io::Result<()> {
         let payload = json!({
-            "student_id": st.student_id,
-            "session_id": st.session_id,
-            "answers": st.answers,
-            "submitted": st.submitted,
-            "exported": st.exported,
+            "student_id": student_id,
+            "session_id": session_id,
+            "answers": answers,
+            "submitted": submitted,
+            "exported": exported,
         });
-        let path = self.state_path(st.student_id, st.session_id);
+        let path = self.state_path(student_id, session_id);
         let tmp = path.with_extension("json.tmp");
         let plain = payload.to_string().into_bytes();
         let sealed = crypto::encrypt(&self.state_key, &plain, b"web-state")
@@ -812,22 +948,91 @@ fn time_info(app: &App, req: &Request) -> Response {
     )
 }
 
+/// 周期任务：到点自动收卷 + 清理长时间无活动的 token。
+///
+/// **锁分段**（v1.4.4）：原来是一把锁从收集做到冻结，冻结一个人要 AES-GCM + 两次写盘
+/// + 一次 ACL 调用，期间所有学生的请求都堵在锁上。现在：
+/// 1. 锁外先把各场次的窗口解析好（`parse_header` 要解密 header，也很贵）；
+/// 2. 持锁只做内存遍历 + 克隆快照 + 清理超时 token；
+/// 3. 锁外做密封与写盘（`seal_and_export`）；
+/// 4. 再短暂持锁回填 `submitted` / `exported`。
 fn sweep_tick(app: &App) {
-    let mut state = app.state.lock().unwrap();
     let now = app.now();
-    let mut expired = Vec::new();
-    for (token, st) in state.students.iter_mut() {
-        let (_, end) = session_window(app, st.session_id);
-        if end != 0 && now > end && !st.submitted {
-            let _ = finalize(app, st);
+    // 场次窗口在进程生命周期内不变，锁外解析一次即可（每个学生都解析一次纯属浪费）。
+    let windows = session_windows(app);
+
+    // 第一阶段：持锁只做内存操作。
+    let mut pending: Vec<FreezeSnapshot> = Vec::new();
+    let mut stale: Vec<String> = Vec::new();
+    {
+        let mut state = app.state.lock().unwrap();
+        for (token, st) in state.students.iter() {
+            let end = windows.get(&st.session_id).map_or(0, |(_, end)| *end);
+            if end != 0 && now > end && !st.submitted {
+                pending.push(FreezeSnapshot {
+                    token: token.clone(),
+                    student_id: st.student_id,
+                    session_id: st.session_id,
+                    paper: st.paper.clone(),
+                    answers: st.answers.clone(),
+                });
+            }
+            if now.saturating_sub(st.last_seen) > 7200 {
+                stale.push(token.clone());
+            }
         }
-        if now.saturating_sub(st.last_seen) > 7200 {
-            expired.push(token.clone());
+
+        // 抢占：先在锁内置 `submitted`，避免「学生点交卷」与「自动收卷」同时冻结同一人
+        // （会写出两份同名校验一致的 .eea、事件日志重复两条，状态还会来回抖）。
+        // 锁外冻结失败时再撤回（见下），下一轮 sweep 会重试。
+        for snap in &pending {
+            if let Some(st) = state.students.get_mut(&snap.token) {
+                st.submitted = true;
+            }
+        }
+
+        // 待冻结的学生不能当「无活动」清掉：清掉就没人回填 `exported` 了，
+        // 虽然答题卡已经写盘，但 `/api/paper` 会显示「登录已失效」而不是「已交卷」。
+        let pending_tokens: std::collections::HashSet<&str> =
+            pending.iter().map(|s| s.token.as_str()).collect();
+        for token in stale {
+            if pending_tokens.contains(token.as_str()) {
+                continue;
+            }
+            if let Some(st) = state.students.remove(&token) {
+                state.tokens_by_student.remove(&st.student_id);
+            }
         }
     }
-    for token in expired {
-        if let Some(st) = state.students.remove(&token) {
-            state.tokens_by_student.remove(&st.student_id);
+
+    // 第二阶段：锁外加密与写盘。
+    for snap in pending {
+        let result = seal_and_export(
+            app,
+            snap.student_id,
+            snap.session_id,
+            &snap.paper,
+            &snap.answers,
+            now,
+        );
+        let mut state = app.state.lock().unwrap();
+        let Some(st) = state.students.get_mut(&snap.token) else {
+            // 锁外被清理或被重新登录顶掉：答题卡与事件已经落盘，不必再回填内存。
+            continue;
+        };
+        match result {
+            Ok(name) => {
+                st.exported = Some(name);
+                st.last_seen = now;
+            }
+            Err(e) => {
+                // 撤回抢占，让下一轮重试；否则这个学生会一直显示「已交卷」却没有答题卡。
+                st.submitted = false;
+                eprintln!(
+                    "自动收卷失败（学号 {}，场次 {}）：{e}",
+                    snap.student_id, snap.session_id
+                );
+            }
         }
     }
 }
