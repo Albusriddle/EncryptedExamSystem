@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use common::answer_sheet::{encode_fixes, encode_parts};
 use common::{answer_sheet, container, crypto, picker, timegate};
 use rand::RngCore;
 use serde_json::{Value, json};
@@ -61,6 +62,8 @@ struct App {
     answers_dir: PathBuf,
     state_dir: PathBuf,
     forced_session: Option<u32>,
+    state_key: [u8; 32],
+    conns: std::sync::atomic::AtomicUsize,
     gate: Gate,
     state: Mutex<State>,
 }
@@ -212,12 +215,15 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("创建状态目录 {}", state_dir.display()))?;
 
+    let state_key = *crypto::hkdf_derive(&k_manifest, b"web-state", "web-state");
     let app = Arc::new(App {
         payload: payload.to_vec(),
         k_manifest,
+        state_key,
         answers_dir: cli.answers_dir.clone(),
         state_dir,
         forced_session: cli.session,
+        conns: std::sync::atomic::AtomicUsize::new(0),
         gate: Gate::new(4),
         state: Mutex::new(State::default()),
     });
@@ -268,6 +274,18 @@ fn local_ip() -> String {
 }
 
 fn handle(app: Arc<App>, mut stream: TcpStream) -> Result<()> {
+    use std::sync::atomic::Ordering;
+    if app.conns.fetch_add(1, Ordering::SeqCst) >= 256 {
+        app.conns.fetch_sub(1, Ordering::SeqCst);
+        return Ok(());
+    }
+    struct Guard<'a>(&'a std::sync::atomic::AtomicUsize);
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _guard = Guard(&app.conns);
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let Some(req) = read_request(&mut stream)? else {
         return Ok(());
@@ -527,15 +545,37 @@ fn save_answer(app: &App, req: &Request) -> Response {
     if end != 0 && now_unix() > end {
         return Response::error(409, "考试已结束");
     }
-    let exists = st
+    let Some(item) = st
         .paper
         .sections
         .iter()
         .flat_map(|s| &s.items)
-        .any(|i| i.id == qid);
-    if !exists {
+        .find(|i| i.id == qid)
+    else {
         return Response::error(400, "题目不在本卷中");
-    }
+    };
+    // 填空/改错在离线客户端是 JSON 编码；网页端按“每行一个答案”转换，
+    // 否则收卷判分会把它们当空。
+    let normalized = match item.qtype.as_str() {
+        "fill" => {
+            let parts: Vec<String> = value.lines().map(|l| l.trim().to_string()).collect();
+            encode_parts(&parts)
+        }
+        "fix" => {
+            let mut fixes: Vec<(String, String)> = Vec::new();
+            for line in value.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let (no, ans) = line.split_once([' ', '\t', ':']).unwrap_or((line, ""));
+                fixes.push((no.trim().to_string(), ans.trim().to_string()));
+            }
+            encode_fixes(&fixes)
+        }
+        _ => value.to_string(),
+    };
+    let value = normalized.as_str();
     st.answers.insert(qid.to_string(), value.to_string());
     let total: usize = st.answers.values().map(String::len).sum();
     if total > 16 * 1024 * 1024 {
@@ -623,7 +663,7 @@ impl App {
         session_id: u32,
     ) -> Option<(BTreeMap<String, String>, bool, Option<String>)> {
         let raw = std::fs::read(self.state_path(student_id, session_id)).ok()?;
-        let plain = crypto::decrypt(&self.k_manifest, &raw, b"web-state").ok()?;
+        let plain = crypto::decrypt(&self.state_key, &raw, b"web-state").ok()?;
         let v: Value = serde_json::from_slice(&plain).ok()?;
         let answers = v
             .get("answers")?
@@ -650,7 +690,7 @@ impl App {
         let path = self.state_path(st.student_id, st.session_id);
         let tmp = path.with_extension("json.tmp");
         let plain = payload.to_string().into_bytes();
-        let sealed = crypto::encrypt(&self.k_manifest, &plain, b"web-state")
+        let sealed = crypto::encrypt(&self.state_key, &plain, b"web-state")
             .map_err(|e| std::io::Error::other(format!("加密状态失败：{e}")))?;
         std::fs::write(&tmp, sealed)?;
         std::fs::rename(&tmp, &path)?;

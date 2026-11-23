@@ -84,6 +84,32 @@ async function login() {
   } catch (e) { $('loginMsg').textContent = e.message; }
 }
 
+function escapeHtml(t) { return t.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// 只支持题库实际用到的 Markdown 子集：图片与围栏代码，其余按纯文本显示。
+function renderStem(text) {
+  const box = document.createElement('div');
+  const parts = String(text || '').split(/```/);
+  parts.forEach((part, i) => {
+    if (i % 2 === 1) {
+      const pre = document.createElement('pre'); pre.className = 'stem'; pre.textContent = part.replace(/^[\w+-]*\n/, ''); box.appendChild(pre);
+      return;
+    }
+    const lines = part.split('\n');
+    let buf = [];
+    const flush = () => { if (buf.length) { const pre = document.createElement('pre'); pre.className = 'stem'; pre.textContent = buf.join('\n'); box.appendChild(pre); buf = []; } };
+    for (const line of lines) {
+      const m = line.match(/^\s*!\[([^\]]*)\]\((data:image\/(?:png|jpeg);base64,[^)]+)\)\s*$/);
+      if (m) {
+        flush();
+        const img = document.createElement('img'); img.alt = m[1]; img.src = m[2]; img.style.maxWidth = '100%'; box.appendChild(img);
+      } else { buf.push(line); }
+    }
+    flush();
+  });
+  return box;
+}
+
 function render(data) {
   $('title').textContent = `学号 ${data.student_id} · 场次 #${data.session_id}`;
   const box = $('questions'); box.innerHTML = '';
@@ -94,7 +120,7 @@ function render(data) {
       n++;
       const q = document.createElement('div'); q.className = 'card q';
       const no = document.createElement('div'); no.className = 'qno'; no.textContent = `${n}. （${item.score} 分）`; q.appendChild(no);
-      const stem = document.createElement('pre'); stem.className = 'stem'; stem.textContent = item.stem; q.appendChild(stem);
+      q.appendChild(renderStem(item.stem));
       const body = item.body || {};
       if (body.kind === 'options' && body.options && body.options.length) {
         const ol = document.createElement('pre'); ol.className = 'stem';
@@ -110,7 +136,9 @@ function render(data) {
       const ta = document.createElement('textarea');
       ta.dataset.qid = item.id; ta.value = answers[item.id] || '';
       if (item.qtype === 'code') ta.className = 'code';
-      ta.placeholder = '在此作答（自动保存）';
+      ta.placeholder = item.qtype === 'fill' ? '每个空一行，按 ①②③ 顺序填写；自动保存'
+        : item.qtype === 'fix' ? '每行一条：行号 改正后的代码（例如 3 return x*x;）；自动保存'
+        : '在此作答（自动保存）';
       ta.addEventListener('input', () => { answers[item.id] = ta.value; dirty.add(item.id); scheduleSave(); });
       q.appendChild(ta);
       if (item.qtype === 'code' && window.CodeMirror) {
@@ -144,7 +172,7 @@ function updateClock(data) {
     try {
       const t = await api('/api/time');
       $('clock').textContent = '剩余 ' + fmt(t.end_unix - t.server_time);
-      if (t.remaining <= 0 && !submitted) { submitted = true; await submit(true); }
+      if (t.remaining <= 0 && !submitted) { await submit(true); }
     } catch { $('clock').textContent = ''; }
   };
   tick(); setInterval(tick, 15000);
@@ -152,12 +180,15 @@ function updateClock(data) {
 
 function lockAll() { document.querySelectorAll('textarea').forEach(t => t.disabled = true); $('submitBtn').disabled = true; }
 
+let submitting = false;
 async function submit(auto = false) {
-  if (submitted && !auto) return;
+  if (submitted || submitting) return;
   if (!auto && !confirm('交卷后不可再修改，确定交卷吗？')) return;
+  submitting = true;
   await saveDirty();
   try { await api('/api/submit', { method: 'POST', body: '{}' }); submitted = true; lockAll(); toast('已交卷'); }
   catch (e) { toast('交卷失败：' + e.message); }
+  finally { submitting = false; }
 }
 
 $('loginBtn').addEventListener('click', login);
