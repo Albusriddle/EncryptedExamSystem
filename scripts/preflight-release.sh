@@ -196,6 +196,20 @@ else
   bad "版本不一致：VERSION=$V Cargo=$CV pyproject=$PV"
 fi
 
+# ---------------------------------------------------------------- 6c. 版本标记只落在标记位
+
+head_ "6c. 版本标记一致（bump_version --check）"
+# 发版时「全库替换版本号」会误改文档里的历史叙述（`vX.Y.Z 起`、历史发版小节、
+# 审阅轮次标题）。这里机械检查所有**标记位**是否都等于 VERSION，漏改一处就红。
+mkdir -p "$ROOT/target"
+VMARK_LOG="$ROOT/target/version-markers.log"
+if PYTHONIOENCODING=utf-8 python "$ROOT/scripts/bump_version.py" --check >"$VMARK_LOG" 2>&1; then
+  ok "版本标记一致（历史叙述未被误改）"
+else
+  bad "版本标记不一致：$(tail -3 "$VMARK_LOG" | tr '\n' ' ')"
+fi
+rm -f "$VMARK_LOG"
+
 # ---------------------------------------------------------------- 7. 许可证合规
 
 head_ "7. 许可证合规（Apache-2.0 分发 + PySide6 LGPL-3.0）"
