@@ -288,3 +288,7 @@ jobs:
         run: |
           cargo build --release -p server -p builder -p client
           bash scripts/smoke-web.sh
+      # 12 人并发演练：登录 / 作答 / kill -9 后重启恢复 / 并发交卷 / 收卡校验。
+      # 规模压到 12 人是为了 CI 时长；本地可用 --students 40 做考场规模演练。
+      - name: 并发演练（12 人，含崩溃恢复）
+        run: bash scripts/drill-web.sh --students 12

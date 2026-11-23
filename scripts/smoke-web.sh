@@ -10,7 +10,20 @@ BUILDER="$BIN/exam-builder$EXE"; CLIENT="$BIN/exam-client$EXE"; SERVER="$BIN/exa
 WORK="target/web-smoke"
 rm -rf "$WORK"
 mkdir -p "$WORK"
-PY=$(command -v python3 || command -v python)
+# 挑一个**真的能跑**的解释器：Windows 上 `python3` 可能指向应用商店占位程序，
+# 一执行就失败（退出码 49），会让冒烟在莫名其妙的「python 没输出」上报错。
+pick_python() {
+  local cand
+  for cand in python3 python; do
+    if command -v "$cand" >/dev/null 2>&1 \
+      && "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+PY="$(pick_python)" || { echo "缺少可用的 Python 3.10+"; exit 2; }
 PORT="${EES_WEB_PORT:-$($PY -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")}"
 PID=""
 cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null || true; }  # 保留 $WORK 便于失败排查
