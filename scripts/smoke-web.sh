@@ -21,8 +21,8 @@ trap cleanup EXIT
 [ -x "$SERVER" ] || { echo "缺少 $BIN/exam-server"; exit 1; }
 
 MASTER=$("$BUILDER" keygen 2>/dev/null)
-START=$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
-END=$(date -u -d '2 hours' +%Y-%m-%dT%H:%M:%SZ)
+START=$($PY -c "import datetime;print((datetime.datetime.now(datetime.UTC)-datetime.timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+END=$($PY -c "import datetime;print((datetime.datetime.now(datetime.UTC)+datetime.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
 cat > "$WORK/live.json" <<JSON
 {"version":2,"salt":"00112233445566778899aabbccddeeff","sessions":[
  {"session_id":1,"start":"$START","end":"$END","students":[2021001],
