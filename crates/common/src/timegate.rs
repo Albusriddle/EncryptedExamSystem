@@ -76,6 +76,19 @@ impl TimeSource for HttpsDateSource {
     }
 }
 
+/// 默认三源：只要"能上网"就通的国内大站（HTTPS 443，不用 UDP 123）。
+///
+/// **学生端与服务端共用同一份**。以前学生端在自己的 `workflow.rs` 里私有一份，
+/// 服务端再抄一份的话，两侧的取时口径会悄悄分叉：同一台机器在两端算出不同的
+/// "现在"，排查时会以为是时钟问题而不是配置问题。
+pub fn default_sources() -> Vec<Box<dyn TimeSource>> {
+    vec![
+        Box::new(HttpsDateSource::new("https://www.baidu.com", "baidu")),
+        Box::new(HttpsDateSource::new("https://www.aliyun.com", "aliyun")),
+        Box::new(HttpsDateSource::new("https://www.tencent.com", "tencent")),
+    ]
+}
+
 /// 发一个 HTTPS GET，只取 `Date` 响应头。
 #[cfg(windows)]
 fn fetch_date_header(url: &str, timeout: Duration) -> Result<String, String> {
@@ -766,6 +779,17 @@ mod tests {
             name: name.into(),
             value: v,
         })
+    }
+
+    /// 默认三源是学生端与服务端共用的唯一口径：名字和数量都不能悄悄改，
+    /// 否则两端日志对不上，也不容易发现"一端改了另一端没改"。
+    #[test]
+    fn default_sources_are_three_named_sources() {
+        let sources = default_sources();
+        let names: Vec<&str> = sources.iter().map(|s| s.name()).collect();
+        assert_eq!(names, vec!["baidu", "aliyun", "tencent"]);
+        // 2 个源是放行下限，第 3 个源才能靠中位数吃掉一个撒谎的源。
+        assert_eq!(sources.len(), 3, "默认源必须有三源，否则中位数失去纠错能力");
     }
 
     #[test]

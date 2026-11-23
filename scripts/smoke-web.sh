@@ -38,10 +38,14 @@ EXAM_MASTER=$MASTER "$BUILDER" build \
   --port "$PORT" --answers-dir "$WORK/answers" >"$WORK/server.log" 2>&1 &
 PID=$!
 
-for _ in $(seq 1 40); do
+# 启动时先做一次网络时间校验（默认 warn 档，无外网时最多等约 6 秒），
+# 所以就绪等待要给到 20 秒；上界放宽后仍用轮询，通了就立刻继续。
+for _ in $(seq 1 80); do
   curl -sS -o /dev/null "http://127.0.0.1:$PORT/" && break
   sleep 0.25
 done
+# 这一行是 v1.4.3 新增的启动结论，缺失说明时间校验被绕过或日志被改坏。
+grep -q "时间校验：" "$WORK/server.log" || { cat "$WORK/server.log"; echo "启动日志缺少时间校验结论"; exit 1; }
 C="curl -sS -H Content-Type:application/json -H X-EES-CSRF:1"
 $C -c "$WORK/c.txt" -d '{"student_id":2021001,"pin":null}' "http://127.0.0.1:$PORT/api/login" | grep -q '"ok":true' || { cat "$WORK/server.log"; exit 1; }
 $C -b "$WORK/c.txt" "http://127.0.0.1:$PORT/api/paper" -o "$WORK/paper.json"

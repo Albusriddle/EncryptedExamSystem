@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use common::container::{self, Header};
 use common::crypto;
 use common::picker::{self, Paper};
-use common::timegate::{self, HttpsDateSource, SessionWindow, TimeSource, decide_session};
+use common::timegate::{self, SessionWindow, decide_session};
 
 use crate::keys;
 
@@ -239,7 +239,9 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
 
 /// 执行时间门禁，返回 (场次编号, 网络时间信息)。
 fn fallback_network_time() -> anyhow::Result<timegate::NetworkTime> {
-    let sources = build_time_sources();
+    // 默认三源由 `common::timegate` 统一提供：服务端启动校验用的是同一份，
+    // 各写一份会让两端的取时口径悄悄分叉。
+    let sources = timegate::default_sources();
     timegate::fetch_network_time_with_policy(
         &sources,
         timegate::FetchPolicy {
@@ -321,15 +323,6 @@ fn run_time_gate(
         );
     }
     Ok((decision.session_id, Some(net)))
-}
-
-/// 组装时间源。默认用三个国内大站（只要"能上网"就通）。
-fn build_time_sources() -> Vec<Box<dyn TimeSource>> {
-    vec![
-        Box::new(HttpsDateSource::new("https://www.baidu.com", "baidu")),
-        Box::new(HttpsDateSource::new("https://www.aliyun.com", "aliyun")),
-        Box::new(HttpsDateSource::new("https://www.tencent.com", "tencent")),
-    ]
 }
 
 /// 选项序号：A-Z，超过 26 个改用数字。

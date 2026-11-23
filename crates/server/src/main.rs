@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -25,6 +25,8 @@ use serde_json::{Value, json};
 
 const INDEX_HTML: &str = include_str!("index.html");
 const MAX_BODY: usize = 20 * 1024 * 1024;
+
+mod clock;
 
 #[derive(Parser)]
 #[command(
@@ -54,6 +56,15 @@ struct Cli {
     /// 作答状态目录（默认 <answers-dir>/state）
     #[arg(long)]
     state_dir: Option<PathBuf>,
+    /// 启动时校验网络时间：off / warn（默认，只告警）/ require（不通过拒绝启动）
+    ///
+    /// 机房、隔离局域网没有外网是常态，所以默认只告警；
+    /// 有外网且要求强一致时间的考场再用 require；off 会让场次判定退回教师机系统时钟（不建议）。
+    #[arg(long, value_enum, default_value = "warn")]
+    time_check: clock::TimeMode,
+    /// 本机时钟与网络时间的允许偏差（秒），实际夹取到 30–86400
+    #[arg(long, default_value_t = clock::DEFAULT_TOLERANCE_SECS)]
+    time_tolerance: i64,
 }
 
 struct App {
@@ -63,6 +74,10 @@ struct App {
     state_dir: PathBuf,
     forced_session: Option<u32>,
     state_key: [u8; 32],
+    /// 场次判定用的时钟：本机时钟 + 启动时的网络校准偏移。
+    clock: clock::Clock,
+    /// 启动时的校验档位，只用于 `/api/time` 的诊断输出。
+    time_mode: clock::TimeMode,
     conns: std::sync::atomic::AtomicUsize,
     gate: Gate,
     state: Mutex<State>,
@@ -166,15 +181,24 @@ impl Gate {
     }
 }
 
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // 先校时、再读包、再绑端口：`require` 档不通过就拒绝启动，避免"服务起来了，
+    // 但场次判定用的是不可信的教师机时钟"。`warn` 档只打印结论，不阻止启动。
+    // 进度提示放在最前面：无外网时这一步要等约 3 秒，否则看起来像卡住。
+    println!(
+        "正在校验网络时间（{} 档；机房无外网时会等约 3 秒，然后按本机时钟继续）…",
+        cli.time_check.as_str()
+    );
+    let check = clock::run(cli.time_check, cli.time_tolerance);
+    for line in clock::describe(&check).lines() {
+        println!("{line}");
+    }
+    if let Some(reason) = &check.abort {
+        anyhow::bail!("时间校验不通过：{reason}（如确需跳过，可加 --time-check warn）");
+    }
+    let server_clock = check.clock;
 
     let bytes = std::fs::read(&cli.package)
         .with_context(|| format!("读取考试包 {}", cli.package.display()))?;
@@ -189,7 +213,8 @@ fn main() -> Result<()> {
     k_manifest.copy_from_slice(&key_bytes);
 
     let (header, _) = container::parse_header(payload, &k_manifest).context("解析 header 失败")?;
-    let now = now_unix();
+    // 用校准后的时间挑场次：本机时钟偏差大时，挑中哪一场会跟着变。
+    let now = server_clock.now();
     let active = header.sessions.iter().find(|s| {
         match (
             timegate::parse_rfc3339(&s.start),
@@ -223,6 +248,8 @@ fn main() -> Result<()> {
         answers_dir: cli.answers_dir.clone(),
         state_dir,
         forced_session: cli.session,
+        clock: server_clock,
+        time_mode: cli.time_check,
         conns: std::sync::atomic::AtomicUsize::new(0),
         gate: Gate::new(4),
         state: Mutex::new(State::default()),
@@ -327,7 +354,7 @@ fn login(app: &App, req: &Request) -> Response {
     let ip = req.peer;
     {
         let mut state = app.state.lock().unwrap();
-        let now = now_unix();
+        let now = app.now();
         let entry = state.attempts.entry(ip).or_insert((0, now));
         if now.saturating_sub(entry.1) > 60 {
             *entry = (0, now);
@@ -349,7 +376,7 @@ fn login(app: &App, req: &Request) -> Response {
 
     {
         let mut state = app.state.lock().unwrap();
-        let now = now_unix();
+        let now = app.now();
         let entry = state.attempts_student.entry(student_id).or_insert((0, now));
         if now.saturating_sub(entry.1) > 60 {
             *entry = (0, now);
@@ -395,10 +422,18 @@ fn csrf_ok(req: &Request) -> bool {
 }
 
 impl App {
+    /// 判定用的「现在」：本机时间 + 启动时算出的网络校准偏移。
+    ///
+    /// 所有场次窗口、限速窗口、最后活跃时间都走这里，不直接读系统时钟——
+    /// 否则 `--time-check` 校准出来的偏移只在挑场次时生效一次，等于没校准。
+    fn now(&self) -> u64 {
+        self.clock.now()
+    }
+
     fn unlock(&self, student_id: u64, pin: Option<&str>) -> Result<(String, Student), String> {
         let (header, blob) = container::parse_header(&self.payload, &self.k_manifest)
             .map_err(|e| format!("包解析失败：{e}"))?;
-        let now = now_unix();
+        let now = self.now();
         let ids: Vec<u32> = match self.forced_session {
             Some(id) => vec![id],
             None => header.sessions.iter().map(|s| s.session_id).collect(),
@@ -483,14 +518,14 @@ fn paper(app: &App, req: &Request) -> Response {
     let Some(st) = state.students.get_mut(&token) else {
         return Response::error(401, "登录已失效");
     };
-    st.last_seen = now_unix();
+    st.last_seen = app.now();
     let (start, end) = session_window(app, st.session_id);
     Response::json(
         200,
         json!({
             "student_id": st.student_id,
             "session_id": st.session_id,
-            "server_time": now_unix(),
+            "server_time": app.now(),
             "start_unix": start,
             "end_unix": end,
             "submitted": st.submitted,
@@ -542,7 +577,7 @@ fn save_answer(app: &App, req: &Request) -> Response {
         return Response::error(409, "已交卷，不能再修改");
     }
     let (_, end) = session_window(app, st.session_id);
-    if end != 0 && now_unix() > end {
+    if end != 0 && app.now() > end {
         return Response::error(409, "考试已结束");
     }
     let Some(item) = st
@@ -584,7 +619,7 @@ fn save_answer(app: &App, req: &Request) -> Response {
     if total > 16 * 1024 * 1024 {
         return Response::error(413, "整卡答案超过 16 MiB");
     }
-    st.last_seen = now_unix();
+    st.last_seen = app.now();
     Response::json(200, json!({"ok": true}))
 }
 
@@ -620,7 +655,7 @@ fn finalize(app: &App, st: &mut Student) -> Result<String, String> {
         }
         st.exported = None;
     }
-    let now = now_unix();
+    let now = app.now();
     let mut sheet =
         answer_sheet::AnswerSheet::from_paper(&st.paper, st.student_id, st.session_id, now);
     let qids: Vec<String> = st
@@ -715,7 +750,7 @@ impl App {
         writeln!(
             f,
             "{}",
-            json!({"at": now_unix(), "student_id": student_id, "kind": kind, "detail": detail})
+            json!({"at": self.now(), "student_id": student_id, "kind": kind, "detail": detail})
         )
     }
 }
@@ -732,17 +767,20 @@ fn time_info(app: &App, req: &Request) -> Response {
     Response::json(
         200,
         json!({
-            "server_time": now_unix(),
+            "server_time": app.now(),
             "start_unix": start,
             "end_unix": end,
-            "remaining": end.saturating_sub(now_unix()),
+            "remaining": end.saturating_sub(app.now()),
+            // 诊断用：前端不展示，但老师/排障时能用 curl 确认「服务端时间是校准过的」。
+            "time_mode": app.time_mode.as_str(),
+            "clock_offset_secs": app.clock.offset_secs(),
         }),
     )
 }
 
 fn sweep_tick(app: &App) {
     let mut state = app.state.lock().unwrap();
-    let now = now_unix();
+    let now = app.now();
     let mut expired = Vec::new();
     for (token, st) in state.students.iter_mut() {
         let (_, end) = session_window(app, st.session_id);
