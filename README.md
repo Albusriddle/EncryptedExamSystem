@@ -4,7 +4,7 @@
 >
 > 本系统的定位是**「防误操作 + 现场监考」**，不是密码学意义上的强防作弊系统。防什么、不防什么，见 [安全边界与威胁模型](docs/安全边界与威胁模型.md)；已经明确接受、且**没有**修复的风险，见 [风险接受记录](docs/风险接受记录.md)。
 
-当前版本：**1.4.4**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
+当前版本：**1.4.5**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
 
 | 组件 | 技术形态 | 职责 |
 |---|---|---|
@@ -208,18 +208,18 @@ docs/                本文档集（含题库规范、出题质检与难度口�
 tools/bank_qc/       题库门禁与难度评分（verify_bank / score_bank）
 schemas/             题库 / manifest 的 JSON Schema（由 pydantic 生成，有漂移检查）
 scripts/             verify-embed / preflight-release / make-release-zip / release_body /
-                     run-admin-tests / smoke-answers
+                     run-admin-tests / smoke-answers / smoke-web / drill-web
 licenses/            LGPL-3.0 / GPL-3.0 全文
 worker/              Cloudflare Worker 时间服务（**目录为空，未实现**）
 ```
 
 ---
 
-## 8. 测试与验证基线（v1.4.4）
+## 8. 测试与验证基线（v1.4.5）
 
 | 项 | 基线 |
 |---|---|
-| Rust | 286 个 `#[test]` |
+| Rust | 289 个 `#[test]` |
 | Python | 354 用例（`pytest` 收集口径，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 14 项（非 `--full`） |

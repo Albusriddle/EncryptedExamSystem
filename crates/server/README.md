@@ -49,6 +49,7 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `--state-dir` | 作答状态目录，默认 `<answers-dir>/state` |
 | `--time-check` | `off` / `warn`（默认，只告警）/ `require`（不通过拒绝启动） |
 | `--time-tolerance` | 允许的本机与网络时间偏差，默认 `120` 秒（夹取到 30–86400） |
+| `--login-rate-limit` | 同一 IP 每分钟登录尝试上限，默认 `60`；`0` = 不限制（演练/同 NAT 时用） |
 
 启动时会先做一次三源网络时间校验并打印结论（本地时间 / 网络时间 / 偏差 / 生效偏移）。
 默认 `warn`：没有外网的隔离局域网会打印「取时失败，仅告警」后继续启动；
@@ -70,14 +71,17 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 
 ## 已具备（阶段 1 进行中）
 
-- 答案落盘：`<answers-dir>/state/<学号>-<场次>.json`，原子写 + 交卷幂等；
+- 答案落盘：`<answers-dir>/state/<学号>-<场次>.json`，原子写 + 交卷幂等；**每次保存都落盘**
+  （v1.4.5 起，前端 600 ms 防抖；交卷路径额外 fsync）——教师机崩溃 / 断电 / 误杀进程后
+  重登即可拿回未交卷的作答；
 - 服务重启后重新登录会恢复答案与交卷状态；
 - CSRF：所有写接口要求 `X-EES-CSRF: 1`；
 - 单会话：同一学号重新登录会顶掉旧 token；
-- 登录限速：按 IP 与学号各一分钟窗口；
+- 登录限速：按**真实对端 IP**（`TcpStream::peer_addr`）与学号各一分钟窗口；
+  默认每 IP 60 次/分钟、每学号 10 次/分钟；
 - 到点自动冻结：过期后首次请求会自动导出答题卡；后台线程每 15 秒收一轮，加密与写盘
   在全局状态锁**之外**进行（v1.4.4），不会堵住其他学生的请求；
-- 事件日志：`<answers-dir>/events.jsonl`；
+- 事件日志：`<answers-dir>/events.jsonl`（并发写有锁 + 整行一次写出，v1.4.5）；
 - 代码题：CodeMirror 5（行号 + C/C++/Java/JS/Go/Rust/Python 高亮），静态资源内嵌；
 - **启动校时（v1.4.3）**：三源中位数校验网络时间，偏差存成时钟偏移供场次判定使用；
 - **状态文件权限收紧（v1.4.3）**：Windows 受保护 DACL（仅当前用户）/ Unix `0600`、`0700`，
