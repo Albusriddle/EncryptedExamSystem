@@ -272,3 +272,19 @@ jobs:
           grep -q "FAIL" /tmp/verify.log
           python tools/bank_qc/score_bank.py banks/demo > /tmp/score.log 2>&1
           tail -2 /tmp/score.log
+
+  # 网页考试：打包 → 启动 exam-server → 登录/作答/交卷 → 校验 .eea
+  web-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 安装 Linux GUI 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - name: 构建并冒烟
+        run: |
+          cargo build --release -p server -p builder -p client
+          bash scripts/smoke-web.sh

@@ -10,7 +10,8 @@ BUILDER="$BIN/exam-builder$EXE"; CLIENT="$BIN/exam-client$EXE"; SERVER="$BIN/exa
 WORK="target/web-smoke"
 rm -rf "$WORK"
 mkdir -p "$WORK"
-PORT="${EES_WEB_PORT:-$(python -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")}"
+PY=$(command -v python3 || command -v python)
+PORT="${EES_WEB_PORT:-$($PY -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")}"
 PID=""
 cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null || true; }  # 保留 $WORK 便于失败排查
 trap cleanup EXIT
@@ -44,7 +45,7 @@ done
 C="curl -sS -H Content-Type:application/json -H X-EES-CSRF:1"
 $C -c "$WORK/c.txt" -d '{"student_id":2021001,"pin":null}' "http://127.0.0.1:$PORT/api/login" | grep -q '"ok":true' || { cat "$WORK/server.log"; exit 1; }
 $C -b "$WORK/c.txt" "http://127.0.0.1:$PORT/api/paper" -o "$WORK/paper.json"
-QID=$(python -c "import json,sys;d=json.load(open('$WORK/paper.json',encoding='utf-8'));print(d['paper']['sections'][0]['items'][0]['id'])")
+QID=$($PY -c "import json,sys;d=json.load(open('$WORK/paper.json',encoding='utf-8'));print(d['paper']['sections'][0]['items'][0]['id'])")
 $C -b "$WORK/c.txt" -X PUT -d "{\"qid\":\"$QID\",\"value\":\"B\"}" "http://127.0.0.1:$PORT/api/answer" | grep -q '"ok":true'
 $C -b "$WORK/c.txt" -X POST -d '{}' "http://127.0.0.1:$PORT/api/submit" | grep -q '"ok":true'
 ls "$WORK/answers"/*.eea >/dev/null
