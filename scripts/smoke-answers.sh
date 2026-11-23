@@ -16,9 +16,18 @@ case "$(uname -s)" in
   *) EXE="" ;;
 esac
 CLIENT="$ROOT/target/debug/exam-client$EXE"
+if [ "$#" -eq 2 ] && [ "$1" = --client ]; then
+  CLIENT="$2"
+elif [ "$#" -ne 0 ]; then
+  echo "Usage: bash scripts/smoke-answers.sh [--client path/to/debug-client-or-AppImage]" >&2
+  exit 2
+fi
 BUILDER="$ROOT/target/release/exam-builder$EXE"
 WORK="$ROOT/target/smoke-answers"
 PACKAGE="$WORK/pkg$EXE"
+if [[ "$CLIENT" == *.AppImage ]]; then
+  PACKAGE="$WORK/pkg.AppImage"
+fi
 
 # 挑一个**真的能跑**的解释器（Windows 上 python3 可能指向应用商店占位程序，
 # 一执行就退出 49）；时间窗也用它生成，避免依赖 GNU `date -d`（BSD/macOS 没有）。
@@ -62,7 +71,11 @@ EXAM_MASTER="$MASTER" "$BUILDER" build --manifest "$WORK/manifest.json" --banks 
   --allow-weak-kdf --force >/dev/null
 
 # 启动 GUI 作答，轮询答题卡直到两个答案都落盘，避免固定 sleep 截断。
-EES_AUTOLOGIN=2 EES_ANSWER="0=B,1=AC" "$PACKAGE" >"$WORK/gui.log" 2>&1 &
+RUN=("$PACKAGE")
+if [[ "$PACKAGE" == *.AppImage ]]; then
+  RUN+=(--appimage-extract-and-run)
+fi
+EES_AUTOLOGIN=2 EES_ANSWER="0=B,1=AC" "${RUN[@]}" >"$WORK/gui.log" 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 SHEET=""

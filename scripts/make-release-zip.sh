@@ -233,8 +233,9 @@ cat > "$STAGE/开始这里.md" <<'DOC'
 ## 一、打开程序
 
 1. 进入 `ExamAdmin` 文件夹
-2. Windows 双击 **`ExamAdmin.exe`**；Linux 在终端执行 **`./ExamAdmin`**。
-   Arch Linux 的依赖与启动说明见 `docs/arch-linux.md`。
+2. Windows 双击 **`ExamAdmin.exe`**；Linux 目录版执行 **`./ExamAdmin`**。
+   Linux 推荐使用另外生成的教师 **`ExamAdmin-<版本>-x86_64.AppImage`**：允许执行后双击，
+   可通过「帮助 → 创建桌面启动器」添加应用菜单入口；见 `docs/arch-linux.md`。
 
 > ⚠ 不要把主程序单独拖到别处，它需要同目录的 `_internal` 才能启动。
 
@@ -246,7 +247,7 @@ cat > "$STAGE/开始这里.md" <<'DOC'
 | 2 | `[学生]` 标签 | 粘贴学号（每行一个），点「应用到名单」 |
 | 3 | `[场次]` 标签 | 点「新建」，设考试时间，勾选科目，点「保存此场次」；需要控制难度时勾选「限制平均难度」（1–255） |
 | 4 | `[打包]` 标签 | 点「生成」拿主密钥（有进度条，约 1–2 秒）→ 点「开始打包」 |
-| 5 | 分发 | Windows 发生成的 `.exe`；Linux 发原生 `StudentClient`，必要时先 `chmod +x StudentClient` |
+| 5 | 分发 | Windows 发生成的 `.exe`；Linux 优先发生成的 `StudentClient.AppImage`（允许执行后双击）；裸 ELF 仍可用 |
 | 6 | `[收卷判分]` | 考后拖入学生交的 `.eea` → 校验 → 生成成绩 → 导出已判/未判 CSV |
 
 > 启动和新建工程默认加载示例题库（仅供演示），学生与场次仍为空；要接着上次做，点工具栏【打开上次工程】，不会额外混入示例。

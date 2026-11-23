@@ -3,7 +3,7 @@
 本项目（保密考试系统 / EncryptedExamSystem）自身代码以 **Apache License 2.0** 发布，
 全文见 `LICENSE`。
 
-发布包（`ExamAdmin-*.zip`）内含下列第三方组件，它们**各自遵循其原始许可**，
+发布包（`ExamAdmin-*.zip` / `*.AppImage`）内含下列第三方组件，它们**各自遵循其原始许可**，
 本项目的许可不改变、也不限制这些组件自身的权利。
 
 ## 1. PySide6 / Qt（管理端 GUI）
@@ -55,8 +55,23 @@
 
 ## 4. 字体
 
-界面中文优先使用**系统已安装**的字体（如微软雅黑、黑体、DejaVu Sans），
-发布包**不内嵌**任何字体文件。
+Windows 使用系统已安装的字体（如微软雅黑、黑体）。Linux 教师发布包与学生
+AppImage 内嵌未修改的 **Noto Sans CJK Regular/Bold**（Noto CJK 项目，SIL OFL 1.1），
+防止缺中文字体时出现方块字；字体原有版权信息保留在字体元数据中。
+许可全文：`licenses/OFL-1.1-Noto.txt`；上游：https://github.com/notofonts/noto-cjk 。
+传统裸 ELF 学生端仍使用系统字体。
+
+## 5. AppImage runtime（仅 Linux AppImage）
+
+使用 AppImage/type2-runtime `20251108`，MIT 许可与静态依赖声明见
+`licenses/AppImage-runtime.txt`；依赖许可全文一并附在 `licenses/AppImage-*.txt`
+和 `licenses/LGPL-2.1.txt`。构建脚本验证 runtime 的固定 SHA-256 后才使用。
+
+上游源码与构建方法：https://github.com/AppImage/type2-runtime/tree/20251108 。
+静态依赖包括 musl、libfuse、squashfuse、zstd、zlib，其各自许可不因打包而改变。
+AppImage 可用 `--appimage-extract` 解包；Qt/Python 仍是独立动态库，允许替换、调试、
+逆向和重新打包。也可按上游方法重建 runtime，再与重新生成的 SquashFS 拼接；
+打包格式、runtime 与各依赖的源码均开放，不限制用户修改或重新链接。
 
 ---
 

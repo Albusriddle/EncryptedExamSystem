@@ -111,7 +111,7 @@ fn package_fingerprint(opts: &UnlockOpts) -> String {
         .package
         .as_ref()
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::current_exe().ok());
+        .or_else(|| crate::paths::executable_path().ok());
     let Some(path) = path else {
         return "unknown".into();
     };
@@ -2112,8 +2112,22 @@ const CJK_CANDIDATES: &[&str] = &[
 /// egui 自带字体只覆盖拉丁字母，中文会显示成豆腐块。
 /// 找不到任何候选字体时**不 panic**，但要在界面上提示——否则学生只看到
 /// 一屏方块，不知道为什么（中文提示本身也是方块，所以提示用英文）。
+fn font_candidates(system: &[&str], name: &str) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    // 使用真正的内层 ELF 路径找随包字体，而不是外层 AppImage 所在目录。
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(prefix) = exe.parent().and_then(|dir| dir.parent())
+    {
+        paths.push(prefix.join("share/fonts").join(name));
+    }
+    paths.extend(system.iter().map(std::path::PathBuf::from));
+    paths
+}
+
 fn install_cjk_font(ctx: &egui::Context) -> bool {
-    install_cjk_font_from(ctx, CJK_CANDIDATES)
+    let paths = font_candidates(CJK_CANDIDATES, "NotoSansCJK-Regular.ttc");
+    let names: Vec<_> = paths.iter().filter_map(|path| path.to_str()).collect();
+    install_cjk_font_from(ctx, &names)
 }
 
 fn install_cjk_font_from(ctx: &egui::Context, candidates: &[&str]) -> bool {
@@ -2137,13 +2151,16 @@ fn install_cjk_font_from(ctx: &egui::Context, candidates: &[&str]) -> bool {
             .entry(egui::FontFamily::Monospace)
             .or_default()
             .push("cjk".to_owned());
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("ees_cjk_font_source"), (*path).to_owned());
+        });
         ok = true;
         break;
     }
 
     // 粗体字族：Markdown 的 **加粗** 用它；找不到就退化为强调色（见 bold_style）。
     let mut bold_ok = false;
-    for path in BOLD_CANDIDATES {
+    for path in font_candidates(BOLD_CANDIDATES, "NotoSansCJK-Bold.ttc") {
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
@@ -2179,6 +2196,7 @@ pub fn run(opts: UnlockOpts) -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([760.0, 720.0])
             .with_min_inner_size([600.0, 480.0])
+            .with_app_id("io.github.December172.ExamClient")
             .with_title(common::branding().product.clone()),
         ..Default::default()
     };
@@ -2306,7 +2324,7 @@ fn answer_sheet_path(
 ) -> Option<std::path::PathBuf> {
     let name = answer_sheet_file_name(student_id, session_id, paper_fingerprint);
 
-    if let Ok(exe) = std::env::current_exe()
+    if let Ok(exe) = crate::paths::executable_path()
         && let Some(dir) = exe.parent()
         && is_writable(dir)
     {

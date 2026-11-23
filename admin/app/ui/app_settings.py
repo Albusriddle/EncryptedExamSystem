@@ -28,7 +28,10 @@ def settings_path() -> Path:
 def teacher_dir() -> Path | None:
     """教师端程序所在目录（打包后）；源码运行返回 None。"""
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
+        from app.core.desktop import appimage_path
+
+        image = appimage_path()
+        return image.parent if image else Path(sys.executable).parent
     return None
 
 

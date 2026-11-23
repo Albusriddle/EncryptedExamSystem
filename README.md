@@ -10,10 +10,10 @@
 |---|---|---|
 | `ExamAdmin` | Python + PySide6 | 教师端图形界面：题库、学生与班级、场次、打包、收卷判分、审计 |
 | `exam-builder` | Rust CLI | 打包、校验包、校验答题卡、导出 PIN 表、考后查看原卷 |
-| `exam-client` | Rust + egui 单文件程序 | 桌面学生端：学号（可选 PIN）登录、网络时间门禁、离线作答、答题卡落盘 |
+| `exam-client` | Rust + egui 单文件程序；Windows exe / Linux ELF、AppImage | 桌面学生端：学号（可选 PIN）登录、网络时间门禁、离线作答、答题卡落盘 |
 | `exam-server` | Rust 内置 HTTP/1.1 + TLS | 网页作答服务端：登录 / 取卷 / 每次保存即加密落盘 / 交卷 / 自动收卷，并带**监考页** |
 
-> 发布包里，`exam-client.exe` 以 `stub-template.exe` 的形式提供，由 `exam-builder` 现场生成每个场次的考试包；学生拿到的是生成后的那个 `.exe`，不是 stub 本身。
+> 教师包提供学生端模板（Windows `stub-template.exe`，Linux 视构建方式提供 ELF 或 AppImage）。学生拿到的是 `exam-builder` 生成的考试包，不是模板本身。
 >
 > 文档在 `docs/` 下（本文链接带 `docs/` 前缀），`docs/` 内各文档互为同级；另有开发用的题库质检 skill 位于 `.agents/skills/question-bank-qc/`。
 
@@ -201,22 +201,22 @@
 
 ## 4. 快速开始（教师）
 
-1. 从 Release 下载 `ExamAdmin-<版本>-windows.zip`，解压；
-2. 进入 `ExamAdmin` 文件夹，双击 `ExamAdmin.exe`（整个文件夹要一起保留，`_internal` 不能少）；
+1. Windows 从 Release 下载 `ExamAdmin-<版本>-windows.zip` 并解压；Linux 使用构建或 CI 产物 `ExamAdmin-<版本>-x86_64.AppImage`（见 [Linux 桌面指南](docs/arch-linux.md#3-推荐appimage-桌面版)）；
+2. Windows 双击 `ExamAdmin/ExamAdmin.exe`（保留整个文件夹）；Linux 在文件属性中允许执行，然后双击 AppImage，可从「帮助 → 创建桌面启动器」添加应用菜单入口；
 3. **[题库]** 默认已加载仓库 `banks/demo/` 的数学、英语与题型展示示例；可直接试用，正式考试请先移除示例再导入自己的题库（可多选）；
 4. **[学生]** 粘贴学号（每行一个）或按班级维护；
 5. **[场次]** 新建场次：时间、名单、科目与抽题数；
-6. **[打包]**：生成 / 粘贴主密钥 → 选输出 exe → 按需勾选每生 PIN、时间令牌、「仅教师可查看原卷」（默认勾选 = 学生无回看）→ 开始打包；
-7. 把生成的 `.exe` 发给学生；
+6. **[打包]**：生成 / 粘贴主密钥 → 选输出学生包 → 按需勾选每生 PIN、时间令牌、「仅教师可查看原卷」（默认勾选 = 学生无回看）→ 开始打包；
+7. Windows 发生成的 `.exe`；Linux AppImage 桌面版默认生成 `StudentClient.AppImage`，只需分发这一份文件；
 8. 考后 **[收卷判分]**：拖入 `.eea` → 填 master → 选学生端包 → 校验 → 生成成绩 → 导出 CSV。
 
 完整步骤、按钮名、常见报错对照见 [教师使用手册](docs/教师使用手册.md)。
 
 ## 5. 快速开始（学生）
 
-- 双击学生端 exe，输入学号（启用 PIN 时再输入 6 位 PIN）；
+- 双击学生端 `.exe`（Windows）或 `.AppImage`（Linux；先允许执行），输入学号（启用 PIN 时再输入 6 位 PIN）；
 - 等待网络时间校验（至少 2 个时间源成功）；作答 → 交卷（**再点一次确认，5 秒内有效**；另有「取消」按钮）；
-- 答题卡自动加密保存在 exe 同目录，不可写时回退 `%LOCALAPPDATA%\ExamSystem\answers\`；
+- 答题卡自动加密保存在学生包同目录；不可写时 Windows 回退 `%LOCALAPPDATA%\ExamSystem\answers\`，Linux 回退 `${XDG_DATA_HOME:-~/.local/share}/ExamSystem/answers/`；
 - 若教师允许，交卷后可在结束时间前只读回看。
 
 ---
@@ -230,13 +230,17 @@
 ```bash
 bash scripts/build-linux.sh              # Rust 产物 + 隔离的 Python GUI 环境 + 自检
 bash scripts/run-admin.sh                # 教师管理端
-# 可选：生成 dist/ExamAdmin-<版本>-linux.zip
+# 推荐桌面分发：生成教师 AppImage、学生 AppImage 模板和 Linux ZIP
+bash scripts/build-linux.sh --appimage
+# 或仅生成传统目录式 Linux ZIP
 bash scripts/build-linux.sh --package
 ```
 
 依赖安装、Wayland/X11、学生端运行、XDG 数据目录与排错见
-**[Arch Linux 指南](docs/arch-linux.md)**。Linux 学生端是无扩展名的原生 ELF，
-不是 Windows `.exe`；请为不同操作系统分别构建和分发。
+**[Arch Linux 指南](docs/arch-linux.md)**。AppImage 版包含中文字体与学生模板，
+教师和学生都可双击启动，无需安装 Python 或 Wine；传统无扩展名 ELF 仍可用。
+请为不同操作系统分别构建和分发。Arch 本机构建不等于兼容旧发行版；
+CI 的 `linux-appimage` job 使用 Ubuntu 22.04 基线，跨发行版支持仍需在目标系统验收。
 
 ### 通用构建
 

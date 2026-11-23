@@ -14,7 +14,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app.branding import branding
+from app.ui.application import configure_application
 from app.ui.main_window import MainWindow
 
 
@@ -127,12 +127,22 @@ def selftest() -> int:
 def main() -> int:
     if "--selftest" in sys.argv:
         return selftest()
+    if "--install-desktop" in sys.argv:
+        from app.core.desktop import install_desktop_entry
+
+        try:
+            print(f"桌面启动器已创建：{install_desktop_entry()}")
+        except (OSError, ValueError) as exc:
+            print(f"创建启动器失败：{exc}", file=sys.stderr)
+            return 1
+        return 0
     if "--dump-ui" in sys.argv:
         # 诊断用：把主窗口与工具栏渲染成 PNG，并打印水印控件状态。
         # 打包后无法从外部检查 Qt 控件，只能让程序自己报告。
         from PySide6.QtWidgets import QToolBar
 
         app = QApplication(sys.argv)
+        configure_application(app)
         win = MainWindow()
         win.show()
         for _ in range(10):
@@ -146,6 +156,16 @@ def main() -> int:
         lbl = getattr(win, "watermark_label", None)
         info = {
             "window": [win.width(), win.height()],
+            "qt_style": app.style().objectName(),
+            "qt_platform": app.platformName(),
+            "font_family": app.font().family(),
+            "font_point_size": app.font().pointSizeF(),
+            "device_pixel_ratio": win.devicePixelRatioF(),
+            "tabs": [win.tabs.tabText(index) for index in range(win.tabs.count())],
+            "build": {
+                "stub": win.build_tab.edit_stub.text(),
+                "output": win.build_tab.edit_out.text(),
+            },
             "toolbar": [bar.width(), bar.height()] if bar else None,
             "label_text": lbl.text() if lbl else None,
             "label_geom": [lbl.x(), lbl.y(), lbl.width(), lbl.height()] if lbl else None,
@@ -174,9 +194,8 @@ def main() -> int:
         print(app_version())
         return 0
     app = QApplication(sys.argv)
+    configure_application(app)
     install_excepthook()
-    app.setApplicationName(f"{branding().product} · 管理端")
-    # 中文字体：Windows 下默认字体即可；Linux 若缺失由系统配置决定
     win = MainWindow()  # 正常启动：自带示例题库的新工程（上次工程由工具栏按钮打开）
     win.show()
     # 欢迎弹窗：放在主窗口显示之后，避免"弹窗背后一片空白"。

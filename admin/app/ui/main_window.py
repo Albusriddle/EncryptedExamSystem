@@ -144,6 +144,29 @@ class MainWindow(QMainWindow):
         self.watermark_label.setStyleSheet("color: #9aa0a6; padding-right: 12px; font-size: 11px;")
         bar.addWidget(self.watermark_label)
 
+        from app.core.desktop import appimage_path
+
+        if appimage_path() is not None:
+            # 显式操作才写入 ~/.local/share，不在首次启动时悄悄安装。
+            menu = self.menuBar().addMenu("帮助")
+            desktop_action = menu.addAction("创建桌面启动器…")
+            desktop_action.triggered.connect(self.install_desktop_launcher)
+
+    def install_desktop_launcher(self) -> None:
+        from app.core.desktop import install_desktop_entry
+
+        try:
+            destination = install_desktop_entry()
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "无法创建启动器", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "桌面启动器已创建",
+            f"已添加到应用菜单：\n{destination}\n\n"
+            "可以从应用菜单启动或固定到任务栏。移动 AppImage 后请重新创建启动器。",
+        )
+
     def _build_tabs(self) -> None:
         self.tabs = QTabWidget()
         # 滚轮停在页签上不应切页（Qt 默认会切）

@@ -4,19 +4,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGE=0
-case "${1:-}" in
-  "") ;;
-  --package) PACKAGE=1 ;;
-  -h|--help)
-    echo "Usage: bash scripts/build-linux.sh [--package]"
-    echo "Build native Rust tools and prepare the admin GUI; optionally create a Linux ZIP."
-    exit 0 ;;
-  *) echo "Unknown argument: $1" >&2; exit 2 ;;
-esac
-if [ "$#" -gt 1 ]; then
-  echo "Usage: bash scripts/build-linux.sh [--package]" >&2
-  exit 2
-fi
+APPIMAGE=0
+for arg in "$@"; do
+  case "$arg" in
+    --package) PACKAGE=1 ;;
+    --appimage) PACKAGE=1; APPIMAGE=1 ;;
+    -h|--help)
+      echo "Usage: bash scripts/build-linux.sh [--package] [--appimage]"
+      echo "Build native tools/GUI; --package adds a ZIP, --appimage also adds portable teacher/student AppImages."
+      exit 0 ;;
+    *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
 if [ "$(uname -s)" != Linux ]; then
   echo "This script builds Linux binaries. On Windows, use the README build instructions." >&2
   exit 1
@@ -32,6 +31,11 @@ if [ "$PACKAGE" -eq 1 ] && ! command -v zip >/dev/null; then
   exit 1
 fi
 
+if [ "$APPIMAGE" -eq 1 ] && ! command -v mksquashfs >/dev/null; then
+  echo "Missing mksquashfs. Install it with: sudo pacman -S squashfs-tools" >&2
+  exit 1
+fi
+
 cd "$ROOT"
 cargo build --locked --release --workspace
 cd "$ROOT/admin"
@@ -42,9 +46,16 @@ uv run --locked python -m app --selftest
 
 if [ "$PACKAGE" -eq 1 ]; then
   uv run --locked python buildtools/build_exe.py
+  if [ "$APPIMAGE" -eq 1 ]; then
+    uv run --locked python -m buildtools.build_appimage
+  fi
   # 让发布脚本也使用同一个解释器，而不是发行版中可能不同版本的 python。
   export PATH="$ROOT/admin/.venv/bin:$PATH"
   cd "$ROOT"
   bash scripts/make-release-zip.sh "$(tr -d '[:space:]' < VERSION)"
 fi
-printf '\nReady. Start the admin GUI with: bash "%s/scripts/run-admin.sh"\n' "$ROOT"
+if [ "$APPIMAGE" -eq 1 ]; then
+  printf '\nReady. Double-click dist/ExamAdmin-%s-x86_64.AppImage (allow execution first).\n' "$(tr -d '[:space:]' < "$ROOT/VERSION")"
+else
+  printf '\nReady. Start the admin GUI with: bash "%s/scripts/run-admin.sh"\n' "$ROOT"
+fi

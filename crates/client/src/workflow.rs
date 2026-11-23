@@ -103,8 +103,8 @@ pub fn unlock_with_pin(student_id: u64, pin: Option<&str>, opts: &UnlockOpts) ->
     // 1. 读自身 payload。
     let exe_path = match &opts.package {
         Some(p) => p.clone(),
-        None => std::env::current_exe()
-            .context("获取自身路径")?
+        None => crate::paths::executable_path()
+            .context("获取考试包路径")?
             .to_string_lossy()
             .into_owned(),
     };
@@ -405,7 +405,7 @@ pub fn resolve_manifest_key(
 pub fn peek_key_source(opts: &UnlockOpts) -> KeySource {
     let path = match &opts.package {
         Some(p) => std::path::PathBuf::from(p),
-        None => match std::env::current_exe() {
+        None => match crate::paths::executable_path() {
             Ok(p) => p,
             Err(_) => return KeySource::Master,
         },

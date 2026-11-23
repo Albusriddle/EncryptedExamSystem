@@ -138,6 +138,9 @@ def default_stub() -> Path:
     name = executable_name("exam-client")
     if is_frozen():
         d = program_dir()
+        portable = d / "stub-template.AppImage"
+        if sys.platform == "linux" and portable.is_file():
+            return portable
         for cand in (
             d / executable_name("stub-template"),
             d / "_internal" / name,
@@ -174,6 +177,8 @@ def default_out() -> Path:
     都不可写才退回当前工作目录。
     """
     name = executable_name("StudentClient")
+    if is_frozen() and sys.platform == "linux" and default_stub().suffix == ".AppImage":
+        name += ".AppImage"
     if not is_frozen():
         return Path(__file__).resolve().parents[3] / "dist" / name
 
