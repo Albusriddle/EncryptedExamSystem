@@ -305,7 +305,14 @@ fn main() -> Result<()> {
     });
 
     let listener = bind_listener(&cli.bind, cli.port)?;
-    println!("考试服务已启动：http://{}:{}/", local_ip(), cli.port);
+    // 告诉学生该访问哪个地址：绑 0.0.0.0 / [::] 时用本机局域网 IP（教师机可能有多个），
+    // 绑了具体地址（例如只绑 LAN、或只绑 127.0.0.1 调试）就直接用那个地址——
+    // 否则绑了回环还会打印一个学生根本连不上的局域网 URL。
+    println!(
+        "考试服务已启动：http://{}:{}/",
+        bind_host(&cli.bind),
+        cli.port
+    );
     println!(
         "场次 #{session_id}；答题卡输出到 {}",
         cli.answers_dir.display()
@@ -346,6 +353,17 @@ fn local_ip() -> String {
         })
         .map(|a| a.ip().to_string())
         .unwrap_or_else(|_| "127.0.0.1".into())
+}
+
+/// 启动横幅里用的「学生应访问的主机名」。
+///
+/// 通配地址（`0.0.0.0` / `[::]`）本身不可访问，要换成教师机的局域网地址；
+/// 绑定了具体地址时就用它——绑定回环却打印局域网 IP，会让学生照着连不上。
+fn bind_host(bind: &str) -> String {
+    match bind {
+        "0.0.0.0" | "::" | "[::]" => local_ip(),
+        other => other.to_string(),
+    }
 }
 
 /// 绑定监听端口。

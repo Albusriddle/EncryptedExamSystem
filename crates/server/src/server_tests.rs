@@ -781,6 +781,19 @@ fn port_conflict_reports_actionable_error() {
     );
 }
 
+/// 启动横幅里的地址：通配地址要换成局域网 IP，具体地址原样用。
+///
+/// 为什么重要：绑 127.0.0.1 调试时若还打印局域网 IP，老师把这个地址发给学生，
+/// 学生连不上，而服务端日志看起来「一切正常」。
+#[test]
+fn banner_host_follows_bind_address() {
+    assert_eq!(bind_host("127.0.0.1"), "127.0.0.1");
+    assert_eq!(bind_host("192.168.1.5"), "192.168.1.5");
+    let wildcard = bind_host("0.0.0.0");
+    assert_eq!(wildcard, local_ip(), "0.0.0.0 要换成教师机的局域网地址");
+    assert_ne!(wildcard, "0.0.0.0", "通配地址本身不能当访问地址");
+}
+
 /// 限速按「真实对端 IP」分桶，而不是一个全局桶。
 ///
 /// 为什么重要：v1.4.5 及以前 `Request.peer` 被硬编码成 `127.0.0.1`——全场所有学生

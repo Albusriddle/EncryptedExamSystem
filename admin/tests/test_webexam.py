@@ -3,9 +3,11 @@
 from pathlib import Path
 
 from app.core.webexam import (
+    DEFAULT_BIND,
     DEFAULT_LOGIN_RATE_LIMIT,
     DEFAULT_TIME_CHECK,
     access_url,
+    bind_choices,
     is_ready,
     validate_inputs,
     web_command,
@@ -85,6 +87,55 @@ def test_is_ready_needs_the_full_marker() -> None:
     assert not is_ready("考试服务已启")
     assert is_ready("考试服务已启动：http://192.168.1.5:8080/\n")
     assert is_ready("多行\n考试服务已启动\n")
+
+
+def test_web_command_carries_bind(tmp_path: Path) -> None:
+    common = dict(
+        server=Path("exam-server.exe"),
+        package=tmp_path / "pkg.exe",
+        keyfile=tmp_path / "key.txt",
+        port=8080,
+        answers_dir=tmp_path / "answers",
+    )
+    cmd = web_command(**common)
+    assert cmd[cmd.index("--bind") + 1] == DEFAULT_BIND == "0.0.0.0"
+
+    cmd = web_command(**common, bind="192.168.1.5")
+    assert cmd[cmd.index("--bind") + 1] == "192.168.1.5"
+
+
+def test_validate_inputs_rejects_bad_bind(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg.exe"
+    key = tmp_path / "key.txt"
+    pkg.write_bytes(b"MZ")
+    key.write_text("00" * 32, encoding="utf-8")
+
+    for bad in ("", "localhost", "192.168.1.999", "0.0.0.0:8080"):
+        msg = validate_inputs(pkg, key, 8080, bind=bad)
+        assert msg is not None, f"{bad!r} 应被拒绝"
+        assert "监听地址" in msg
+
+    assert validate_inputs(pkg, key, 8080, bind="0.0.0.0") is None
+    assert validate_inputs(pkg, key, 8080, bind="127.0.0.1") is None
+    assert validate_inputs(pkg, key, 8080, bind="::1") is None, "IPv6 也应允许"
+
+
+def test_bind_choices_are_sane() -> None:
+    choices = bind_choices()
+    values = [value for value, _label in choices]
+    assert values[0] == "0.0.0.0", "默认必须是全部网卡，排第一"
+    assert values[-1] == "127.0.0.1", "本机调试项排最后"
+    assert len(values) == len(set(values)), "候选不能重复"
+    assert all(label for _value, label in choices), "每项都要有人能读的标签"
+
+
+def test_advertised_host_follows_bind() -> None:
+    from app.core.webexam import advertised_host, local_ip
+
+    assert advertised_host("0.0.0.0") == local_ip(), "通配地址要换成局域网 IP"
+    assert advertised_host("::") == local_ip()
+    assert advertised_host("127.0.0.1") == "127.0.0.1", "绑回环就显示回环"
+    assert advertised_host("192.168.1.5") == "192.168.1.5"
 
 
 def test_access_url_uses_given_ip() -> None:

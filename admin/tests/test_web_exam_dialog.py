@@ -71,6 +71,19 @@ def test_url_appears_only_after_service_is_ready(dialog) -> None:
     assert dialog.lbl_url.text().startswith("http://")
 
 
+def test_url_uses_the_bound_address(qapp, tmp_path) -> None:
+    """绑 127.0.0.1 时显示的地址也必须是 127.0.0.1（否则老师照着通知学生连不上）。"""
+    dlg = _make_dialog(tmp_path)
+    try:
+        values = [dlg.combo_bind.itemData(i) for i in range(dlg.combo_bind.count())]
+        assert "127.0.0.1" in values, "候选里应有「仅本机」"
+        dlg.combo_bind.setCurrentIndex(values.index("127.0.0.1"))
+        dlg._consume_output("考试服务已启动：http://127.0.0.1:8080/\n")
+        assert dlg.lbl_url.text().startswith("http://127.0.0.1:"), dlg.lbl_url.text()
+    finally:
+        dlg.close()
+
+
 def test_marker_split_across_two_reads_still_unlocks(qapp, tmp_path) -> None:
     """标志行被拆到两次输出里也要能识别（进程输出本来就不保证按行到达）。"""
     dlg = _make_dialog(tmp_path)
@@ -168,9 +181,14 @@ def test_ready_marker_matches_server_source() -> None:
     这条是跨语言契约检查：服务端改了这句文案而这里没跟上，老师会一直看到
     「启动超时」——日志里明明已经起来了。
     """
+    from app.core.webexam import READY_MARKER
+
     root = Path(__file__).resolve().parents[2]
     src = (root / "crates" / "server" / "src" / "main.rs").read_text(encoding="utf-8")
-    assert 'println!("考试服务已启动' in src, "服务端就绪标志行变了，管理端的就绪判断要同步"
+    # println! 可能被 rustfmt 折行，所以断言「格式串本身」而不是整行。
+    fmt = '"考试服务已启动：http://{}:{}/"'
+    assert fmt in src, "服务端就绪标志行变了，管理端的就绪判断要同步"
+    assert fmt.strip('"').startswith(READY_MARKER), "READY_MARKER 必须是格式串的前缀"
     # GUI 传的两个参数必须仍是服务端的命令行参数（clap 由字段名生成 flag）。
     assert "time_check: clock::TimeMode" in src
     assert "login_rate_limit: u32" in src

@@ -5,11 +5,16 @@
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 from pathlib import Path
 
 #: 网页考试默认端口。
 DEFAULT_PORT = 8080
+
+#: 默认监听地址：所有网卡。老师在多网卡（机房 LAN + 外网）机器上可以只绑 LAN 地址，
+#: 这样外网侧根本连不上——比依赖防火墙更直接。
+DEFAULT_BIND = "0.0.0.0"
 
 #: 默认时间校验档位。`warn` = 取时失败只告警：机房 / 隔离局域网没有外网是常态，
 #: 把它判成「不能开考」造成的停考事故远大于本机时钟偏差。
@@ -37,6 +42,7 @@ def web_command(
     keyfile: Path,
     port: int,
     answers_dir: Path,
+    bind: str = DEFAULT_BIND,
     time_check: str = DEFAULT_TIME_CHECK,
     login_rate_limit: int = DEFAULT_LOGIN_RATE_LIMIT,
 ) -> list[str]:
@@ -58,6 +64,9 @@ def web_command(
         str(port),
         "--answers-dir",
         str(answers_dir),
+        # 监听地址：默认所有网卡；只绑局域网地址时外网侧直接连不上。
+        "--bind",
+        bind,
         "--time-check",
         time_check,
         "--login-rate-limit",
@@ -70,6 +79,7 @@ def validate_inputs(
     keyfile: Path,
     port: int,
     *,
+    bind: str = DEFAULT_BIND,
     time_check: str = DEFAULT_TIME_CHECK,
     login_rate_limit: int = DEFAULT_LOGIN_RATE_LIMIT,
 ) -> str | None:
@@ -83,6 +93,10 @@ def validate_inputs(
         return "缺少 K_manifest：请在「打包」页设置「导出 K_manifest」并重新打包"
     if not (1024 <= port <= 65535):
         return "端口必须在 1024–65535 之间"
+    try:
+        ipaddress.ip_address(bind)
+    except ValueError:
+        return f"监听地址必须是 IP（例如 0.0.0.0 或 192.168.1.5），实际 {bind!r}"
     if time_check not in TIME_CHECK_MODES:
         return f"时间校验必须是 {' / '.join(TIME_CHECK_MODES)} 之一（实际 {time_check!r}）"
     if not (0 <= login_rate_limit <= MAX_LOGIN_RATE_LIMIT):
@@ -91,6 +105,21 @@ def validate_inputs(
             f"实际 {login_rate_limit}"
         )
     return None
+
+
+def bind_choices() -> list[tuple[str, str]]:
+    """「监听地址」下拉框的可选项：(值, 给人看的标签)。
+
+    默认 `0.0.0.0`（所有网卡）；如果能探测到本机局域网地址，额外提供「只绑这个地址」
+    ——多网卡教师机（机房 LAN + 校园网）上只绑 LAN，外网侧根本连不上。
+    `127.0.0.1` 留给教师自己在本机调试。
+    """
+    choices: list[tuple[str, str]] = [(DEFAULT_BIND, "全部网卡（0.0.0.0，默认）")]
+    ip = local_ip()
+    if ip != "127.0.0.1":
+        choices.append((ip, f"仅 {ip}（本机局域网地址）"))
+    choices.append(("127.0.0.1", "仅本机（127.0.0.1，自己调试用）"))
+    return choices
 
 
 def is_ready(output: str) -> bool:
@@ -121,6 +150,16 @@ def local_ip() -> str:
             return s.getsockname()[0]
     except OSError:
         return "127.0.0.1"
+
+
+def advertised_host(bind: str) -> str:
+    """告诉学生该访问哪个主机名。
+
+    绑 `0.0.0.0` / `::`（所有网卡）时用本机局域网地址；绑了具体地址（只绑 LAN、
+    或只绑 127.0.0.1 调试）就直接用它——否则绑回环还会显示一个学生连不上的地址。
+    与服务端启动横幅 `bind_host()` 保持同一口径。
+    """
+    return local_ip() if bind in ("0.0.0.0", "::", "[::]") else bind
 
 
 def access_url(port: int, ip: str | None = None) -> str:

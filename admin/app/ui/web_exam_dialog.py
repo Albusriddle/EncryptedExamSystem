@@ -18,12 +18,15 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.webexam import (
+    DEFAULT_BIND,
     DEFAULT_LOGIN_RATE_LIMIT,
     DEFAULT_PORT,
     DEFAULT_TIME_CHECK,
     MAX_LOGIN_RATE_LIMIT,
     TIME_CHECK_MODES,
     access_url,
+    advertised_host,
+    bind_choices,
     is_ready,
     port_available,
     validate_inputs,
@@ -70,6 +73,16 @@ class WebExamDialog(QDialog):
         self.spin_port.setValue(DEFAULT_PORT)
         self.edit_answers = QLineEdit(str(Path(package).parent / "web-answers") if package else "")
 
+        # 监听地址：默认所有网卡；多网卡教师机只绑 LAN 地址时，外网侧根本连不上。
+        self.combo_bind = NoWheelComboBox()
+        for value, label in bind_choices():
+            self.combo_bind.addItem(label, value)
+        self.combo_bind.setToolTip(
+            "服务端监听哪块网卡。默认「全部网卡」（0.0.0.0）。\n"
+            "教师机同时连着校园网时，选「仅 <本机局域网地址>」可以让学生只在机房侧访问；\n"
+            "「仅本机」只给自己在本机打开浏览器调试用。"
+        )
+
         # 时间校验档位：默认 warn。选 require 意味着「取时失败就不让开考」，
         # 在隔离局域网里会直接停考，所以文案里把后果写清楚。
         self.combo_time_check = NoWheelComboBox()
@@ -97,6 +110,7 @@ class WebExamDialog(QDialog):
         form.addRow("考试包", self.edit_package)
         form.addRow("K_manifest", self.edit_keyfile)
         form.addRow("端口", self.spin_port)
+        form.addRow("监听地址", self.combo_bind)
         form.addRow("时间校验", self.combo_time_check)
         form.addRow("同 IP 登录上限", self.spin_rate_limit)
         form.addRow("答题卡目录", self.edit_answers)
@@ -153,6 +167,10 @@ class WebExamDialog(QDialog):
         )
         return answer == QMessageBox.StandardButton.Yes
 
+    def _bind(self) -> str:
+        value = str(self.combo_bind.currentData() or DEFAULT_BIND)
+        return value
+
     def _login_rate_limit(self) -> int:
         return int(self.spin_rate_limit.value())
 
@@ -168,6 +186,7 @@ class WebExamDialog(QDialog):
             keyfile=Path(self.edit_keyfile.text().strip()),
             port=self.spin_port.value(),
             answers_dir=Path(self.edit_answers.text().strip()),
+            bind=self._bind(),
             time_check=self._time_check(),
             login_rate_limit=self._login_rate_limit(),
         )
@@ -197,6 +216,7 @@ class WebExamDialog(QDialog):
             package,
             keyfile,
             self.spin_port.value(),
+            bind=self._bind(),
             time_check=self._time_check(),
             login_rate_limit=self._login_rate_limit(),
         )
@@ -280,7 +300,7 @@ class WebExamDialog(QDialog):
         if not self._ready and is_ready(self._output_buffer):
             self._ready = True
             self._ready_timer.stop()
-            self.lbl_url.setText(access_url(self.spin_port.value()))
+            self.lbl_url.setText(access_url(self.spin_port.value(), advertised_host(self._bind())))
 
     def _copy_url(self) -> None:
         from PySide6.QtWidgets import QApplication
