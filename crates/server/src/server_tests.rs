@@ -251,6 +251,13 @@ impl Fixture {
     /// 只替换 `App::payload`：已登录学生的内存试卷不受影响，场次窗口（`session_window`）
     /// 每次调用都从 payload 重新解析，所以下一次判定就会看到「已结束」。
     /// 把场次窗口设成任意区间（重打包 payload 并刷新窗口缓存）。
+    /// 给 fixture 装上 TLS 配置（`handle()` 会据此握手）；同时打开 Secure cookie。
+    fn set_tls(&mut self, config: Arc<rustls::ServerConfig>) {
+        let app = Arc::get_mut(&mut self.app).expect("装 TLS 时不应有其它 Arc 持有者");
+        app.tls = Some(config);
+        app.secure_cookies = true;
+    }
+
     /// 切换「cookie 是否带 Secure」（TLS 模式为 true）。
     fn set_secure_cookies(&mut self, secure: bool) {
         let app = Arc::get_mut(&mut self.app).expect("换 cookie 策略时不应有其它 Arc 持有者");
@@ -1932,7 +1939,7 @@ fn tls_end_to_end_login_works() {
             .expect("设超时");
         let conn = rustls::ServerConnection::new(server_config).expect("服务端 TLS 会话");
         let mut tls = rustls::StreamOwned::new(conn, stream);
-        serve(&app, &mut tls, StdIpAddr::V4(Ipv4Addr::LOCALHOST)).expect("处理请求");
+        serve(&app, &mut tls, StdIpAddr::V4(Ipv4Addr::LOCALHOST), None).expect("处理请求");
     });
 
     // 客户端：根证书只放这一张自签证书（等价于学生点了「继续」之后的状态）
@@ -2013,6 +2020,8 @@ fn secure_cookie_flag_follows_tls_mode() {
 }
 
 /// 明文 301 端口必须只回跳转，不能返回页面或数据。
+///
+/// 直接调生产函数 `handle_redirect_stream`——复制一份跳转逻辑来测等于没测。
 #[test]
 fn redirect_port_only_redirects() {
     use std::io::{Read as _, Write as _};
@@ -2021,21 +2030,8 @@ fn redirect_port_only_redirects() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("绑定");
     let port = listener.local_addr().expect("地址").port();
     let server = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("accept");
-        let mut stream = stream;
-        let mut buf = [0u8; 2048];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        let path = std::str::from_utf8(&buf[..n])
-            .ok()
-            .and_then(|text| text.lines().next().map(str::to_string))
-            .and_then(|line| line.split_whitespace().nth(1).map(str::to_string))
-            .unwrap_or_else(|| "/".to_string());
-        let location = format!("https://127.0.0.1:8443{path}");
-        let resp = format!(
-            "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        );
-        let _ = stream.write_all(resp.as_bytes());
-        let _ = stream.flush();
+        let (mut stream, _) = listener.accept().expect("accept");
+        handle_redirect_stream(&mut stream, "127.0.0.1", 8443);
     });
 
     let mut client = TcpStream::connect(("127.0.0.1", port)).expect("连接");
@@ -2052,4 +2048,190 @@ fn redirect_port_only_redirects() {
         "跳转目标要保留路径：{text}"
     );
     assert!(!text.contains("<!doctype"), "明文端口不得返回页面：{text}");
+}
+
+// ---------------------------------------------------------------------------
+// 14. v1.5.1：安全响应头 / TLS 走 handle() / 明文打 TLS 端口 / time 的 submitted
+// ---------------------------------------------------------------------------
+
+/// 生成一张测试用证书并返回配置（放 target/ 下，和 Fixture 的目录不同名）。
+fn test_tls_config(tag: &str) -> Arc<rustls::ServerConfig> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/server-tests")
+        .join(format!("tls-cfg-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let material = tls::load_or_generate(&dir, &["127.0.0.1".to_string()], 30).expect("生成证书");
+    Arc::clone(&material.config)
+}
+
+/// 只信这张自签证书的客户端配置（真校验证书，不是跳过）。
+fn trusting_client_config(config: &rustls::ServerConfig, tag: &str) -> rustls::ClientConfig {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/server-tests")
+        .join(format!("tls-cfg-{tag}-{}", std::process::id()));
+    let pem = std::fs::read(dir.join("server.crt")).expect("读测试证书");
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut &pem[..]) {
+        roots.add(cert.expect("证书可解析")).expect("加入根证书");
+    }
+    let _ = config;
+    rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
+
+/// 所有响应（含 4xx）都必须带安全响应头。
+///
+/// CSP 能上到 `script-src 'self'` 的前提是页面不再有行内脚本——
+/// 这也是为什么把 `app.js`/`app.css` 拆成独立资源。
+#[test]
+fn every_response_carries_security_headers() {
+    for response in [
+        Response::json(200, json!({"ok": true})),
+        Response::error(413, "太大"),
+        Response::error(411, "分块"),
+        Response::error(401, "未登录"),
+        Response::error(500, "内部错误"),
+    ] {
+        let mut buf: Vec<u8> = Vec::new();
+        write_response(&mut buf, response).expect("写响应");
+        let text = String::from_utf8_lossy(&buf).to_string();
+        for header in [
+            "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            "X-Content-Type-Options: nosniff",
+            "X-Frame-Options: DENY",
+            "Referrer-Policy: no-referrer",
+            "Permissions-Policy: geolocation=(), camera=(), microphone=()",
+        ] {
+            assert!(
+                text.contains(header),
+                "缺少安全响应头 {header}；实际：\n{text}"
+            );
+        }
+    }
+}
+
+/// 真走 `handle()` 的 TLS 链路：握手 → 取首页 → 200 且带 CSP。
+///
+/// 之前只有 `serve()` 的用例，`ServerConnection::new` + `StreamOwned` 这段生产代码
+/// 实际没被覆盖。
+#[test]
+fn tls_handle_serves_page_with_security_headers() {
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+
+    use rustls::pki_types::ServerName;
+
+    let mut f = Fixture::new("tls-handle");
+    f.set_tls(test_tls_config("handle"));
+    let app = Arc::clone(&f.app);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定");
+    let port = listener.local_addr().expect("地址").port();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        handle(app, stream)
+    });
+
+    let client_config = trusting_client_config(&f.app.tls.clone().expect("有 TLS 配置"), "handle");
+    let server_name = ServerName::try_from("127.0.0.1").expect("服务器名");
+    let conn = rustls::ClientConnection::new(Arc::new(client_config), server_name)
+        .expect("客户端 TLS 会话");
+    let tcp = TcpStream::connect(("127.0.0.1", port)).expect("连接");
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .expect("设超时");
+    let mut tls = rustls::StreamOwned::new(conn, tcp);
+
+    tls.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        .expect("写请求");
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match tls.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&chunk[..n]),
+            Err(_) => break,
+        }
+    }
+    let result = server.join().expect("服务端线程");
+    assert!(result.is_ok(), "handle() 应成功：{result:?}");
+
+    let text = String::from_utf8_lossy(&response).to_string();
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "首页应 200：{}",
+        &text[..text.len().min(120)]
+    );
+    assert!(text.contains("Content-Security-Policy:"), "首页必须带 CSP");
+    assert!(text.contains("frame-ancestors 'none'"), "必须禁止被 iframe");
+    assert!(
+        text.contains("保密考试系统"),
+        "返回的应是考试页面而不是错误页"
+    );
+}
+
+/// 用明文（http://）访问 TLS 端口：`handle()` 只返回 Err，不 panic。
+#[test]
+fn plaintext_on_tls_port_is_rejected_without_panic() {
+    use std::io::Write as _;
+    use std::net::{TcpListener, TcpStream};
+
+    let mut f = Fixture::new("tls-plain");
+    f.set_tls(test_tls_config("plain"));
+    let app = Arc::clone(&f.app);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定");
+    let port = listener.local_addr().expect("地址").port();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        handle(app, stream)
+    });
+
+    let mut client = TcpStream::connect(("127.0.0.1", port)).expect("连接");
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
+        .expect("写明文请求");
+    client
+        .shutdown(std::net::Shutdown::Write)
+        .expect("半关闭写端");
+    let result = server.join().expect("服务端线程");
+    assert!(result.is_err(), "明文打 TLS 端口必须返回 Err");
+}
+
+/// `/api/time` 必须报告 `submitted`：前端靠它发现「服务端已经自动收卷」。
+#[test]
+fn time_info_reports_submitted() {
+    let f = Fixture::new("time-submitted");
+    let token = f.login_ok(STUDENT);
+    let before = f.route(&request("GET", "/api/time", peer(1), Vec::new()).token(&token));
+    assert_status(&before, 200, "取时应成功");
+    assert_eq!(body_json(&before)["submitted"], false);
+
+    assert_status(&f.save(&token, "q-single", "B"), 200, "保存应成功");
+    assert_status(&f.submit(&token), 200, "交卷应成功");
+
+    let after = f.route(&request("GET", "/api/time", peer(1), Vec::new()).token(&token));
+    assert_status(&after, 200, "交卷后取时仍应成功");
+    assert_eq!(
+        body_json(&after)["submitted"],
+        true,
+        "必须报告已交卷，前端才能切到已交卷页"
+    );
+}
+
+/// 首页提示随模式变化：TLS 说自签，明文说「仅限排障」。
+#[test]
+fn index_hint_matches_tls_mode() {
+    let mut f = Fixture::new("index-hint");
+    assert!(
+        index_html(&f.app).contains("明文 HTTP"),
+        "明文模式必须有醒目提示"
+    );
+    f.set_tls(test_tls_config("hint"));
+    let html = index_html(&f.app);
+    assert!(
+        html.contains("自签证书"),
+        "TLS 模式应提示自签与「继续前往」"
+    );
+    assert!(!html.contains("明文 HTTP"), "TLS 模式不应再说明文");
 }

@@ -23,6 +23,14 @@ use rand::RngCore;
 use serde_json::{Value, json};
 
 const INDEX_HTML: &str = include_str!("index.html");
+/// 安全策略：默认全禁，只放行同源资源。
+///
+/// 安全响应头（全局）。
+///
+/// `script-src 'self'` 之所以能这么严：行内 `<script>`/`<style>` 已拆到 `/assets/app.{js,css}`，
+/// 页面里也不再有行内 `style=` 属性（改用工具类；JS 里 `el.style.x = …` 属 CSSOM，不受 CSP 限制）。
+/// 这样即使将来某个 sink 写错，也没有「内联脚本执行」这条路。
+const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 /// 作答接口的请求体上限。
 ///
 /// 「一题答案 ≤1 MiB」在 JSON 里最坏会被转义成 2 倍（`\n`/`"`/`\`），所以留 4 MiB；
@@ -426,15 +434,14 @@ fn main() -> Result<()> {
     harden_state_dir(&state_dir);
 
     // ---- TLS：默认开；没证书就自动生成 ----
+    let hosts = tls_hosts(&cli);
+    let external_cert = cli.tls_cert.is_some();
     let tls_material = match cli.tls {
         TlsMode::Off => None,
         TlsMode::Auto => Some(match (&cli.tls_cert, &cli.tls_key) {
             // 老师给了自己的证书（例如用内网 CA 签的）：只加载，绝不覆盖。
             (Some(cert), Some(key)) => tls::load(cert, key)?,
-            (None, None) => {
-                let hosts = tls_hosts(&cli);
-                tls::load_or_generate(&cli.answers_dir.join("tls"), &hosts, 365)?
-            }
+            (None, None) => tls::load_or_generate(&cli.answers_dir.join("tls"), &hosts, 365)?,
             _ => anyhow::bail!("--tls-cert 与 --tls-key 必须同时给出"),
         }),
     };
@@ -469,6 +476,31 @@ fn main() -> Result<()> {
     });
 
     let listener = bind_listener(&cli.bind, cli.port)?;
+
+    // 明文跳转端口**先绑定、后打印**：绑定失败（8080 被占用）时，横幅里必须写明
+    // 「旧书签不会自动跳」，否则老师以为旧书签还能用，学生打开就是报错页。
+    let mut redirect_error: Option<String> = None;
+    let redirect_listener = if tls_material.is_some() {
+        match cli.http_redirect_port {
+            0 => None,
+            p if p == cli.port => {
+                println!("⚠ --http-redirect-port 与 --port 相同（{p}）：已自动关闭明文跳转端口");
+                None
+            }
+            p => match bind_listener(&cli.bind, p) {
+                Ok(redirect) => Some(redirect),
+                Err(e) => {
+                    redirect_error = Some(format!("{e:#}"));
+                    None
+                }
+            },
+        }
+    } else {
+        if cli.http_redirect_port != 0 {
+            println!("⚠ 当前是明文 HTTP（--tls off）：--http-redirect-port 将被忽略");
+        }
+        None
+    };
     // 告诉学生该访问哪个地址：绑 0.0.0.0 / [::] 时用本机局域网 IP（教师机可能有多个），
     // 绑了具体地址（例如只绑 LAN、或只绑 127.0.0.1 调试）就直接用那个地址——
     // 否则绑了回环还会打印一个学生根本连不上的局域网 URL。
@@ -478,6 +510,13 @@ fn main() -> Result<()> {
         cli.port
     );
     if let Some(material) = &tls_material {
+        if external_cert {
+            // 外部证书不做 X.509 自检（那要额外依赖），只能提示老师自己确认。
+            println!(
+                "⚠ 外部证书未自检：请确认 SAN 含 {}、未过期、且与私钥匹配",
+                hosts.join(", ")
+            );
+        }
         if material.generated {
             println!(
                 "已自动生成自签证书（365 天）：{}（私钥 {}，仅当前用户可读）",
@@ -486,8 +525,22 @@ fn main() -> Result<()> {
             );
         }
         println!("证书指纹（SHA-256）：{}", material.fingerprint);
+        if !material.hosts.is_empty() {
+            println!("SAN：{}", material.hosts.join(", "));
+        }
+        if material.not_after_unix > 0 {
+            println!(
+                "证书到期：{}（UTC；到期前 30 天重启会自动重签）",
+                format_utc_datetime(material.not_after_unix)
+            );
+        }
         println!("学生首次打开会提示「不安全」→ 点「高级 → 继续前往」；指纹应与这里一致");
-        if cli.http_redirect_port != 0 {
+        if let Some(err) = &redirect_error {
+            println!(
+                "⚠ 旧书签自动跳转未启动（端口 {}）：{err}",
+                cli.http_redirect_port
+            );
+        } else if redirect_listener.is_some() {
             println!(
                 "旧书签 http://{}:{} 会自动跳到 HTTPS",
                 bind_host(&cli.bind),
@@ -519,27 +572,26 @@ fn main() -> Result<()> {
         });
     }
 
-    if tls_material.is_some() && cli.http_redirect_port != 0 {
+    if let Some(redirect) = redirect_listener {
         // 只做跳转的明文端口：任何请求都回 301 到 HTTPS。它不返回页面、不碰状态，
         // 所以「明文端口泄漏答案」的问题不存在——泄漏只发生在真正的数据请求上。
-        let bind = cli.bind.clone();
-        let redirect_port = cli.http_redirect_port;
         let host = bind_host(&cli.bind);
         let https_port = cli.port;
-        std::thread::spawn(move || {
-            if let Err(e) = redirect_loop(&bind, redirect_port, host, https_port) {
-                eprintln!("⚠ 明文跳转端口未启动（{redirect_port}）：{e:#}");
-            }
-        });
+        std::thread::spawn(move || redirect_loop(redirect, host, https_port));
     }
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let app = Arc::clone(&app);
+                let tls_mode = app.tls.is_some();
                 std::thread::spawn(move || {
                     if let Err(e) = handle(app, stream) {
-                        eprintln!("连接处理失败：{e:#}");
+                        if tls_mode {
+                            log_tls_error(&e);
+                        } else {
+                            eprintln!("连接处理失败：{e:#}");
+                        }
                     }
                 });
             }
@@ -559,33 +611,96 @@ fn tls_hosts(cli: &Cli) -> Vec<String> {
     vec![local_ip(), "127.0.0.1".to_string(), "localhost".to_string()]
 }
 
-/// 只做跳转的明文端口：读一行请求行，回 301 到 HTTPS，然后关闭。
+/// 明文跳转端口最多同时处理多少连接。
+///
+/// 这个端口**不加密、不认证**，任何能连上的人都能开连接；主监听器有 256 上限，
+/// 这里也要有——否则 8080 就成了「一个不停 spawn 线程」的后门，会和主服务抢 CPU。
+const MAX_REDIRECT_CONNS: usize = 64;
+
+/// 只做跳转的明文端口：每个连接读一行请求行、回 301 到 HTTPS，然后关闭。
 ///
 /// 它**不返回页面、不碰状态**，所以「明文端口泄漏答案」的问题不存在——
 /// 泄漏只会发生在真正的数据请求上，而那些请求只走 TLS 端口。
-fn redirect_loop(bind: &str, port: u16, host: String, https_port: u16) -> Result<()> {
-    let listener = bind_listener(bind, port)?;
+fn redirect_loop(listener: TcpListener, host: String, https_port: u16) {
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(e) => {
+                eprintln!("明文跳转端口 accept 失败：{e}");
+                continue;
+            }
+        };
+        if active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_REDIRECT_CONNS {
+            active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            // 超限直接丢连接：跳转不是必需功能，别让它拖垮主服务。
+            continue;
+        }
+        struct Slot(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Slot {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _slot = Slot(Arc::clone(&active));
         let host = host.clone();
         std::thread::spawn(move || {
-            let mut buf = [0u8; 2048];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let path = std::str::from_utf8(&buf[..n])
-                .ok()
-                .and_then(|text| text.lines().next().map(str::to_string))
-                .and_then(|line| line.split_whitespace().nth(1).map(str::to_string))
-                .unwrap_or_else(|| "/".to_string());
-            let location = format!("https://{host}:{https_port}{path}");
-            let resp = format!(
-                "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            );
-            let _ = stream.write_all(resp.as_bytes());
-            let _ = stream.flush();
+            let _slot = _slot;
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            handle_redirect_stream(&mut stream, &host, https_port);
         });
     }
-    Ok(())
+}
+
+/// 单个明文连接 → 301。抽成函数是为了能直接测（复制一份逻辑的用例毫无判别力）。
+fn handle_redirect_stream(stream: &mut TcpStream, host: &str, https_port: u16) {
+    let mut buf = [0u8; 2048];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    let path = std::str::from_utf8(&buf[..n])
+        .ok()
+        .and_then(|text| text.lines().next().map(str::to_string))
+        .and_then(|line| line.split_whitespace().nth(1).map(str::to_string))
+        .unwrap_or_else(|| "/".to_string());
+    let location = format!("https://{host}:{https_port}{path}");
+    let resp = format!(
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let _ = stream.write_all(resp.as_bytes());
+    let _ = stream.flush();
+}
+
+/// 把 Unix 秒格式化成 `YYYY-MM-DD HH:MM`（UTC）。
+///
+/// 证书的 `notAfter` 本来就是 UTC 语义，这里也标 UTC，避免老师按本地时区误读。
+fn format_utc_datetime(unix: u64) -> String {
+    let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(unix as i64) else {
+        return "未知".to_string();
+    };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        dt.year(),
+        u8::from(dt.month()),
+        dt.day(),
+        dt.hour(),
+        dt.minute()
+    )
+}
+
+/// TLS 端口上的连接级错误计数（用于日志采样）。
+static CONN_ERRORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// TLS 端口上的连接错误：前 5 次完整打印，之后每 100 次抽样一行。
+///
+/// 为什么采样：`https://` 端口被 `http://` 访问、或端口扫描，都会稳定产生一条错误；
+/// 全班几十台设备 + 扫描器就能把日志刷满、并把真正的故障淹掉。
+fn log_tls_error(e: &anyhow::Error) {
+    use std::sync::atomic::Ordering;
+    let n = CONN_ERRORS.fetch_add(1, Ordering::Relaxed) + 1;
+    if n <= 5 || n.is_multiple_of(100) {
+        eprintln!(
+            "连接处理失败（第 {n} 次；可能是用 http:// 访问了 HTTPS 端口，或端口扫描）：{e:#}"
+        );
+    }
 }
 
 fn local_ip() -> String {
@@ -670,22 +785,35 @@ fn handle(app: Arc<App>, mut stream: TcpStream) -> Result<()> {
     let _guard = Guard(&app.conns);
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     // 超时要设在**裸 TCP** 上：TLS 握手与后续读取都受它约束（StreamOwned 不暴露 set_read_timeout）。
+    //
+    // 再克隆一个句柄留给 `drain_briefly` 临时把超时降到 200 ms：克隆的是同一个 socket，
+    // 改超时对 TLS 会话同样生效。否则「声明超大 Content-Length 却不发数据」能把线程占满 10 秒。
+    let ctl = stream.try_clone().ok();
     let peer = peer_ip(&stream);
     match app.tls.clone() {
         Some(config) => {
             let conn = rustls::ServerConnection::new(config)
                 .context("创建 TLS 会话失败（证书配置有问题？）")?;
             let mut tls = rustls::StreamOwned::new(conn, stream);
-            serve(&app, &mut tls, peer)
+            let result = serve(&app, &mut tls, peer, ctl.as_ref());
+            // 显式发 close_notify：只写 FIN 的话，部分客户端会把 EOF 当「响应被截断」。
+            tls.conn.send_close_notify();
+            let _ = tls.flush();
+            result
         }
-        None => serve(&app, &mut stream, peer),
+        None => serve(&app, &mut stream, peer, ctl.as_ref()),
     }
 }
 
 /// 处理一条已建立（可能已加密）的连接的请求。
 ///
 /// 泛化成 `Read + Write` 是为了同一套代码同时跑明文与 TLS；`peer` 由调用方从裸 TCP 取。
-fn serve(app: &App, stream: &mut (impl Read + Write), peer: IpAddr) -> Result<()> {
+fn serve(
+    app: &App,
+    stream: &mut (impl Read + Write),
+    peer: IpAddr,
+    ctl: Option<&TcpStream>,
+) -> Result<()> {
     match read_request(stream, peer)? {
         ReadOutcome::Closed => Ok(()),
         ReadOutcome::Oversized(limit) => {
@@ -693,22 +821,45 @@ fn serve(app: &App, stream: &mut (impl Read + Write), peer: IpAddr) -> Result<()
             // 客户端可能只看到「连接被重置」而不是 413。
             let resp = Response::error(413, format!("请求体超过 {limit} 字节"));
             let _ = write_response(stream, resp);
-            drain_briefly(stream);
+            with_short_read_timeout(ctl, || drain_briefly(stream));
             Ok(())
         }
         ReadOutcome::Chunked => {
             let resp = Response::error(411, "不支持分块传输（请带上 Content-Length）");
             let _ = write_response(stream, resp);
-            drain_briefly(stream);
+            with_short_read_timeout(ctl, || drain_briefly(stream));
             Ok(())
         }
         ReadOutcome::Request(req) => write_response(stream, route(app, &req)),
     }
 }
 
+/// 把读超时临时降到 200 ms 执行 `f`，结束后恢复 10 s。
+///
+/// 为什么需要：`drain_briefly` 是「尽力把没读的 body 读掉」，绝不能为了它把线程占住
+/// 10 秒——恶意客户端发一个「声明 100 MiB、实际不发」的请求就能刷满 256 个连接。
+fn with_short_read_timeout(ctl: Option<&TcpStream>, f: impl FnOnce()) {
+    if let Some(ctl) = ctl {
+        let _ = ctl.set_read_timeout(Some(Duration::from_millis(200)));
+        f();
+        let _ = ctl.set_read_timeout(Some(Duration::from_secs(10)));
+    } else {
+        f();
+    }
+}
+
 fn route(app: &App, req: &Request) -> Response {
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/") => Response::html_owned(index_html(app)),
+        ("GET", "/assets/app.css") => {
+            Response::asset("text/css; charset=utf-8", include_str!("../assets/app.css"))
+        }
+        // 行内脚本/样式拆到这里，是为了能上 CSP（`script-src 'self'`）——
+        // 行内 `<script>` 只能靠 `'unsafe-inline'` 放行，等于没加 CSP。
+        ("GET", "/assets/app.js") => Response::asset(
+            "text/javascript; charset=utf-8",
+            include_str!("../assets/app.js"),
+        ),
         ("GET", "/assets/codemirror.css") => Response::asset(
             "text/css; charset=utf-8",
             include_str!("../assets/codemirror.min.css"),
@@ -941,10 +1092,12 @@ fn cookie_token(req: &Request) -> Option<String> {
 ///
 /// 用占位替换而不是两套模板：页面只有一份，改动不会漂。
 fn index_html(app: &App) -> String {
+    // TLS 与明文各一条：明文模式下如果什么都不显示，页面看起来和 HTTPS 一模一样，
+    // 学生/监考都无从判断「现在到底加没加密」。
     let hint = if app.secure_cookies {
         "<div class=\"note\">本页使用考场内网自签证书：若浏览器提示「不安全」，请点「高级 → 继续前往」；证书指纹应与教师屏幕一致。iPad/iPhone 请用 Safari（Chrome 无法绕过证书警告）。</div>"
     } else {
-        ""
+        "<div class=\"note\">⚠ 当前为明文 HTTP（老师用 --tls off 启动）：仅限排障；请让学生先和监考确认后再作答。</div>"
     };
     INDEX_HTML.replace("<!--TLS_HINT-->", hint)
 }
@@ -1576,6 +1729,9 @@ fn time_info(app: &App, req: &Request) -> Response {
             "start_unix": start,
             "end_unix": end,
             "remaining": end.saturating_sub(app.now()),
+            // 前端每 15 s 轮询一次：让它能发现「服务端已经自动收卷了」，从而切到
+            // 「已交卷」页，而不是继续在灰掉的输入框里打字、每次保存都吃 409。
+            "submitted": st.submitted,
             // 诊断用：前端不展示，但老师/排障时能用 curl 确认「服务端时间是校准过的」。
             "time_mode": app.time_mode.as_str(),
             "clock_offset_secs": app.clock.offset_secs(),
@@ -1787,10 +1943,9 @@ fn read_request(stream: &mut impl Read, peer: IpAddr) -> Result<ReadOutcome> {
 
 /// 把没读掉的请求体短暂读掉，避免 `close` 发 RST 让客户端看不到 413/411。
 ///
-/// 只在上限/分块分支调用；最多读 1 MiB 或 200 ms，绝不无限等价于读完整 body。
+/// 只在上限/分块分支调用；调用方用 `with_short_read_timeout` 把超时压到 200 ms，
+/// 最多读 1 MiB，绝不无限等价于读完整 body。
 fn drain_briefly(stream: &mut impl Read) {
-    // 超时已经在裸 TCP 上设过（TLS 会话拿不到 set_read_timeout），这里只管读。
-    // 最坏情况是等满那 10 秒读超时——只发生在超大请求体上，可接受。
     let mut buf = [0u8; 8192];
     let mut total = 0usize;
     while total < 1024 * 1024 {
@@ -1818,12 +1973,26 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
 }
 
 fn write_response(stream: &mut impl Write, resp: Response) -> Result<()> {
+    // 安全响应头对**所有**响应都加（含 4xx/5xx）：页面没有第三方资源，
+    // 所以 CSP 可以收到最紧（`default-src 'none'` + 只放行同源脚本/样式）。
+    // 这些头不防已经进了教师机的恶意软件，但能兜住「将来某个 sink 写错」这类 XSS，
+    // 并阻止同网段页面用 iframe 做点击劫持。
     let mut out = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
+        "HTTP/1.1 {} {}\r\n\
+         Content-Type: {}\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         Cache-Control: no-store\r\n\
+         Content-Security-Policy: {}\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         X-Frame-Options: DENY\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         Permissions-Policy: geolocation=(), camera=(), microphone=()\r\n",
         resp.status,
         status_text(resp.status),
         resp.content_type,
-        resp.body.len()
+        resp.body.len(),
+        CONTENT_SECURITY_POLICY
     );
     for (k, v) in &resp.headers {
         out.push_str(&format!("{k}: {v}\r\n"));
