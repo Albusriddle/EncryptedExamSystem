@@ -66,9 +66,9 @@ def test_url_appears_only_after_service_is_ready(dialog) -> None:
     dialog._consume_output("结论：正常（偏差 0 秒未超出容差）\n")
     assert "未启动" in dialog.lbl_url.text(), "端口还没绑定，不该显示地址"
 
-    dialog._consume_output("考试服务已启动：http://192.168.1.5:8080/\n")
+    dialog._consume_output("考试服务已启动：https://192.168.1.5:8443/\n")
     assert dialog.lbl_url.text() == access_url(dialog.spin_port.value())
-    assert dialog.lbl_url.text().startswith("http://")
+    assert dialog.lbl_url.text().startswith("https://")
 
 
 def test_url_uses_the_bound_address(qapp, tmp_path) -> None:
@@ -78,8 +78,8 @@ def test_url_uses_the_bound_address(qapp, tmp_path) -> None:
         values = [dlg.combo_bind.itemData(i) for i in range(dlg.combo_bind.count())]
         assert "127.0.0.1" in values, "候选里应有「仅本机」"
         dlg.combo_bind.setCurrentIndex(values.index("127.0.0.1"))
-        dlg._consume_output("考试服务已启动：http://127.0.0.1:8080/\n")
-        assert dlg.lbl_url.text().startswith("http://127.0.0.1:"), dlg.lbl_url.text()
+        dlg._consume_output("考试服务已启动：https://127.0.0.1:8443/\n")
+        assert dlg.lbl_url.text().startswith("https://127.0.0.1:"), dlg.lbl_url.text()
     finally:
         dlg.close()
 
@@ -90,8 +90,8 @@ def test_marker_split_across_two_reads_still_unlocks(qapp, tmp_path) -> None:
     try:
         dlg._consume_output("考试服务已启")
         assert "未启动" in dlg.lbl_url.text(), "半个标志不该放行"
-        dlg._consume_output("动：http://192.168.1.5:8080/\n")
-        assert dlg.lbl_url.text().startswith("http://"), "跨两次输出也要能拼出完整标志"
+        dlg._consume_output("动：https://192.168.1.5:8443/\n")
+        assert dlg.lbl_url.text().startswith("https://"), "跨两次输出也要能拼出完整标志"
     finally:
         dlg.close()
 
@@ -186,7 +186,7 @@ def test_ready_marker_matches_server_source() -> None:
     root = Path(__file__).resolve().parents[2]
     src = (root / "crates" / "server" / "src" / "main.rs").read_text(encoding="utf-8")
     # println! 可能被 rustfmt 折行，所以断言「格式串本身」而不是整行。
-    fmt = '"考试服务已启动：http://{}:{}/"'
+    fmt = '"考试服务已启动：{scheme}://{}:{}/"'
     assert fmt in src, "服务端就绪标志行变了，管理端的就绪判断要同步"
     assert fmt.strip('"').startswith(READY_MARKER), "READY_MARKER 必须是格式串的前缀"
     # GUI 传的两个参数必须仍是服务端的命令行参数（clap 由字段名生成 flag）。

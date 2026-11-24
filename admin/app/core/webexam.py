@@ -9,8 +9,16 @@ import ipaddress
 import socket
 from pathlib import Path
 
-#: 网页考试默认端口。
-DEFAULT_PORT = 8080
+#: 网页考试默认端口（HTTPS）。
+#:
+#: v1.5.0 起服务端默认走 HTTPS；旧书签用的 8080 由服务端另开一个「只回 301」的明文端口。
+DEFAULT_PORT = 8443
+
+#: 默认明文 301 端口（只用于旧书签跳转；0 = 关闭）。
+DEFAULT_HTTP_REDIRECT_PORT = 8080
+
+#: TLS 模式默认值："auto"（自签证书，没证书就自动生成）/"off"（明文，仅排障）。
+DEFAULT_TLS = "auto"
 
 #: 默认监听地址：所有网卡。老师在多网卡（机房 LAN + 外网）机器上可以只绑 LAN 地址，
 #: 这样外网侧根本连不上——比依赖防火墙更直接。
@@ -45,6 +53,8 @@ def web_command(
     bind: str = DEFAULT_BIND,
     time_check: str = DEFAULT_TIME_CHECK,
     login_rate_limit: int = DEFAULT_LOGIN_RATE_LIMIT,
+    tls: str = DEFAULT_TLS,
+    http_redirect_port: int = DEFAULT_HTTP_REDIRECT_PORT,
 ) -> list[str]:
     """拼出 `exam-server` 的 argv。
 
@@ -71,6 +81,13 @@ def web_command(
         time_check,
         "--login-rate-limit",
         str(login_rate_limit),
+        # v1.5.0：默认 HTTPS（自签证书）。`off` 只用于排障或浏览器无法绕过证书警告的场合。
+        "--tls",
+        tls,
+        "--http-redirect-port",
+        # 老师可能把 HTTPS 也配到 8080：这时跳转端口没法用，直接关掉（0），
+        # 而不是拦住他——旧书签本来就该跟着换地址。
+        str(0 if http_redirect_port == port else http_redirect_port),
     ]
 
 
@@ -82,6 +99,8 @@ def validate_inputs(
     bind: str = DEFAULT_BIND,
     time_check: str = DEFAULT_TIME_CHECK,
     login_rate_limit: int = DEFAULT_LOGIN_RATE_LIMIT,
+    tls: str = DEFAULT_TLS,
+    http_redirect_port: int = DEFAULT_HTTP_REDIRECT_PORT,
 ) -> str | None:
     """返回错误文案；None 表示可以启动。
 
@@ -99,6 +118,10 @@ def validate_inputs(
         return f"监听地址必须是 IP（例如 0.0.0.0 或 192.168.1.5），实际 {bind!r}"
     if time_check not in TIME_CHECK_MODES:
         return f"时间校验必须是 {' / '.join(TIME_CHECK_MODES)} 之一（实际 {time_check!r}）"
+    if tls not in ("auto", "off"):
+        return f"TLS 模式必须是 auto / off 之一（实际 {tls!r}）"
+    if not (0 <= http_redirect_port <= 65535):
+        return f"明文跳转端口必须在 0–65535 之间（0 = 关闭），实际 {http_redirect_port}"
     if not (0 <= login_rate_limit <= MAX_LOGIN_RATE_LIMIT):
         return (
             f"同 IP 登录上限必须在 0–{MAX_LOGIN_RATE_LIMIT} 之间（0 = 不限），"
@@ -162,5 +185,10 @@ def advertised_host(bind: str) -> str:
     return local_ip() if bind in ("0.0.0.0", "::", "[::]") else bind
 
 
-def access_url(port: int, ip: str | None = None) -> str:
-    return f"http://{ip or local_ip()}:{port}/"
+def access_url(port: int, ip: str | None = None, tls: bool = True) -> str:
+    """学生该打开的地址。v1.5.0 起默认 https（自签证书）。
+
+    `tls=False` 只在老师显式用 `--tls off` 排障时用——那时地址要显示成 http。
+    """
+    scheme = "https" if tls else "http"
+    return f"{scheme}://{ip or local_ip()}:{port}/"

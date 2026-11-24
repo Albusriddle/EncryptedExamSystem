@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.core.webexam import (
     DEFAULT_BIND,
+    DEFAULT_HTTP_REDIRECT_PORT,
     DEFAULT_LOGIN_RATE_LIMIT,
     DEFAULT_TIME_CHECK,
     access_url,
@@ -139,4 +140,52 @@ def test_advertised_host_follows_bind() -> None:
 
 
 def test_access_url_uses_given_ip() -> None:
-    assert access_url(8080, "192.168.1.5") == "http://192.168.1.5:8080/"
+    # v1.5.0：默认 HTTPS（自签证书）；只有显式 tls=False 才显示 http。
+    assert access_url(8443, "192.168.1.5") == "https://192.168.1.5:8443/"
+    assert access_url(8443, "192.168.1.5", tls=False) == "http://192.168.1.5:8443/"
+
+
+def test_web_command_carries_tls_flags(tmp_path: Path) -> None:
+    """v1.5.0：默认 HTTPS，argv 必须带 --tls auto 与明文跳转端口。"""
+    cmd = web_command(
+        server=Path("exam-server.exe"),
+        package=tmp_path / "pkg.exe",
+        keyfile=tmp_path / "key.txt",
+        port=8443,
+        answers_dir=tmp_path / "answers",
+    )
+    assert cmd[cmd.index("--tls") + 1] == "auto"
+    assert cmd[cmd.index("--port") + 1] == "8443"
+    assert cmd[cmd.index("--http-redirect-port") + 1] == str(DEFAULT_HTTP_REDIRECT_PORT) == "8080"
+
+    off = web_command(
+        server=Path("exam-server.exe"),
+        package=tmp_path / "pkg.exe",
+        keyfile=tmp_path / "key.txt",
+        port=8443,
+        answers_dir=tmp_path / "answers",
+        tls="off",
+    )
+    assert off[off.index("--tls") + 1] == "off"
+
+
+def test_redirect_port_is_disabled_when_it_equals_https_port(tmp_path: Path) -> None:
+    """HTTPS 也配在 8080 时，跳转端口自动关掉（0），不拦老师。"""
+    cmd = web_command(
+        server=Path("exam-server.exe"),
+        package=tmp_path / "pkg.exe",
+        keyfile=tmp_path / "key.txt",
+        port=8080,
+        answers_dir=tmp_path / "answers",
+        http_redirect_port=8080,
+    )
+    assert cmd[cmd.index("--http-redirect-port") + 1] == "0"
+
+
+def test_validate_inputs_rejects_bad_tls(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg.exe"
+    key = tmp_path / "key.txt"
+    pkg.write_bytes(b"MZ")
+    key.write_text("00" * 32, encoding="utf-8")
+    bad = validate_inputs(pkg, key, 8443, tls="strict")
+    assert bad is not None and "TLS" in bad

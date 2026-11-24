@@ -47,36 +47,40 @@ EXAM_MASTER=$MASTER "$BUILDER" build \
   --stub "$CLIENT" --out "$WORK/pkg" \
   --emit-keyfile "$WORK/key.txt" >/dev/null 2>&1
 
+# 走 HTTPS（自签）：这条冒烟同时验证「自动生成证书 → 握手 → 登录/作答/交卷」。
+# --http-redirect-port 0：不占用 8080，冒烟不需要跳转端口。
 "$SERVER" --package "$WORK/pkg" --keyfile "$WORK/key.txt" \
-  --port "$PORT" --answers-dir "$WORK/answers" >"$WORK/server.log" 2>&1 &
+  --port "$PORT" --answers-dir "$WORK/answers" \
+  --tls auto --http-redirect-port 0 >"$WORK/server.log" 2>&1 &
 PID=$!
 
 # 启动时先做一次网络时间校验（默认 warn 档，无外网时最多等约 6 秒），
 # 所以就绪等待要给到 20 秒；上界放宽后仍用轮询，通了就立刻继续。
 for _ in $(seq 1 80); do
-  curl -sS -o /dev/null "http://127.0.0.1:$PORT/" && break
+  curl -sS -k -o /dev/null "https://127.0.0.1:$PORT/" && break
   sleep 0.25
 done
 # 这一行是 v1.4.3 新增的启动结论，缺失说明时间校验被绕过或日志被改坏。
 grep -q "时间校验：" "$WORK/server.log" || { cat "$WORK/server.log"; echo "启动日志缺少时间校验结论"; exit 1; }
-C="curl -sS -H Content-Type:application/json -H X-EES-CSRF:1"
+# -k：自签证书；冒烟不校验证书（证书正确性由 Rust 的 TLS 用例覆盖）。
+C="curl -sS -k -H Content-Type:application/json -H X-EES-CSRF:1"
 # 响应先落文件再 grep：`curl | grep -q` 在 pipefail 下会假失败——grep 一匹配就退出，
 # curl 写后续字节触发 EPIPE，整条管道返回非 0。响应体目前很小不会触发，但一旦变大
 # 就会变成偶发红灯；仓库在 verify-embed.sh 里已经踩过并改成两段式。
 $C -c "$WORK/c.txt" -d '{"student_id":2021001,"pin":null}' \
-  "http://127.0.0.1:$PORT/api/login" -o "$WORK/login.json" \
+  "https://127.0.0.1:$PORT/api/login" -o "$WORK/login.json" \
   || { cat "$WORK/server.log"; echo "登录请求本身失败（curl 非零退出，服务端日志见上）"; exit 1; }
 grep -q '"ok":true' "$WORK/login.json" \
   || { cat "$WORK/server.log"; echo "登录失败：$(cat "$WORK/login.json")"; exit 1; }
-$C -b "$WORK/c.txt" "http://127.0.0.1:$PORT/api/paper" -o "$WORK/paper.json" \
+$C -b "$WORK/c.txt" "https://127.0.0.1:$PORT/api/paper" -o "$WORK/paper.json" \
   || { cat "$WORK/server.log"; echo "取卷请求本身失败（curl 非零退出）"; exit 1; }
 QID=$($PY -c "import json,sys;d=json.load(open('$WORK/paper.json',encoding='utf-8'));print(d['paper']['sections'][0]['items'][0]['id'])")
 $C -b "$WORK/c.txt" -X PUT -d "{\"qid\":\"$QID\",\"value\":\"B\"}" \
-  "http://127.0.0.1:$PORT/api/answer" -o "$WORK/answer.json" \
+  "https://127.0.0.1:$PORT/api/answer" -o "$WORK/answer.json" \
   || { cat "$WORK/server.log"; echo "保存请求本身失败（curl 非零退出）"; exit 1; }
 grep -q '"ok":true' "$WORK/answer.json" \
   || { echo "保存答案失败：$(cat "$WORK/answer.json")"; exit 1; }
-$C -b "$WORK/c.txt" -X POST -d '{}' "http://127.0.0.1:$PORT/api/submit" -o "$WORK/submit.json" \
+$C -b "$WORK/c.txt" -X POST -d '{}' "https://127.0.0.1:$PORT/api/submit" -o "$WORK/submit.json" \
   || { cat "$WORK/server.log"; echo "交卷请求本身失败（curl 非零退出）"; exit 1; }
 grep -q '"ok":true' "$WORK/submit.json" \
   || { echo "交卷失败：$(cat "$WORK/submit.json")"; exit 1; }

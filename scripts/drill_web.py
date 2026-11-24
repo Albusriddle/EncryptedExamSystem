@@ -98,6 +98,11 @@ class Server:
                     # 由单测（第 21 次 429 / 换 IP 放行）覆盖。
                     "--login-rate-limit",
                     "0",
+                    # v1.5.0 起服务端默认 HTTPS；演练测的是并发与崩溃恢复，
+                    # 不掺 TLS 握手开销，也免得脚本里到处 -k。TLS 本身由
+                    # scripts/smoke-web.sh（走 https）与 Rust 的 TLS 端到端用例覆盖。
+                    "--tls",
+                    "off",
                 ],
                 stdout=log,
                 stderr=subprocess.STDOUT,
