@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 import re
 from pathlib import Path
@@ -35,22 +36,37 @@ MAX_KDF_PARALLEL = 8
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
-def atomic_write(path: Path, data: bytes) -> None:
-    """原子写：先写 `<name>.tmp`，flush + fsync 后再 `os.replace`。
+#: 临时文件名序号：同一目标的并发写（例如后台签发收据与「导出私钥」撞同一路径）
+#: 必须各写各的临时文件，否则先 replace 的那个会把对方半截内容顶上目标位置。
+_TMP_SEQ = itertools.count(1)
+
+
+def atomic_write(path: Path, data: bytes, mode: int | None = None) -> None:
+    """原子写：先写唯一临时文件，flush + fsync 后再 `os.replace`。
 
     为什么不能直接 `path.write_bytes(data)`：`.eekey` 是主密钥的**唯一备份**、
     `receipt-key.pem` 是收据签名私钥。直接覆盖写时断电/崩溃会留下半截文件，
     而错误要到「恢复主密钥 / 签发收据」时才暴露——那时已经没有可恢复的源。
     先写临时文件再替换，最坏结果是「还是旧文件」，而不是「文件坏了」。
 
+    `mode` 非空时用 `os.open` 按该权限**创建**临时文件（私钥用 0600）：
+    先按 umask 创建再 chmod 会留下一个几毫秒的「别人可读」窗口。
+
     失败时清理临时文件并原样抛出：调用方（管理端界面）要把异常显示给老师。
     """
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{next(_TMP_SEQ)}.tmp")
     try:
-        with open(tmp, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
+        if mode is None:
+            with open(tmp, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+        else:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -161,11 +177,18 @@ def unseal(magic: bytes, passphrase: str, blob: bytes) -> bytes:
     raise ValueError("文件格式不正确或已损坏")
 
 
-def backup_master_key(master_hex: str, path: Path, passphrase: str) -> None:
+def backup_master_key(master_hex: str, path: Path, passphrase: str) -> str | None:
+    """把主密钥加密备份到 `.eekey`；返回权限收紧的告警（None = 一切正常）。
+
+    为什么把告警**返回**给调用方：`.eekey` 是主密钥的唯一备份，Windows 上
+    `chmod` 拿不到 ACL（文件在用户私有的 `%LOCALAPPDATA%` 下，风险低），
+    但静默吞掉就等于「权限没收紧」永远没人知道；界面应把告警显示给老师。
+    """
     if not _HEX64.match(master_hex.strip()):
         raise ValueError("主密钥必须是 64 位十六进制")
     # 原子写：备份失败时要保证「旧的备份还在」，而不是两份都没了。
     atomic_write(path, seal(MAGIC_KEY, passphrase, master_hex.strip().lower().encode()))
+    return restrict_permissions(path)
 
 
 def restore_master_key(path: Path, passphrase: str) -> str:

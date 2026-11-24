@@ -255,3 +255,25 @@ def test_replace_failure_rolls_back_already_written_files(tmp_path: Path, monkey
     for rel, text in before.items():
         assert read(root, rel) == text, f"{rel} 没有被回滚"
     assert not list(root.rglob("*.tmp-*")), "失败后不能留下 .tmp-* 文件"
+
+
+def test_keyboard_interrupt_also_rolls_back(tmp_path: Path, monkeypatch) -> None:
+    """Ctrl-C 不是 `OSError`：必须单独捕获，否则会留下「一半新一半旧」+ 残 tmp。"""
+    root = make_tree(tmp_path)
+    module = _load_bump_module()
+    before = {rel: read(root, rel) for rel in FILES}
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def interrupted(src, dst):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise KeyboardInterrupt
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(module.os, "replace", interrupted)
+    assert module.bump(root, NEW, dry_run=False) == 1
+
+    for rel, text in before.items():
+        assert read(root, rel) == text, f"{rel} 没有被回滚"
+    assert not list(root.rglob("*.tmp-*")), "中断后不能留下 .tmp-* 文件"

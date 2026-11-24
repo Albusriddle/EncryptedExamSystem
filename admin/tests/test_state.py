@@ -377,3 +377,30 @@ def test_save_keeps_bak_of_previous_version(tmp_path: Path) -> None:
     assert bak.is_file(), "覆盖前要留一份 .bak"
     assert ProjectState.load(bak).students == [1]
     assert ProjectState.load(p).students == [1, 2]
+
+
+def test_save_restores_project_when_replace_fails(tmp_path: Path, monkeypatch) -> None:
+    """新文件没能顶上去时，旧工程必须放回原位——不能「保存一次就没了」。
+
+    顺序是 `os.replace(path, bak)` → `os.replace(tmp, path)`；第二步失败时如果
+    不把 .bak 挪回去，老师的工程文件就凭空消失了（而 .bak 只在同目录、名字也变了）。
+    """
+    from app.core import state as state_mod
+
+    p = tmp_path / "proj.json"
+    ProjectState(students=[1]).save(p)
+    real_replace = state_mod.os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:  # 1: 旧文件→.bak；2: 新文件→目标（这里失败）
+            raise OSError(28, "No space left on device")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(state_mod.os, "replace", flaky)
+    with pytest.raises(OSError):
+        ProjectState(students=[1, 2]).save(p)
+
+    assert p.is_file(), "替换失败后旧工程必须回到原位"
+    assert ProjectState.load(p).students == [1], "回到原位的应该是上一版内容"

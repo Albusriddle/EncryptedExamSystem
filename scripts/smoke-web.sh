@@ -16,14 +16,14 @@ pick_python() {
   local cand
   for cand in python3 python; do
     if command -v "$cand" >/dev/null 2>&1 \
-      && "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+      && "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
       echo "$cand"
       return 0
     fi
   done
   return 1
 }
-PY="$(pick_python)" || { echo "缺少可用的 Python 3.10+"; exit 2; }
+PY="$(pick_python)" || { echo "缺少可用的 Python 3.11+（脚本用了 datetime.UTC）"; exit 2; }
 PORT="${EES_WEB_PORT:-$($PY -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")}"
 PID=""
 cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null || true; }  # 保留 $WORK 便于失败排查
@@ -64,16 +64,20 @@ C="curl -sS -H Content-Type:application/json -H X-EES-CSRF:1"
 # curl 写后续字节触发 EPIPE，整条管道返回非 0。响应体目前很小不会触发，但一旦变大
 # 就会变成偶发红灯；仓库在 verify-embed.sh 里已经踩过并改成两段式。
 $C -c "$WORK/c.txt" -d '{"student_id":2021001,"pin":null}' \
-  "http://127.0.0.1:$PORT/api/login" -o "$WORK/login.json"
+  "http://127.0.0.1:$PORT/api/login" -o "$WORK/login.json" \
+  || { cat "$WORK/server.log"; echo "登录请求本身失败（curl 非零退出，服务端日志见上）"; exit 1; }
 grep -q '"ok":true' "$WORK/login.json" \
   || { cat "$WORK/server.log"; echo "登录失败：$(cat "$WORK/login.json")"; exit 1; }
-$C -b "$WORK/c.txt" "http://127.0.0.1:$PORT/api/paper" -o "$WORK/paper.json"
+$C -b "$WORK/c.txt" "http://127.0.0.1:$PORT/api/paper" -o "$WORK/paper.json" \
+  || { cat "$WORK/server.log"; echo "取卷请求本身失败（curl 非零退出）"; exit 1; }
 QID=$($PY -c "import json,sys;d=json.load(open('$WORK/paper.json',encoding='utf-8'));print(d['paper']['sections'][0]['items'][0]['id'])")
 $C -b "$WORK/c.txt" -X PUT -d "{\"qid\":\"$QID\",\"value\":\"B\"}" \
-  "http://127.0.0.1:$PORT/api/answer" -o "$WORK/answer.json"
+  "http://127.0.0.1:$PORT/api/answer" -o "$WORK/answer.json" \
+  || { cat "$WORK/server.log"; echo "保存请求本身失败（curl 非零退出）"; exit 1; }
 grep -q '"ok":true' "$WORK/answer.json" \
   || { echo "保存答案失败：$(cat "$WORK/answer.json")"; exit 1; }
-$C -b "$WORK/c.txt" -X POST -d '{}' "http://127.0.0.1:$PORT/api/submit" -o "$WORK/submit.json"
+$C -b "$WORK/c.txt" -X POST -d '{}' "http://127.0.0.1:$PORT/api/submit" -o "$WORK/submit.json" \
+  || { cat "$WORK/server.log"; echo "交卷请求本身失败（curl 非零退出）"; exit 1; }
 grep -q '"ok":true' "$WORK/submit.json" \
   || { echo "交卷失败：$(cat "$WORK/submit.json")"; exit 1; }
 ls "$WORK/answers"/*.eea >/dev/null

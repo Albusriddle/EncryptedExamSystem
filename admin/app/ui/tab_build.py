@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,14 @@ from app.core.state import ProjectState
 from app.core.subproc import no_window_kwargs
 from app.ui.widgets import NoWheelComboBox, NoWheelSpinBox, fit_button_text, make_checkbox
 
+#: PIN 暂存件保留天数。
+#:
+#: 为什么不是「下次打包时全删」：暂存件是老师取消保存后的**唯一副本**（源文件在
+#: 临时题库目录里，打包结束就被删），全删会把 PIN 表彻底丢掉；PIN 是构建时随机
+#: 生成的，丢了只能重打包并重新分发。为什么仍要清理：留着就是一份明文 PIN 表，
+#: 7 天足够老师转存到密码管理器。
+STASH_RETENTION_DAYS = 7
+
 
 def pin_stash_dir() -> Path:
     """PIN 表暂存目录：与 `settings.ini` 同根的应用数据目录。
@@ -76,15 +85,27 @@ def stash_pin_file(src: Path, stamp: str) -> Path:
     return dest
 
 
-def cleanup_stashed_pins() -> int:
-    """删掉上次打包留下的 PIN 暂存文件，返回删除个数。
+def cleanup_stashed_pins(now: float | None = None) -> int:
+    """删掉**超过 7 天**的 PIN 暂存文件，返回删除个数；任何 IO 失败都返回 0。
 
-    为什么在「打包开始时」清理：老师关掉对话框后往往不会再回来处理这些文件；
-    留着就是一份明文 PIN 表。提示语里已写明「下次打包时自动删除」。
+    为什么按时间而不是「打包一开始全删」：暂存件是取消保存后唯一的 PIN 表副本，
+    而清理发生在配置/密钥校验**之前**——全删时哪怕这次打包随后被拦下，PIN 也
+    已经没了。按 7 天清理既避免明文长期滞留，又不会误删刚生成的那份。
+
+    为什么吞掉 OSError：清理是附带动作，`%LOCALAPPDATA%` 不可写（只读漫游配置、
+    受限账户）时不能让「打包」按钮直接抛异常。
     """
+    try:
+        directory = pin_stash_dir()
+        candidates = list(directory.glob("ees-pin-*.csv"))
+    except OSError:
+        return 0
+    cutoff = (time.time() if now is None else now) - STASH_RETENTION_DAYS * 24 * 3600
     removed = 0
-    for path in pin_stash_dir().glob("ees-pin-*.csv"):
+    for path in candidates:
         try:
+            if path.stat().st_mtime > cutoff:
+                continue  # 新文件（很可能是老师刚暂存的那份）必须留着
             path.unlink()
             removed += 1
         except OSError:
@@ -787,12 +808,15 @@ class BuildTab(QWidget):
         try:
             from app.core import secure
 
-            secure.backup_master_key(key, Path(path), pw)
+            warn = secure.backup_master_key(key, Path(path), pw)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "备份失败", str(e))
             return
+        tip = f"\n\n⚠ {warn}" if warn else ""
         QMessageBox.information(
-            self, "已备份", f"主密钥已加密备份到：\n{path}\n\n请把口令另行保存。"
+            self,
+            "已备份",
+            f"主密钥已加密备份到：\n{path}\n\n请把口令另行保存。{tip}",
         )
 
     def restore_master(self) -> None:
@@ -928,7 +952,8 @@ class BuildTab(QWidget):
         if self.worker is not None and self.worker.isRunning():
             return
 
-        # 上一次「取消保存 PIN 表」留下的明文暂存文件，在这里清掉（见 cleanup_stashed_pins）。
+        # 清理只针对「超过 7 天」的旧暂存件：刚暂存的那份是唯一副本，不能在这里删
+        # （见 cleanup_stashed_pins 的注释）。失败不影响打包。
         stashed_removed = cleanup_stashed_pins()
 
         self._sync_time_config()
@@ -1236,7 +1261,8 @@ class BuildTab(QWidget):
                 QMessageBox.warning(
                     self,
                     "PIN 表未保存",
-                    f"已暂存到：\n{stashed}\n\n请尽快复制到安全位置；下次打包开始时自动删除。",
+                    f"已暂存到：\n{stashed}\n\n"
+                    f"请尽快复制到安全位置；该文件保留 {STASH_RETENTION_DAYS} 天后自动删除。",
                 )
                 return stashed
 
@@ -1315,6 +1341,13 @@ class BuildTab(QWidget):
             )
         if self._pin_path is None or self._pin_path != self._pin_temp:
             self._cleanup_tmp()
+        # 打包成功后再清一次：成功路径通常意味着老师已把 PIN 表转存好。仍然只删
+        # 超过保留期的旧件——刚暂存的那份 mtime 是新的，不会被碰到。
+        stale_removed = cleanup_stashed_pins()
+        if stale_removed:
+            self._append(
+                f"  已清理 {stale_removed} 份过期 PIN 暂存件（超过 {STASH_RETENTION_DAYS} 天）"
+            )
         pin_note = ""
         if getattr(self, "_pin_path", None) is not None and self._pin_path.exists():
             pin_note = f"\n\nPIN 表：\n{self._pin_path}"

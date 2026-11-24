@@ -32,8 +32,8 @@ EXE = ".exe" if os.name == "nt" else ""
 DIST = ROOT / "dist"
 
 
-def find_artifact(name: str, root: Path | None = None) -> Path | None:
-    """在 target 下找 cargo 产物。
+def find_artifacts(name: str, root: Path | None = None) -> list[Path]:
+    """在 target 下按优先级列出所有 cargo 产物（可能为空）。
 
     cargo 产物位置取决于是否指定了 `--target`：
       - `cargo build --release`              → target/release/
@@ -49,21 +49,28 @@ def find_artifact(name: str, root: Path | None = None) -> Path | None:
     ]
     for d in sorted((base / "target").glob("*/release")):
         candidates.append(d / name)
-    # 多个位置都有产物时取**最新**的：本机常常同时留着 target/release 与
+    # 多个位置都有产物时把**最新**的排到最前：本机常常同时留着 target/release 与
     # target/<triple>/release，固定取前者可能拿到很久以前的旧 stub，
     # 打出来的发布包里学生端就是旧版本。
     #
     # 但同一批构建产物的 mtime 只差几毫秒，这种情况下仍按"本地优先"，
-    # 只有别的布局明显更新（>1 秒）才改用后者——既避免拿到旧产物，
+    # 只有别的布局明显更新（>1 秒）才排到最前——既避免拿到旧产物，
     # 又不改变"本机默认构建优先"的既有语义。
     found = [c for c in candidates if c.is_file()]
     if not found:
-        return None
+        return []
     local = found[0]
     newest = max(found, key=lambda p: p.stat().st_mtime)
-    if newest != local and newest.stat().st_mtime - local.stat().st_mtime <= 1.0:
-        return local
-    return newest
+    if newest != local and newest.stat().st_mtime - local.stat().st_mtime > 1.0:
+        found.remove(newest)
+        found.insert(0, newest)
+    return found
+
+
+def find_artifact(name: str, root: Path | None = None) -> Path | None:
+    """优先级最高的那个产物（找不到返回 None）。"""
+    found = find_artifacts(name, root)
+    return found[0] if found else None
 
 
 BUILDER = find_artifact(f"exam-builder{EXE}")
@@ -76,11 +83,15 @@ def _version_matches(output: str, want: str) -> bool:
     为什么要求**完全相等**而不是 `want in output`：`1.4.8` 是 `1.4.80` 的子串，
     用包含关系会把版本更旧的二进制判成匹配；而这里要防的恰恰是「嵌进发布包的
     builder 是旧提交构建的」——水印显示新版本、实际行为是旧的，排障时最难查。
+
+    比较前归一化两件不影响版本身份的东西：`v` 前缀与 `+build` 构建元数据
+    （semver 允许 `v1.4.8+build.7`；若把这类写法判成不匹配，CI 会莫名其妙变红）。
     """
     text = (output or "").strip()
     if not text:
         return False
-    return text.split()[-1] == want
+    token = text.split()[-1].removeprefix("v").split("+", 1)[0]
+    return token == want.removeprefix("v").split("+", 1)[0]
 
 
 def _require_artifact_version(label: str, exe: Path, want: str) -> bool:
@@ -118,6 +129,27 @@ def check_client_template(client: Path | None) -> str | None:
     return None
 
 
+def pick_artifact_with_version(name: str, label: str, want: str) -> Path | None:
+    """按优先级挑一个**版本匹配**的产物；都不匹配返回 None。
+
+    为什么要遍历而不是只看第一个：`find_artifacts` 会同时看到 `target/release` 与
+    `target/<triple>/release`；`rust-cache` 恢复的旧产物 mtime 可能更新，于是排在前面的
+    是旧的。以前这种「选错产物」会被静默打进包里，现在至少会换个候选再试，
+    两个都不对才失败——既守住版本正确，又不在缓存布局变化时误红 CI。
+    """
+    candidates = find_artifacts(name)
+    if not candidates:
+        print(f"✗ 找不到 {name}（先 cargo build --release）")
+        return None
+    for exe in candidates:
+        if _require_artifact_version(label, exe, want):
+            return exe
+    print(f"✗ {label} 没有版本匹配的候选（期望 {want}）：")
+    for exe in candidates:
+        print(f"    {exe}")
+    return None
+
+
 def copy_legal_files(dest: Path, root: Path | None = None) -> list[str]:
     """把许可证与第三方声明复制进发布目录。
 
@@ -151,17 +183,8 @@ def copy_legal_files(dest: Path, root: Path | None = None) -> list[str]:
 
 
 def main() -> int:
-    if BUILDER is None:
-        print("✗ 找不到 exam-builder 可执行文件")
-        print("  请先运行：cargo build --release -p builder")
-        print("  （已搜索 target/release 与 target/*/release）")
-        return 1
-
-    if SERVER is None or not SERVER.is_file():
-        print("✗ 找不到 exam-server（网页考试服务端）")
-        return 1
-
-    # 确认两个内嵌二进制都能跑、且版本与仓库 VERSION 一致，避免把旧二进制打进去
+    # 先把三样前置条件查完再跑 PyInstaller：它在 Windows 上要几分钟，
+    # 而「版本不对 / 缺学生端模板」在第一步就能确定，没必要白等。
     version_file = ROOT / "VERSION"
     if not version_file.is_file():
         print("✗ 找不到 VERSION 文件")
@@ -170,9 +193,22 @@ def main() -> int:
     if not want:
         print("✗ VERSION 文件为空")
         return 1
-    if not _require_artifact_version("exam-builder", BUILDER, want):
+
+    # 确认两个内嵌二进制都能跑、且版本与仓库 VERSION 一致，避免把旧二进制打进去；
+    # 多个候选时逐个试，缓存布局变化不会误红。
+    builder = pick_artifact_with_version(f"exam-builder{EXE}", "exam-builder", want)
+    if builder is None:
+        print("  请先运行：cargo build --release -p builder")
+        print("  （已搜索 target/release 与 target/*/release）")
         return 1
-    if not _require_artifact_version("exam-server", SERVER, want):
+    server = pick_artifact_with_version(f"exam-server{EXE}", "exam-server", want)
+    if server is None:
+        print("  请先运行：cargo build --release -p server")
+        return 1
+    client = find_artifact(f"exam-client{EXE}")
+    problem = check_client_template(client)
+    if problem or client is None:
+        print(problem or "✗ 找不到 exam-client（学生端模板）")
         return 1
 
     DIST.mkdir(exist_ok=True)
@@ -200,9 +236,9 @@ def main() -> int:
         str(ROOT / "build" / "pyinstaller"),
         # 把 builder 作为数据文件带进去，运行时从 sys._MEIPASS 取
         "--add-binary",
-        f"{BUILDER}{sep}.",
+        f"{builder}{sep}.",
         "--add-binary",
-        f"{SERVER}{sep}.",
+        f"{server}{sep}.",
         # 版本号文件：两端水印都读它，必须打进包里，
         # 否则冻结后 app_version() 只能返回 0.0.0。
         "--add-data",
@@ -281,13 +317,9 @@ def main() -> int:
     print(f"✓ 版本号已打包：{got}")
 
     # 学生端模板与手册放进同一目录：教师只需拷贝这一个文件夹
+    # （模板在前置检查里已确认存在且版本可用，这里直接复制）
     rel = out.parent
-    src = find_artifact(f"exam-client{EXE}")
-    problem = check_client_template(src)
-    if problem or src is None:
-        print(problem or "✗ 找不到 exam-client（学生端模板）")
-        return 1
-    shutil.copy2(src, rel / f"stub-template{EXE}")
+    shutil.copy2(client, rel / f"stub-template{EXE}")
     print(f"✓ 已附带学生端模板 {rel.name}/stub-template{EXE}")
 
     try:

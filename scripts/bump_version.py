@@ -232,13 +232,25 @@ def write_all(changed: list[MarkerDoc]) -> int:
         for tmp, doc in staged:
             os.replace(tmp, doc.path)
             replaced.append(doc)
-    except OSError as exc:
+    except (OSError, KeyboardInterrupt) as exc:
+        # Ctrl-C 也要回滚：中断留下的「一半新一半旧」比直接失败更难查
+        # （`--check` 只能事后告诉你哪里不一致，还得手工对回去）。
+        failed: list[str] = []
         for doc in replaced:
-            doc.path.write_text(doc.original, encoding="utf-8", newline="")
+            try:
+                doc.path.write_text(doc.original, encoding="utf-8", newline="")
+            except OSError as rollback_error:  # 回滚也失败：至少把文件名报出来
+                failed.append(f"{doc.rel}（{rollback_error}）")
+        reason = str(exc) or type(exc).__name__
+        print(f"写盘中断，已回滚：{reason}", file=sys.stderr)
+        if failed:
+            print("以下文件回滚失败，请手动检查：" + "、".join(failed), file=sys.stderr)
+        return 1
+    finally:
+        # 成功路径上 tmp 已被 replace 掉（missing_ok 天然安全）；失败/中断路径上
+        # 靠这里兜底清掉没来得及替换的临时文件，避免仓库里残留 `*.tmp-<pid>`。
         for tmp, _doc in staged:
             tmp.unlink(missing_ok=True)
-        print(f"写盘失败，已回滚：{exc}", file=sys.stderr)
-        return 1
     return 0
 
 

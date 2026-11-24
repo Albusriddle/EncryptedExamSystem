@@ -41,7 +41,8 @@ def load_or_create_key(path: Path | None = None) -> Ed25519PrivateKey:
         return load_key(p)
     k = Ed25519PrivateKey.generate()
     p.parent.mkdir(parents=True, exist_ok=True)
-    # 原子写 + 事后收权限：私钥写一半就断电，等于收据体系凭空多出一个坏密钥。
+    # 原子写 + 0600 创建：私钥写一半就断电，等于收据体系凭空多出一个坏密钥；
+    # 先按 umask 创建再 chmod 会留一个「别人可读」的窗口，所以直接按 0600 建。
     atomic_write(
         p,
         k.private_bytes(
@@ -49,6 +50,7 @@ def load_or_create_key(path: Path | None = None) -> Ed25519PrivateKey:
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         ),
+        mode=0o600,
     )
     warn = restrict_permissions(p)
     if warn:
@@ -67,7 +69,7 @@ def export_key(
         if passphrase
         else serialization.NoEncryption()
     )
-    # 导出的也是私钥：同样原子写，并在可能时收紧到 0600（失败只警告，不阻断导出）。
+    # 导出的也是私钥：同样原子写、按 0600 创建（Windows 上 chmod 无效，失败只警告）。
     atomic_write(
         out,
         k.private_bytes(
@@ -75,6 +77,7 @@ def export_key(
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=enc,
         ),
+        mode=0o600,
     )
     warn = restrict_permissions(out)
     if warn:

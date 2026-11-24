@@ -269,7 +269,12 @@ def login_and_answer(port: int, student: int) -> dict:
     result: dict = {"student": student, "errors": [], "latencies": {}}
     try:
         status, payload, cookie, dt = http_json(
-            port, "POST", "/api/login", {"student_id": student, "pin": None}
+            port,
+            "POST",
+            "/api/login",
+            {"student_id": student, "pin": None},
+            # 服务端登录也校验 CSRF 头（防登录 CSRF），演练必须与浏览器一致。
+            csrf=True,
         )
         result["latencies"]["login"] = dt
         if status != 200:
@@ -334,7 +339,11 @@ def recheck_after_restart(port: int, previous: list[dict]) -> tuple[list[str], d
             continue
         sid = item["student"]
         status, payload, cookie, _ = http_json(
-            port, "POST", "/api/login", {"student_id": sid, "pin": None}
+            port,
+            "POST",
+            "/api/login",
+            {"student_id": sid, "pin": None},
+            csrf=True,
         )
         if status != 200:
             failures.append(f"{sid}: 重启后登录失败 {status} {payload}")

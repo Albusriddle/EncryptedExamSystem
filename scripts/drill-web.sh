@@ -19,7 +19,7 @@ pick_python() {
   local cand
   for cand in python3 python; do
     if command -v "$cand" >/dev/null 2>&1 \
-      && "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+      && "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
       echo "$cand"
       return 0
     fi
@@ -28,7 +28,7 @@ pick_python() {
 }
 
 PY="$(pick_python)" || {
-  echo "缺少可用的 Python 3.10+（演练脚本只用标准库）"
+  echo "缺少可用的 Python 3.11+（项目要求 ≥3.11，见 admin/pyproject.toml）"
   exit 2
 }
 

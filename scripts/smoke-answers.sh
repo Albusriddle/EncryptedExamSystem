@@ -21,14 +21,14 @@ pick_python() {
   local cand
   for cand in python3 python; do
     if command -v "$cand" >/dev/null 2>&1 \
-      && "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+      && "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
       echo "$cand"
       return 0
     fi
   done
   return 1
 }
-PY="$(pick_python)" || { echo "缺少可用的 Python 3.10+"; exit 2; }
+PY="$(pick_python)" || { echo "缺少可用的 Python 3.11+（脚本用了 datetime.UTC）"; exit 2; }
 
 [ -x "$CLIENT" ] || { echo "✗ 缺少 debug 客户端：$CLIENT（先 cargo build -p client）"; exit 1; }
 [ -x "$BUILDER" ] || { echo "✗ 缺少 release builder：$BUILDER（先 cargo build --release -p builder）"; exit 1; }

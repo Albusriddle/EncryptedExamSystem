@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -524,6 +523,7 @@ class ProjectState:
             except ModuleNotFoundError:
                 downgraded = True
         tmp = path.with_name(path.name + ".tmp")
+        bak = path.with_name(path.name + ".bak")
         try:
             with open(tmp, "wb") as f:
                 f.write(raw)
@@ -531,9 +531,18 @@ class ProjectState:
                 # 为什么不复用 secure.atomic_write：secure 强依赖 cryptography，
                 # 而工程保存必须能在「本机缺加密依赖、降级明文」的环境里也工作。
                 os.fsync(f.fileno())
+            # .bak 用 rename 而不是 copy2：copy2 被打断会留下**半截备份**，
+            # 而 .bak 正是老师手工恢复时的最后一份可读文件；rename 是原子的，
+            # 也省掉一次全量拷贝（工程文件可能很大）。
             if path.exists():
-                shutil.copy2(path, path.with_name(path.name + ".bak"))
-            os.replace(tmp, path)
+                os.replace(path, bak)
+            try:
+                os.replace(tmp, path)
+            except OSError:
+                # 新文件没顶上去：把旧文件放回去，别让工程「凭空消失」。
+                if bak.is_file() and not path.exists():
+                    os.replace(bak, path)
+                raise
             _fsync_dir(path.parent)
         finally:
             tmp.unlink(missing_ok=True)

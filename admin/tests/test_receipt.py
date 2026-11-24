@@ -156,9 +156,22 @@ def test_receipt_key_creation_is_atomic(tmp_path: Path, monkeypatch) -> None:
         with pytest.raises(OSError):
             receipt_mod.load_or_create_key(target)
     assert not target.exists()
-    assert not (tmp_path / "receipt-key.pem.tmp").exists()
+    assert not list(tmp_path.glob("*.tmp"))
 
     # 正常路径仍然可用，且能被读回
     signer = receipt_mod.load_or_create_key(target)
     loaded = receipt_mod.load_key(target)
     assert loaded.public_key().public_bytes_raw() == signer.public_key().public_bytes_raw()
+
+
+def test_receipt_key_is_created_with_0600(tmp_path: Path) -> None:
+    """私钥要在**创建时**就是 0600：先 0644 再 chmod 会留一个别人可读的窗口。"""
+    import os
+
+    from app.core import receipt as receipt_mod
+
+    target = tmp_path / "receipt-key.pem"
+    receipt_mod.load_or_create_key(target)
+    assert not list(tmp_path.glob("*.tmp")), "创建私钥后不能残留临时文件"
+    if os.name != "nt":  # Windows 的 chmod 只切只读位
+        assert target.stat().st_mode & 0o777 == 0o600

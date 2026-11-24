@@ -34,12 +34,30 @@ echo "== 构建 =="
 cargo build --release -p client -p builder > "$TMP/build-main.log" 2>&1 || {
   # 失败时把日志留到 target/ 并直接打尾部：脚本退出会清掉 $TMP，
   # 只写「见 .verify-tmp/…」等于让人看一个已经不存在的文件。
-  cp "$TMP/build-main.log" "$ROOT/target/verify-embed-build.log" 2>/dev/null || true
-  tail -40 "$TMP/build-main.log" >&2
-  fail "cargo build 失败（完整日志：target/verify-embed-build.log）"
+  mkdir -p "$ROOT/target" 2>/dev/null || true
+  if cp "$TMP/build-main.log" "$ROOT/target/verify-embed-build.log" 2>/dev/null; then
+    tail -40 "$TMP/build-main.log" >&2
+    fail "cargo build 失败（完整日志：target/verify-embed-build.log）"
+  fi
+  # 连日志都拷不出来（target/ 不可写）：多打一些，因为 $TMP 马上会被 trap 删掉。
+  tail -80 "$TMP/build-main.log" >&2
+  fail "cargo build 失败（target/ 不可写，日志只保留在上面这些输出里）"
 }
 grep -E "warning: client@|Finished" "$TMP/build-main.log" || true
 # 不再额外 ok 一行：文档把本脚本记为「17 项」，多打一个 ✓ 会让那个数字对不上。
+
+echo
+echo "== 负向用例：EXAM_KEYFILE 内容非法时必须构建失败 =="
+# 为什么必须失败：v1.4.8 之前这里只是 `cargo:warning`，于是会静默产出
+# 「未嵌密钥」的学生端——包交给学生后才发现要 master，属于交付事故。
+printf 'zz%.0s' $(seq 1 32) > "$TMP/bad-key.txt"   # 64 个字符，但含非 hex
+touch crates/client/build.rs                        # 保证 build.rs 一定重跑
+if EXAM_KEYFILE="$TMP/bad-key.txt" cargo build --release -p client \
+    > "$TMP/build-bad.log" 2>&1; then
+  fail "EXAM_KEYFILE 含非 hex 字符时构建竟然成功（会产出未嵌密钥的客户端）"
+fi
+grep -q "EXAM_KEYFILE" "$TMP/build-bad.log" \
+  || fail "构建确实失败了，但错误信息没提到 EXAM_KEYFILE（见 $TMP/build-bad.log）"
 
 MASTER="$("$BUILDER" keygen 2>/dev/null)"
 [ "${#MASTER}" -eq 64 ] || fail "keygen 输出长度不是 64"
@@ -119,6 +137,18 @@ EXAM_KEYFILE="$TMP/kf.txt" cargo build --release -p client > "$TMP/build.log" 2>
 grep -q "已嵌入 K_manifest" "$TMP/build.log" \
   || fail "build.rs 未识别 EXAM_KEYFILE（见 $TMP/build.log）"
 ok "build.rs 已嵌入密钥"
+
+echo
+echo "== 负向用例：带 UTF-8 BOM 的 keyfile 必须仍能嵌入 =="
+# 记事本另存为 UTF-8 会加 BOM；`trim()` 不裁 BOM，v1.4.8 之前因此整包退化成
+# 开发模式。这条用例把「剥 BOM」钉住：既不能失败，也必须真的嵌入。
+printf '\xef\xbb\xbf' > "$TMP/kf-bom.txt"
+cat "$TMP/kf.txt" >> "$TMP/kf-bom.txt"
+touch crates/client/build.rs
+EXAM_KEYFILE="$TMP/kf-bom.txt" cargo build --release -p client > "$TMP/build-bom.log" 2>&1 \
+  || fail "带 UTF-8 BOM 的 keyfile 构建失败（记事本另存后就会这样）"
+grep -q "已嵌入 K_manifest" "$TMP/build-bom.log" \
+  || fail "带 BOM 时 build.rs 未识别 keyfile（见 $TMP/build-bom.log）"
 
 cp "$CLIENT" "$TMP/stub_emb.exe"
 EXAM_MASTER="$MASTER" "$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
