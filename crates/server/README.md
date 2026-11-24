@@ -13,7 +13,7 @@
   → 学号 + PIN 试解信封（复用 container::try_unlock_session_with_pin）
   → 解密本场题库
   → 按学号确定性抽题（复用 picker）
-  → 浏览器作答（自动保存到内存）
+  → 浏览器作答（每 600 ms 防抖，保存一次即加密落盘）
   → 交卷时用 answer_sheet::seal 写出 EESANS02
   → 现有 exam-builder verify-answer-sheet / 管理端可直接读
 ```
@@ -28,6 +28,8 @@
 EXAM_MASTER=<64 位主密钥> exam-builder build --manifest live.json --banks banks \
   --stub stub-template.exe --out StudentClient.exe \
   --emit-keyfile key.txt
+# 注：`stub-template.exe` 只在发布包里有；从源码构建时 --stub 用
+#     `target/release/exam-client`（Windows 带 .exe）
 
 # 2. 启动服务（教师机）
 exam-server --package StudentClient.exe --keyfile key.txt \
@@ -80,12 +82,12 @@ exam-server --package StudentClient.exe --keyfile key.txt \
   （v1.4.5 起，前端 600 ms 防抖；交卷路径额外 fsync）——教师机崩溃 / 断电 / 误杀进程后
   重登即可拿回未交卷的作答；
 - 服务重启后重新登录会恢复答案与交卷状态；
-- CSRF：作答 / 交卷要求 `X-EES-CSRF: 1`；登录接口不校验（见已知限制）；
+- CSRF：**登录 / 作答 / 交卷都要求 `X-EES-CSRF: 1`**（防登录 CSRF：否则任意网页都能用别人的学号把受害者登进攻击者的会话）；
 - 单会话：同一学号重新登录会顶掉旧 token；
 - 登录限速：按**真实对端 IP**（`TcpStream::peer_addr`）与学号各一分钟窗口；
   默认每 IP 60 次/分钟、每学号 10 次/分钟；
-- 到点自动冻结：过期后首次请求会自动导出答题卡；后台线程每 15 秒收一轮，加密与写盘
-  在全局状态锁**之外**进行（v1.4.4），不会堵住其他学生的请求；
+- 到点收卷：学生页面在剩余 0 秒时自动 `POST /api/submit`；页面已关闭的由后台线程每 15 秒
+  收一轮（最多延迟 15 秒）。加密与写盘在全局状态锁**之外**进行（v1.4.4），不会堵住其他学生的请求；
 - 事件日志：`<answers-dir>/events.jsonl`（并发写有锁 + 整行一次写出，v1.4.5）；
 - 代码题：CodeMirror 5（行号 + C 系语言用 `clike` 近似高亮 + Python 专属高亮），静态资源内嵌；
 - **写盘时序（v1.4.8）**：保存与交卷的状态写盘串行化并复查，「已交卷」不会被旧快照覆盖；
@@ -102,7 +104,6 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 - 隔离局域网没有外网时取时必然失败：默认档只告警，此时场次判定退回教师机系统时钟，
   需要现场确认时钟（`--time-check require` 可让它在取时失败时拒绝启动）；
 - 换一个 Windows 账户启动服务会读不到旧状态文件（受保护 DACL 只给原账户），断线恢复随之失效；
-- 登录接口不校验 CSRF（同站脚本可代登录；`SameSite=Strict` 已缓解，但不算密码学边界）；
 - 交卷不受场次时间窗限制：到点后仍可补交（便于自动收卷失败时补救），但过期后不能再改答案。
 
 ## 下一步（阶段 1 剩余）

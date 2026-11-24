@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::crypto::KdfParams;
 use common::model::{ExamBank, Question, QuestionBody, Session, SessionExam};
+use common::timegate;
 
 use super::*;
 
@@ -85,7 +86,7 @@ impl Fixture {
         let k_manifest = container::manifest_key(&MASTER);
         let state_key = *crypto::hkdf_derive(&k_manifest, b"web-state", "web-state");
         let (header, _) = container::parse_header(&payload, &k_manifest).expect("解析测试 payload");
-        let windows = session_windows_from(&header);
+        let windows = session_windows_from(&header).expect("测试 payload 的场次时间必须带时区");
 
         let app = Arc::new(App {
             payload,
@@ -99,12 +100,13 @@ impl Fixture {
             conns: std::sync::atomic::AtomicUsize::new(0),
             gate: Gate::new(4),
             event_log: Mutex::new(()),
-            state_write: Mutex::new(()),
+            write_locks: Mutex::new(HashMap::new()),
             tmp_seq: std::sync::atomic::AtomicU64::new(0),
             // 真实默认是 60；这里收窄到 20，让「第 21 次 429」的用例短一点。
             login_rate_limit: 20,
             state: Mutex::new(State::default()),
             windows,
+            finalize_retry: Mutex::new(HashMap::new()),
         });
 
         Self {
@@ -136,11 +138,12 @@ impl Fixture {
             conns: std::sync::atomic::AtomicUsize::new(0),
             gate: Gate::new(4),
             event_log: Mutex::new(()),
-            state_write: Mutex::new(()),
+            write_locks: Mutex::new(HashMap::new()),
             tmp_seq: std::sync::atomic::AtomicU64::new(0),
             login_rate_limit: old.login_rate_limit,
             state: Mutex::new(State::default()),
             windows: old.windows.clone(),
+            finalize_retry: Mutex::new(HashMap::new()),
         });
     }
 
@@ -149,7 +152,7 @@ impl Fixture {
             Some(p) => json!({"student_id": student, "pin": p}),
             None => json!({"student_id": student}),
         };
-        self.route(&post_json("/api/login", body, peer))
+        self.route(&post_json("/api/login", body, peer).csrf())
     }
 
     fn login(&self, student: u64) -> Response {
@@ -246,7 +249,7 @@ impl Fixture {
         app.payload = payload;
         let (header, _) = container::parse_header(&app.payload, &app.k_manifest)
             .expect("解析新 payload 的 header");
-        app.windows = session_windows_from(&header);
+        app.windows = session_windows_from(&header).expect("测试 payload 的场次时间必须带时区");
     }
 
     fn expire_session(&mut self) {
@@ -262,7 +265,7 @@ impl Fixture {
         // 窗口现在启动时缓存：换 payload 必须同步换缓存，否则「过期」不会生效。
         let (header, _) = container::parse_header(&app.payload, &app.k_manifest)
             .expect("解析新 payload 的 header");
-        app.windows = session_windows_from(&header);
+        app.windows = session_windows_from(&header).expect("测试 payload 的场次时间必须带时区");
     }
 }
 
@@ -390,6 +393,16 @@ fn demo_bank(count: usize) -> ExamBank {
 
 fn peer(index: u8) -> IpAddr {
     IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, index))
+}
+
+/// 取响应体 JSON（`Response` 只存字节，测试里统一从字节解析）。
+fn body_json(resp: &Response) -> Value {
+    serde_json::from_slice(&resp.body).unwrap_or_else(|e| {
+        panic!(
+            "响应不是 JSON：{e}，body={}",
+            String::from_utf8_lossy(&resp.body)
+        )
+    })
 }
 
 fn request(method: &str, path: &str, peer: IpAddr, body: Vec<u8>) -> Request {
@@ -546,7 +559,7 @@ fn unknown_student_and_malformed_bodies_are_rejected() {
         err_msg(&stranger)
     );
 
-    let no_id = f.route(&post_json("/api/login", json!({"pin": "1"}), peer(1)));
+    let no_id = f.route(&post_json("/api/login", json!({"pin": "1"}), peer(1)).csrf());
     assert_status(&no_id, 400, "缺 student_id 应是 400");
     assert!(
         err_msg(&no_id).contains("缺少 student_id"),
@@ -554,12 +567,7 @@ fn unknown_student_and_malformed_bodies_are_rejected() {
         err_msg(&no_id)
     );
 
-    let not_json = f.route(&request(
-        "POST",
-        "/api/login",
-        peer(1),
-        b"{not json".to_vec(),
-    ));
+    let not_json = f.route(&request("POST", "/api/login", peer(1), b"{not json".to_vec()).csrf());
     assert_status(&not_json, 400, "请求体不是 JSON 应是 400");
     assert!(
         err_msg(&not_json).contains("不是合法 JSON"),
@@ -608,17 +616,12 @@ fn malformed_requests_do_not_consume_login_quota() {
     let limit = f.app.login_rate_limit as usize;
 
     for _ in 0..limit + 5 {
-        let bad = f.route(&request(
-            "POST",
-            "/api/login",
-            peer(3),
-            b"not json".to_vec(),
-        ));
+        let bad = f.route(&request("POST", "/api/login", peer(3), b"not json".to_vec()).csrf());
         assert_status(&bad, 400, "非法 JSON 应 400");
     }
     // 合法 JSON 但缺学号：同样不是一次「登录尝试」。
     for _ in 0..limit + 5 {
-        let missing = f.route(&post_json("/api/login", json!({"pin": "1"}), peer(3)));
+        let missing = f.route(&post_json("/api/login", json!({"pin": "1"}), peer(3)).csrf());
         assert_status(&missing, 400, "缺学号应 400");
     }
 
@@ -847,7 +850,7 @@ fn request_peer_comes_from_the_socket() {
             "应解析出一个请求，实际 {}",
             match other {
                 ReadOutcome::Closed => "Closed",
-                ReadOutcome::Oversized => "Oversized",
+                ReadOutcome::Oversized(_) => "Oversized",
                 ReadOutcome::Chunked => "Chunked",
                 ReadOutcome::Request(_) => unreachable!(),
             }
@@ -1370,21 +1373,42 @@ fn sheet_file_validity_requires_magic() {
     std::fs::create_dir_all(&dir).expect("建目录");
 
     let good = dir.join("good.eea");
+    // 必须是**真正可打开**的卡：只造「魔数 + 0」正是旧实现漏掉的场景。
+    let sheet = common::answer_sheet::AnswerSheet {
+        version: common::answer_sheet::VERSION,
+        student_id: STUDENT,
+        session_id: SESSION_ID,
+        paper_fingerprint: "0".repeat(common::answer_sheet::FP_LEN),
+        qids: vec!["q-single".to_string()],
+        answers: vec![Some("B".to_string())],
+        updated_unix: unix_now(),
+        submitted: false,
+        submitted_unix: None,
+        chosen_code_languages: Default::default(),
+    };
+    let sealed = common::answer_sheet::seal(&f.app.k_manifest, &sheet).expect("密封测试卡");
+    std::fs::write(&good, &sealed).expect("写卡");
+    assert!(is_valid_sheet(&f.app, &good), "真实卡应判定有效");
+
+    let magic_only = dir.join("magic-only.eea");
     let mut bytes = Vec::from(&common::answer_sheet::MAGIC[..]);
     bytes.extend_from_slice(&[0u8; 32]);
-    std::fs::write(&good, &bytes).expect("写卡");
-    assert!(is_valid_sheet(&good), "带魔数的卡应判定有效");
+    std::fs::write(&magic_only, &bytes).expect("写只有魔数的文件");
+    assert!(
+        !is_valid_sheet(&f.app, &magic_only),
+        "只有魔数的截断卡必须判无效（否则学生永远交不了卷）"
+    );
 
     let bad = dir.join("bad.eea");
     std::fs::write(&bad, b"NOTASHEET").expect("写坏卡");
-    assert!(!is_valid_sheet(&bad), "魔数不对必须判无效");
+    assert!(!is_valid_sheet(&f.app, &bad), "魔数不对必须判无效");
 
     let short = dir.join("short.eea");
     std::fs::write(&short, b"EES").expect("写半截卡");
-    assert!(!is_valid_sheet(&short), "半截卡必须判无效");
+    assert!(!is_valid_sheet(&f.app, &short), "半截卡必须判无效");
 
     assert!(
-        !is_valid_sheet(&dir.join("missing.eea")),
+        !is_valid_sheet(&f.app, &dir.join("missing.eea")),
         "不存在必须判无效"
     );
 }
@@ -1404,7 +1428,7 @@ fn oversized_body_gets_413() {
     // 只发头，不发 body：服务端应在读到 Content-Length 时就决定 413。
     let head = format!(
         "POST /api/login HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
-        MAX_BODY + 1
+        MAX_BODY_DEFAULT + 1
     );
     client.write_all(head.as_bytes()).expect("写请求头");
     handle(Arc::clone(&f.app), server_side).expect("处理请求");
@@ -1444,6 +1468,193 @@ fn chunked_body_gets_411() {
     assert!(
         text.starts_with("HTTP/1.1 411"),
         "chunked 必须回 411，实际：{}",
+        &text[..text.len().min(80)]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10. v1.4.9：严格时间接线 / 坏卡重写 / 保存与交卷的真实交错
+// ---------------------------------------------------------------------------
+
+/// 造一个 header 里的场次（只填与本组用例有关的字段）。
+fn session_header(id: u32, start: &str, end: &str) -> container::SessionHeader {
+    container::SessionHeader {
+        session_id: id,
+        start: start.into(),
+        end: end.into(),
+        data_off: 0,
+        data_len: 0,
+        envelopes: Vec::new(),
+    }
+}
+
+/// 运行期也必须拒绝「没有时区偏移」的场次时间。
+///
+/// 为什么：`parse_rfc3339` 把无偏移时间当 UTC，UTC+8 的考场会整体偏 8 小时
+/// （早开/晚收）且不报错。构建期有 `has_explicit_offset` 兜底，但按已接受风险
+/// R-04 重加密过 header 的包会绕过它——运行期必须是同一口径。
+#[test]
+fn session_windows_reject_times_without_offset() {
+    let bad = vec![session_header(
+        7,
+        "2026-12-20T09:00:00",
+        "2026-12-20T11:00:00",
+    )];
+    let err = windows_from_sessions(&bad).expect_err("无时区偏移必须报错");
+    assert!(err.contains("场次 #7"), "报错要带场次号：{err}");
+    assert!(err.contains("+08:00"), "报错要给出写法示例：{err}");
+
+    let reversed = vec![session_header(
+        3,
+        "2026-12-20T11:00:00+08:00",
+        "2026-12-20T09:00:00+08:00",
+    )];
+    let err = windows_from_sessions(&reversed).expect_err("结束早于开始必须报错");
+    assert!(err.contains("晚于"), "报错要说清原因：{err}");
+
+    let ok = vec![session_header(
+        1,
+        "2026-12-20T09:00:00+08:00",
+        "2026-12-20T11:00:00+08:00",
+    )];
+    let windows = windows_from_sessions(&ok).expect("带偏移应能解析");
+    assert_eq!(windows.len(), 1);
+}
+
+/// 状态说「已交卷」但卡被截断时，下一次交卷必须**重写**而不是回 `already`。
+///
+/// 为什么：断电可能留下「魔数对、内容截断」的文件；只比魔数就会把它当有效，
+/// 学生永远交不了卷、教师收卷时又打不开。
+#[test]
+fn broken_sheet_gets_re_exported_on_next_submit() {
+    let f = Fixture::new("broken-sheet");
+    let token = f.login_ok(STUDENT);
+    let qid = f.qids(&token)[0].clone();
+    assert_status(&f.save(&token, &qid, "B"), 200, "保存应成功");
+
+    let first = f.submit(&token);
+    assert_status(&first, 200, "首次交卷应成功");
+    let name = body_json(&first)
+        .get("file")
+        .and_then(|f| f.as_str())
+        .map(str::to_string)
+        .expect("首次交卷应返回文件名");
+    let path = f.app.answers_dir.join(&name);
+    assert!(is_valid_sheet(&f.app, &path), "首次交卷应写出可打开的卡");
+
+    // 模拟断电留下的半截文件：魔数在、内容没了。
+    let mut bytes = Vec::from(&common::answer_sheet::MAGIC[..]);
+    bytes.extend_from_slice(&[0u8; 32]);
+    std::fs::write(&path, &bytes).expect("写坏卡");
+
+    let second = f.submit(&token);
+    assert_status(&second, 200, "坏卡时应重写并返回成功");
+    let json = body_json(&second);
+    assert!(
+        json.get("already").is_none(),
+        "坏卡不能走 already 分支：{json}"
+    );
+    assert!(is_valid_sheet(&f.app, &path), "重写后的卡必须能打开");
+}
+
+/// 并发保存与交卷：交错任意，磁盘最终必须是「已交卷」，且卡可打开。
+///
+/// 为什么：`persist_state` 的复查分支有单测，但真实交错（保存已过复查 → 交卷落盘
+/// → 保存再写）没有任何用例固定过；这条用多线程把交错跑出来。
+#[test]
+fn concurrent_saves_and_a_submit_leave_a_submitted_state() {
+    let f = Fixture::new("save-submit-race");
+    let token = f.login_ok(STUDENT);
+    let qids = f.qids(&token);
+    let app = Arc::clone(&f.app);
+
+    std::thread::scope(|scope| {
+        for (index, qid) in qids.iter().enumerate().take(4) {
+            let app = Arc::clone(&app);
+            let token = token.clone();
+            let qid = qid.clone();
+            scope.spawn(move || {
+                for round in 0..25 {
+                    let req = put_json(
+                        "/api/answer",
+                        json!({"qid": qid, "value": format!("{index}-{round}")}),
+                        peer(1),
+                    )
+                    .csrf()
+                    .token(&token);
+                    let resp = route(&app, &req);
+                    // 交卷之后返回 409 是预期；其它状态码都是缺陷。
+                    assert!(
+                        resp.status == 200 || resp.status == 409,
+                        "保存只能是 200 或 409，实际 {}",
+                        resp.status
+                    );
+                }
+            });
+        }
+        // 与保存同时发起交卷。
+        let app_submit = Arc::clone(&app);
+        let token_submit = token.clone();
+        scope.spawn(move || {
+            for _ in 0..3 {
+                let req = post_json("/api/submit", json!({}), peer(1))
+                    .csrf()
+                    .token(&token_submit);
+                let resp = route(&app_submit, &req);
+                assert!(resp.status == 200, "交卷应成功，实际 {}", resp.status);
+            }
+        });
+    });
+
+    let (_, submitted, exported) = f
+        .app
+        .load_state(STUDENT, SESSION_ID)
+        .expect("状态文件应存在");
+    assert!(submitted, "并发之后磁盘状态必须仍是已交卷");
+    let name = exported.expect("必须记录了导出的文件名");
+    assert!(
+        is_valid_sheet(&f.app, &f.app.answers_dir.join(&name)),
+        "并发之后答题卡必须仍可打开"
+    );
+}
+
+/// 413 必须在**客户端已经把 body 推进内核缓冲**时也能读到。
+///
+/// 为什么：回完 413 直接 close 会发 RST，客户端可能只看到「连接被重置」。
+/// `drain_briefly` 把剩余数据读掉；这条用例真的把 body 发出去再读响应。
+#[test]
+fn oversized_request_still_gets_a_readable_413() {
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+
+    let f = Fixture::new("oversize-with-body");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定");
+    let port = listener.local_addr().expect("地址").port();
+    let mut client = TcpStream::connect(("127.0.0.1", port)).expect("连接");
+    let (server_side, _) = listener.accept().expect("accept");
+
+    // 故意多发 128 KiB body：既超上限，也确实进了对端接收缓冲。
+    let body = vec![b'x'; 128 * 1024];
+    let head = format!(
+        "POST /api/login HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    client.write_all(head.as_bytes()).expect("写请求头");
+    // 服务端会在读到长度后立刻回 413；body 由内核缓冲着。
+    let mut client_writer = client.try_clone().expect("复制句柄");
+    let sender = std::thread::spawn(move || {
+        let _ = client_writer.write_all(&body);
+    });
+
+    handle(Arc::clone(&f.app), server_side).expect("处理请求");
+    let _ = sender.join();
+
+    let mut buf = [0u8; 512];
+    let n = client.read(&mut buf).expect("读响应");
+    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+    assert!(
+        text.starts_with("HTTP/1.1 413"),
+        "超限必须回可读的 413，实际：{}",
         &text[..text.len().min(80)]
     );
 }
