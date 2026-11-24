@@ -43,8 +43,12 @@ pub fn is_embedded() -> bool {
 ///
 /// ⚠ 关键：**同一时刻只能有一个标记出现在二进制里**。
 /// 早期实现把两个常量都定义成 `static`，结果两个字符串都进了二进制，
-/// 导致未嵌入的 stub 也被误判为"已嵌入"。现在用 `cfg` 条件编译，
-/// 保证只有一个标记存在。
+/// 导致未嵌入的 stub 也被误判为"已嵌入"。
+///
+/// 现在用 `#[used] static` + **常量折叠**：`if EMBEDDED` 在编译期求值，
+/// 只保留被选中的那个字符串字面量。**不能**改成非 const 形式（运行时分支、
+/// 或两个 `static` 再按条件引用），否则两个标记都会进二进制，
+/// builder 的 stub 检测（`scripts/verify-embed.sh`）会重新出现误判。
 /// 嵌入状态标记（只会在其中一种构建里存在）。
 #[used]
 pub static KEY_STATE_MARKER: &str = if EMBEDDED {

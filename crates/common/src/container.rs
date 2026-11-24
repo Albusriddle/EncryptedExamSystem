@@ -276,6 +276,19 @@ pub fn build_payload_with_options(
     time: Option<&crate::model::TimeConfig>,
     student_review: crate::model::StudentReviewPolicy,
 ) -> Result<Vec<u8>, ContainerError> {
+    // 0. 题库内容校验。
+    //
+    // `exam-builder` 会在调用这里之前先跑一遍 `bank.validate()`，但 **common 是公开 API**：
+    // 第三方脚本、将来新增的打包入口、以及绕过 CLI 的老工具都会走到这里。不校验的后果很具体：
+    // 重复题号会让网页端按 `qid` 存答案时互相覆盖（`BTreeMap<String, String>`），教师端
+    // 判分也会用另一道题的标准答案去判——系统性错判，而且看不出来。
+    // 这里只做「构建期一次」的检查，成本可忽略。
+    for bank in banks {
+        bank.validate().map_err(|e| {
+            ContainerError::Format(format!("题库校验失败（exam_id={}）：{e}", bank.exam_id))
+        })?;
+    }
+
     // 1. 剥离答案与判分材料。
     //
     // 管理端写临时题库时已经剥过一次（纵深防御的第一层）；这里是第二层：
@@ -609,6 +622,38 @@ fn resolve_session_picks(
         picks.insert(bank.exam_id.clone(), effective);
     }
     Ok(picks)
+}
+
+/// 解析一个场次的起止时间；失败时给出**能直接给老师看**的中文错误。
+///
+/// 为什么需要它：`parse_rfc3339` 为了兼容旧包，会把「没有时区偏移」的时间当成 UTC
+/// （`AGENTS.md` 的不变量是「时间必须带显式时区」）。包内 header 的时间是可被重加密的
+/// （风险记录 R-04），网页服务端 / 客户端从包里读时间窗时必须按同一口径严格解析，
+/// 并且把**场次号**写进报错——否则老师看到「时间格式错误」根本不知道说的是哪一场。
+///
+/// 返回 `(start, end)`（Unix 秒）；时区缺失、格式非法、或结束不晚于开始都返回 `Err`。
+pub fn session_times(session: &Session) -> Result<(u64, u64), String> {
+    let start = crate::timegate::parse_rfc3339_strict(&session.start).ok_or_else(|| {
+        format!(
+            "场次 #{} 的开始时间不合法：需要带时区偏移的 RFC3339（例如 2026-12-20T09:00:00+08:00），实际 {:?}",
+            session.session_id, session.start
+        )
+    })?;
+    let end = crate::timegate::parse_rfc3339_strict(&session.end).ok_or_else(|| {
+        format!(
+            "场次 #{} 的结束时间不合法：需要带时区偏移的 RFC3339（例如 2026-12-20T11:00:00+08:00），实际 {:?}",
+            session.session_id, session.end
+        )
+    })?;
+    if end <= start {
+        return Err(format!(
+            "场次 #{} 的结束时间必须晚于开始时间（开始 {}，结束 {}）",
+            session.session_id,
+            crate::timegate::format_unix_local_zoned(start),
+            crate::timegate::format_unix_local_zoned(end)
+        ));
+    }
+    Ok((start, end))
 }
 
 /// 构建期校验：这些错误必须在打包时炸，绝不能留到考场。
@@ -1640,6 +1685,65 @@ mod tests {
             sections: Vec::new(),
         };
         assert!(build_payload(&master(), &banks, &[s], SALT, kdf(), true).is_err());
+    }
+
+    /// 打包入口必须自己校验题库：绕过 CLI 的调用（第三方脚本 / 旧工具）也要被拦住。
+    ///
+    /// 为什么重要：重复题号在网页端按 `qid` 存答案时会互相覆盖，教师端判分还会用
+    /// 另一道题的标准答案去判——系统性错判，而表面完全看不出来。
+    #[test]
+    fn build_rejects_duplicate_question_ids() {
+        let mut b = bank("math", 10);
+        b.questions[1].id = b.questions[0].id.clone();
+        let err = build_payload(&master(), &[b], &[session(1, vec![1])], SALT, kdf(), true)
+            .expect_err("重复题号必须打包失败");
+        let text = format!("{err}");
+        assert!(text.contains("重复"), "错误要说明是重复题号：{text}");
+        assert!(text.contains("math"), "错误要带 exam_id，便于定位：{text}");
+    }
+
+    /// `session_times`：严格解析（无时区即拒绝）且报错带场次号。
+    #[test]
+    fn session_times_requires_explicit_offset_and_names_the_session() {
+        let mut s = session(7, vec![1]);
+        s.start = "2026-12-20T09:00:00".into(); // 缺时区
+        let err = session_times(&s).expect_err("缺时区的开始时间必须被拒绝");
+        assert!(err.contains("场次 #7"), "报错要点出场次号：{err}");
+        assert!(err.contains("开始时间"), "报错要指出是哪一端：{err}");
+        assert!(err.contains("+08:00"), "报错要给出写法示例：{err}");
+
+        let mut s = session(8, vec![1]);
+        s.end = "2026-12-20 11:00".into();
+        let err = session_times(&s).expect_err("缺时区的结束时间必须被拒绝");
+        assert!(err.contains("场次 #8"), "报错要点出场次号：{err}");
+        assert!(err.contains("结束时间"), "报错要指出是哪一端：{err}");
+    }
+
+    #[test]
+    fn session_times_accepts_offset_forms_and_rejects_reversed_window() {
+        let s = session(1, vec![1]); // 默认 +08:00
+        let (start, end) = session_times(&s).expect("带偏移的时间应能解析");
+        assert!(end > start);
+
+        // Z 与 +0800 都应等价于 +08:00
+        let mut z = session(1, vec![1]);
+        z.start = "2026-12-20T01:00:00Z".into();
+        z.end = "2026-12-20T03:00:00Z".into();
+        assert_eq!(session_times(&z).expect("Z 应可解析"), (start, end));
+
+        let mut compact = session(1, vec![1]);
+        compact.start = "2026-12-20T09:00:00+0800".into();
+        compact.end = "2026-12-20T11:00:00+0800".into();
+        assert_eq!(
+            session_times(&compact).expect("+0800 应可解析"),
+            (start, end)
+        );
+
+        // 结束不晚于开始
+        let mut bad = session(1, vec![1]);
+        bad.end = bad.start.clone();
+        let err = session_times(&bad).expect_err("结束等于开始必须报错");
+        assert!(err.contains("晚于"), "报错要说清关系：{err}");
     }
 
     #[test]

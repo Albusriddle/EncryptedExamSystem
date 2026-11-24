@@ -6,6 +6,12 @@
 //!    独自决定结果。
 //! 2. **fail-closed**：成功源少于 2 个、或各源分歧超过阈值，一律拒绝放行。
 //!    宁可误锁，不可误放——这是考试系统的正确默认值。
+//!
+//!    注意中位数的纠错能力**有上限**：只有当那个坏源与其它源的偏差仍在
+//!    `spread_limit` 之内时，中位数才会把它「吃掉」；任一源偏差超过上限，
+//!    整体直接拒绝（`SourcesDisagree`），不会剔除离群源后重算。这是有意的：
+//!    剔除逻辑本身就需要一个「谁对」的判据，而唯一可信的判据恰恰是我们要建立的东西。
+//!    代价是某个源长时间漂移会让门禁一直失败——安全方向正确，可用性上算单点。
 //! 3. **不信任本机时钟**：只把本机时间当作参考，偏差过大时给出警告，
 //!    但判定完全基于网络时间。
 //! 4. **可注入**：`TimeSource` 是 trait，单元测试用假时间源，不碰网络。
@@ -89,6 +95,14 @@ pub fn default_sources() -> Vec<Box<dyn TimeSource>> {
     ]
 }
 
+/// 这个 HTTP 状态码能不能作为「可信时间来源」。
+///
+/// 只认 2xx：3xx（未跟随的跳转）、4xx、5xx 的 `Date` 头可能来自反向代理 / CDN 的错误页，
+/// 把它当时间源等于让中间设备替我决定门禁。与 `fetch_body`（签名令牌）的判定保持一致。
+fn accept_status(code: u16) -> bool {
+    (200..300).contains(&code)
+}
+
 /// 发一个 HTTPS GET，只取 `Date` 响应头。
 #[cfg(windows)]
 fn fetch_date_header(url: &str, timeout: Duration) -> Result<String, String> {
@@ -164,6 +178,25 @@ fn fetch_date_header(url: &str, timeout: Duration) -> Result<String, String> {
             ));
         }
 
+        // 先核状态码再读 Date：4xx/5xx 的响应通常也带 Date 头，但那是代理/CDN 的时钟。
+        let mut status: u32 = 0;
+        let mut status_len: u32 = std::mem::size_of::<u32>() as u32;
+        if WinHttpQueryHeaders(
+            request,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            std::ptr::null(),
+            (&mut status as *mut u32).cast(),
+            &mut status_len,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            return Err(format!("读取 HTTP 状态码失败（错误码 {}）", GetLastError()));
+        }
+        let status = u16::try_from(status).unwrap_or(u16::MAX);
+        if !accept_status(status) {
+            return Err(format!("时间服务 HTTP {status}"));
+        }
+
         // 先查缓冲区大小，再读。
         let mut size: u32 = 0;
         WinHttpQueryHeaders(
@@ -215,11 +248,35 @@ impl Drop for HandleGuard {
 /// 非 Windows：用 curl 兜底（CI 在 Linux 上跑）。
 #[cfg(not(windows))]
 fn fetch_date_header(url: &str, timeout: Duration) -> Result<String, String> {
+    // `-f`：HTTP ≥ 400 直接非零退出，避免把错误页的 Date 当时间（与 Windows 分支口径一致）。
     let out = std::process::Command::new("curl")
-        .args(["-sSI", "--max-time", &timeout.as_secs().to_string(), url])
+        .args(["-fsSI", "--max-time", &timeout.as_secs().to_string(), url])
         .output()
         .map_err(|e| format!("无法执行 curl: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "curl 退出码 {:?}：{}",
+            out.status.code(),
+            stderr.trim()
+        ));
+    }
     let text = String::from_utf8_lossy(&out.stdout);
+    // `-f` 只拦 ≥400；3xx（没跟随时）仍算成功，所以再核一次状态行。
+    let status = text
+        .lines()
+        .find_map(|line| {
+            let mut parts = line.split_whitespace();
+            let proto = parts.next()?;
+            if !proto.starts_with("HTTP/") {
+                return None;
+            }
+            parts.next()?.parse::<u16>().ok()
+        })
+        .ok_or_else(|| "curl 输出里没有状态行".to_string())?;
+    if !accept_status(status) {
+        return Err(format!("时间服务 HTTP {status}"));
+    }
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("date:")
             && let Some(v) = line.get(5..)
@@ -441,7 +498,7 @@ fn parse_http_date(s: &str) -> Option<u64> {
     if parts.len() < 5 {
         return None;
     }
-    let day: u64 = parts[0].parse().ok()?;
+    let day: i64 = parts[0].parse().ok()?;
     let month = match parts[1] {
         "Jan" => 1,
         "Feb" => 2,
@@ -457,7 +514,17 @@ fn parse_http_date(s: &str) -> Option<u64> {
         "Dec" => 12,
         _ => return None,
     };
-    let year: u64 = parts[2].parse().ok()?;
+    let year: i64 = parts[2].parse().ok()?;
+    // 范围校验必须做：`Date` 头来自网络，是**不可信输入**。
+    // 没有校验时 `days_from_civil(y, m, d) * 86400` 会溢出（debug 构建直接 panic，
+    // release 静默回绕成离谱时间戳），而 `Feb 31` 这类非法日期会被悄悄算成 3 月 3 日。
+    // 口径与 `parse_rfc3339` 保持一致：非法日历日期直接拒绝。
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
+    if !(1..=days_in_month(year, month)).contains(&day) {
+        return None;
+    }
     let time: Vec<&str> = parts[3].split(':').collect();
     if time.len() != 3 {
         return None;
@@ -467,7 +534,17 @@ fn parse_http_date(s: &str) -> Option<u64> {
         time[1].parse().ok()?,
         time[2].parse().ok()?,
     );
-    Some(days_from_civil(year as i64, month as i64, day as i64) * 86400 + h * 3600 + m * 60 + sec)
+    // 秒允许 60（闰秒）：HTTP-date 是 GMT 时间，闰秒那一刻会写成 23:59:60。
+    if h > 23 || m > 59 || sec > 60 {
+        return None;
+    }
+    let seconds_of_day = h
+        .checked_mul(3600)?
+        .checked_add(m.checked_mul(60)?)?
+        .checked_add(sec)?;
+    days_from_civil(year, month, day)
+        .checked_mul(86400)?
+        .checked_add(seconds_of_day)
 }
 
 /// 某年某月的天数（含闰年规则）。
@@ -513,7 +590,9 @@ pub struct NetworkTime {
 /// `min_sources` 是放行所需的最少成功源数（建议 2）。
 /// 可用源数量决定了分歧容差。
 ///
-/// - **3 个及以上**：中位数能吃掉一个撒谎的源，容差放宽到调用方给的上限（正常是 60 秒）。
+/// - **3 个及以上**：中位数可以吸收一个偏差**不超过容差**的源，容差放宽到调用方给的上限
+///   （正常是 60 秒）。注意「吸收」≠「剔除」：任一源与其它源的分歧超过容差时，
+///   整体仍然返回 `SourcesDisagree`（fail-closed），不会先剔除离群源再重算。
 /// - **2 个**：`ok[len/2]` 取的是较大的那个，等于直接采信"更晚"的时间，
 ///   任何分歧都会全量进入结果——只允许 10 秒。实测正常网络下三源分歧为 0 秒，
 ///   所以这个上限不会误伤。
@@ -647,6 +726,9 @@ pub fn fetch_network_time_with_policy(
     let median = ok[ok.len() / 2];
     let spread = ok[ok.len() - 1] - ok[0];
     let limit = spread_limit(ok.len(), policy.max_spread);
+    // 分歧超限 → 整体拒绝（fail-closed），**不**先剔除离群源再重算：
+    // 「剔除谁」本身就需要一个可信判据，而判据正是这里要建立的东西。
+    // 代价：任一源长时间漂移会让门禁一直失败（安全方向正确，可用性上是单点）。
     if spread > limit {
         return Err(TimeError::SourcesDisagree { spread, limit });
     }
@@ -1003,6 +1085,51 @@ mod tests {
         );
     }
 
+    /// `Date` 头是不可信输入：越界数值与非法日历日期必须拒绝，不能 panic、不能静默归一。
+    #[test]
+    fn parse_http_date_rejects_out_of_range_values() {
+        // 年份大到 `days * 86400` 溢出 u64（改前：debug 构建 panic / release 回绕）
+        assert_eq!(
+            parse_http_date("Sun, 06 Nov 100000000000000 00:00:00 GMT"),
+            None
+        );
+        // 非法日历日期（2 月 31 日）——改前会被算成 3 月 3 日
+        assert_eq!(parse_http_date("Sun, 31 Feb 2026 00:00:00 GMT"), None);
+        // 时分秒越界
+        assert_eq!(parse_http_date("Sun, 06 Nov 1994 24:00:00 GMT"), None);
+        assert_eq!(parse_http_date("Sun, 06 Nov 1994 23:60:00 GMT"), None);
+        assert_eq!(parse_http_date("Sun, 06 Nov 1994 23:59:61 GMT"), None);
+        // 年份 0 / 负数
+        assert_eq!(parse_http_date("Sun, 06 Nov 0 00:00:00 GMT"), None);
+        assert_eq!(parse_http_date("Sun, 06 Nov -1 00:00:00 GMT"), None);
+    }
+
+    /// 只有 2xx 才算「可信时间来源」：3xx/4xx/5xx 的 Date 可能来自代理/CDN 错误页。
+    #[test]
+    fn only_2xx_is_a_trusted_time_source() {
+        for code in [200u16, 201, 204, 299] {
+            assert!(accept_status(code), "{code} 应接受");
+        }
+        for code in [
+            0u16, 100, 199, 300, 301, 304, 400, 403, 404, 429, 500, 503, 599,
+        ] {
+            assert!(!accept_status(code), "{code} 应拒绝");
+        }
+    }
+
+    /// 闰秒 `23:59:60` 是合法写法（HTTP-date 用 GMT，闰秒那一刻就是这样写），必须接受。
+    #[test]
+    fn parse_http_date_allows_leap_second() {
+        // 1994-11-06 00:00:00 UTC = 784080000；当天 23:59:60 = +86400
+        assert_eq!(
+            parse_http_date("Sun, 06 Nov 1994 23:59:60 GMT"),
+            Some(784166400)
+        );
+        // 闰年 2 月 29 日可接受，平年 2 月 29 日拒绝
+        assert!(parse_http_date("Thu, 29 Feb 2024 00:00:00 GMT").is_some());
+        assert_eq!(parse_http_date("Thu, 29 Feb 2026 00:00:00 GMT"), None);
+    }
+
     #[test]
     fn parse_rejects_garbage() {
         assert!(parse_http_date("").is_none());
@@ -1176,7 +1303,25 @@ pub fn decide_session(
 /// 解析 RFC3339 时间（供构建期校验与门禁用）。
 ///
 /// 支持 `2026-12-20T09:00:00+08:00`、`...Z`、`2026-12-20 09:00:00+08:00`。
+///
+/// **注意**：为了兼容旧包，这里对「没有时区偏移」的时间按 UTC 解释（见
+/// [`parse_rfc3339_strict`] 的说明）。新调用点请优先用严格版本。
 pub fn parse_rfc3339(s: &str) -> Option<u64> {
+    parse_rfc3339_impl(s, false)
+}
+
+/// 严格版：**必须**带显式时区（`Z` / `±HH:MM` / `±HHMM`），否则返回 `None`。
+///
+/// 为什么需要两个入口：`AGENTS.md` 的不变量是「时间必须带显式时区」，因为
+/// `2026-12-20T09:00:00` 会被当成 UTC，对 UTC+8 的考场静默偏移 8 小时（早开/晚收）。
+/// 构建期已有一道校验（`container::has_explicit_offset`），但包内 header 的时间是
+/// 可被重加密的（R-04），运行期从包里读到的时间也必须按同一口径解释——用这个入口。
+/// 旧包的兼容只走 `parse_rfc3339`。
+pub fn parse_rfc3339_strict(s: &str) -> Option<u64> {
+    parse_rfc3339_impl(s, true)
+}
+
+fn parse_rfc3339_impl(s: &str, require_offset: bool) -> Option<u64> {
     let s = s.trim();
     let (date_part, rest) = s.split_once('T').or_else(|| s.split_once(' '))?;
     let d: Vec<&str> = date_part.split('-').collect();
@@ -1218,6 +1363,9 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
         }
         let secs = sign * (oh * 3600 + om * 60);
         (t, secs)
+    } else if require_offset {
+        // 严格模式：没有 Z、也没有 ±HH:MM / ±HHMM。
+        return None;
     } else {
         (rest, 0)
     };
@@ -1385,6 +1533,34 @@ mod gate_tests {
         assert!(parse_rfc3339("2026-12-20T09:00:00+14:59").is_none());
         assert!(parse_rfc3339("2026-12-20T09:00:00-1:00").is_none());
         assert!(parse_rfc3339("99999-01-01T00:00:00Z").is_none());
+    }
+
+    /// 严格版：必须带显式时区，否则 `None`（旧包的宽松解析仍走 `parse_rfc3339`）。
+    ///
+    /// 为什么重要：`2026-12-20T09:00:00` 没有偏移时会被当成 UTC，UTC+8 的考场整体
+    /// 偏移 8 小时。包内 header 可被重加密（R-04），运行期读时间必须按同一口径拒绝。
+    #[test]
+    fn parse_rfc3339_strict_requires_explicit_offset() {
+        // 合法写法：Z / ±HH:MM / ±HHMM
+        assert_eq!(
+            parse_rfc3339_strict("2026-12-20T09:00:00+08:00"),
+            Some(T0900)
+        );
+        assert_eq!(
+            parse_rfc3339_strict("2026-12-20T09:00:00+0800"),
+            Some(T0900)
+        );
+        assert_eq!(parse_rfc3339_strict("2026-12-20T01:00:00Z"), Some(T0900));
+        assert_eq!(parse_rfc3339_strict("2026-12-20 01:00:00Z"), Some(T0900));
+
+        // 没有偏移：严格版拒绝，宽松版仍按 UTC 接受（兼容旧包）
+        assert_eq!(parse_rfc3339_strict("2026-12-20T01:00:00"), None);
+        assert_eq!(parse_rfc3339("2026-12-20T01:00:00"), Some(T0900));
+
+        // 其它非法写法
+        assert_eq!(parse_rfc3339_strict("2026-12-20"), None);
+        assert_eq!(parse_rfc3339_strict("not-a-date"), None);
+        assert_eq!(parse_rfc3339_strict("2026-02-31T00:00:00Z"), None);
     }
 }
 

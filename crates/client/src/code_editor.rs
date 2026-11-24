@@ -13,7 +13,11 @@ use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-/// 单题代码答案上限（字节），与 `gui::code_value` 保持一致。
+/// 单题代码答案上限（**UTF-8 字节**），与 `gui::code_value` 保持一致。
+///
+/// 保存侧是唯一权威：编辑器**不按字符截断**——`char_limit(CODE_MAX_BYTES)`
+/// 按字符计，中文一字 3 字节，学生能输入 1 MiB 字符却在保存时被拒（约 3 MiB 字节）。
+/// 这里只用于显示计数与高亮阈值。
 pub const CODE_MAX_BYTES: usize = 1024 * 1024;
 /// 超过此大小不做语法分析，只显示等宽文本，避免每帧解析 1 MiB。
 const HIGHLIGHT_MAX_BYTES: usize = 256 * 1024;
@@ -388,11 +392,14 @@ pub fn render_code_editor(
                         egui::TextEdit::multiline(text)
                             .id(egui::Id::new(("answer_editor", idx)))
                             .code_editor()
-                            .char_limit(CODE_MAX_BYTES)
+                            // 不设 `char_limit`：上限按 UTF-8 字节算，见 CODE_MAX_BYTES 的注释。
                             .desired_rows(lines)
                             .desired_width(edit_width)
                             .layouter(&mut layouter)
-                            .hint_text("请粘贴完整代码，保留缩进；本题由老师人工评阅"),
+                            .hint_text(format!(
+                                "请粘贴完整代码，保留缩进；本题由老师人工评阅（上限 {} KiB，按字节计）",
+                                CODE_MAX_BYTES / 1024
+                            )),
                     ),
                 );
             });

@@ -18,6 +18,7 @@ mod images;
 mod keys;
 mod markdown;
 mod nav;
+mod paths;
 mod welcome;
 mod workflow;
 

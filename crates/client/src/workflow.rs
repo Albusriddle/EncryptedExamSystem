@@ -335,15 +335,6 @@ pub fn option_label(j: usize) -> String {
 
 /// 取解 header 用的 K_manifest。
 ///
-/// 优先级（**嵌入优先**，发布版就是要学生零配置）：
-///
-/// 1. 编译期嵌入的 K_manifest（由 `EXAM_KEYFILE` 提供，见 build.rs）；
-/// 2. `--master-file` / 环境变量 `EXAM_MASTER`（开发调试用；master 不进入命令行）。
-///
-/// 注意：第 2 条拿到的是 **master**，需派生一次 K_manifest；
-/// 第 1 条已经是 K_manifest 本身，**不能再派生**。
-/// 取解 header 用的 K_manifest。
-///
 /// 优先级（**包内嵌优先**，这样学生双击就能用）：
 ///
 /// 1. **payload 的密钥区**（v3 起默认写入）。教师打包时自动带上，
@@ -373,13 +364,21 @@ pub fn resolve_manifest_key(
     };
 
     // 若同时显式传了 master，校验一致性，避免"以为用了 A 实际用了 B"。
+    //
+    // **解析失败不能把正常包打死**：机房机器可能残留一个垃圾 `EXAM_MASTER`
+    // （上一位考生/老师设的），此时密钥已经由包内或编译期确定，master 只是用来
+    // 「核对」的。旧实现直接 `?` 上抛，学生看到「解析主密钥」失败、以为是包坏了。
     if master_file.is_some() || std::env::var("EXAM_MASTER").is_ok() {
-        let given = read_master_arg(master_file.as_deref())?;
-        let derived = container::manifest_key(&given);
-        anyhow::ensure!(
-            derived == k,
-            "显式传入的 master 与包内嵌的密钥不匹配（可能拿错了包或密钥）"
-        );
+        match read_master_arg(master_file.as_deref()) {
+            Ok(given) => {
+                let derived = container::manifest_key(&given);
+                anyhow::ensure!(
+                    derived == k,
+                    "显式传入的 master 与包内嵌的密钥不匹配（可能拿错了包或密钥）"
+                );
+            }
+            Err(e) => eprintln!("⚠ 已忽略无法解析的 master（包内密钥可用，不影响本次解锁）：{e:#}"),
+        }
     }
     Ok((k, source))
 }

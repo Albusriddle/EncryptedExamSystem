@@ -66,6 +66,12 @@ pub struct NavState {
     panel_inner_width: f32,
     /// 诊断：面板内区域的左边界（屏幕坐标）。
     panel_left: f32,
+    /// 本帧整个侧栏面板的矩形（屏幕坐标）。
+    ///
+    /// 记录它才有**真实**的边界可供断言：旧测试把 egui 的内边距（8×2）与
+    /// `interact_size`（40）抄成测试常量，egui 升级后常量不变、断言仍绿，
+    /// 实际可能已经溢出。现在测试直接断言「每个按钮 rect ⊆ 面板 rect」。
+    panel_rect: Option<egui::Rect>,
     /// 题号栏底部“交卷”按钮被点击；由 MainApp 消费并走统一的二次确认。
     submit_requested: bool,
 }
@@ -160,6 +166,8 @@ impl NavState {
             .resizable(false)
             .exact_width(width)
             .show(ctx, |ui| {
+                // 记下本帧面板矩形：几何断言（按钮不越界）用它，而不是抄 egui 常量。
+                self.panel_rect = Some(ui.max_rect());
                 ui.add_space(8.0);
                 if self.collapsed {
                     ui.vertical_centered(|ui| {
@@ -568,38 +576,40 @@ mod tests {
         }
     }
 
-    /// 面板宽度必须装得下一行 5 个按钮。
+    /// 真实布局：跑一帧，所有题号按钮必须落在侧栏面板矩形内。
     ///
-    /// v0.1.8 的真实 bug：Grid 默认 min_cell_size 取 interact_size(40)，
-    /// 每列被撑到 40pt，5 列需要 200+24=224pt，而面板内宽只有 168pt，
-    /// 第 5 个按钮被挤到窗口外（用户反馈"一行只有 4 个"）。
-    /// 修法是 min_col_width(BTN)。这条测试锁住"必要宽度 ≤ 面板内宽"。
+    /// 为什么不用「常量算宽度」：旧实现把 egui 的 8×2 内边距与 `interact_size`(40)
+    /// 抄成测试常量来算余量——egui 升级改了默认值，断言照样绿，而实际可能已经溢出。
+    /// 这条用 `Context::run` 跑真实布局，越界（例如列宽被 interact_size 撑开）立刻红。
     #[test]
-    fn row_of_five_fits_in_panel() {
-        // 面板 exact_width 会减去左右各 8pt 内边距
-        const PANEL_PADDING: f32 = 8.0 * 2.0;
-        let inner = expanded_width() - PANEL_PADDING;
-        let needed = PER_ROW as f32 * BTN + (PER_ROW - 1) as f32 * GAP;
-        assert!(
-            needed <= inner,
-            "一行 {PER_ROW} 个按钮需要 {needed}pt，但面板内宽只有 {inner}pt"
-        );
-    }
+    fn every_button_rect_stays_inside_the_panel() {
+        let ctx = egui::Context::default();
+        let mut nav = NavState::default();
+        let sections = vec![("数学".to_string(), vec![(String::new(), 23usize)])];
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1024.0, 768.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            nav.show(ctx, &sections, true, false, false);
+        });
 
-    /// Grid 的最小列宽必须等于按钮宽度，否则列会被 interact_size 撑宽。
-    #[test]
-    fn grid_min_col_width_matches_button() {
-        // 若误用默认值（interact_size.x = 40），5 列必然溢出
-        const EGUI_DEFAULT_INTERACT_W: f32 = 40.0;
-        let with_default = PER_ROW as f32 * EGUI_DEFAULT_INTERACT_W + (PER_ROW - 1) as f32 * GAP;
-        let with_fix = PER_ROW as f32 * BTN + (PER_ROW - 1) as f32 * GAP;
-        const PANEL_PADDING: f32 = 8.0 * 2.0;
-        let inner = expanded_width() - PANEL_PADDING;
-        assert!(
-            with_default > inner,
-            "默认列宽本应溢出（这正是当初的 bug），否则本测试失去意义"
-        );
-        assert!(with_fix <= inner, "修复后必须能装下");
+        let panel = nav.panel_rect.expect("show() 应记录面板矩形");
+        assert_eq!(nav.button_rects.len(), 23, "23 题应生成 23 个按钮");
+        for (idx, rect) in &nav.button_rects {
+            assert!(
+                panel.contains_rect(*rect),
+                "第 {idx} 题按钮 {rect:?} 超出面板 {panel:?}"
+            );
+            assert_eq!(
+                (rect.width(), rect.height()),
+                (BTN, BTN),
+                "按钮必须是正方形，否则会画成椭圆"
+            );
+        }
     }
 
     /// 跳转重试必须有上限：无上限会在丢目标时永久重绘。

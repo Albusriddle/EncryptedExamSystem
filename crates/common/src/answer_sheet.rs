@@ -413,11 +413,25 @@ pub fn open(k_manifest: &[u8; 32], bytes: &[u8]) -> Result<AnswerSheet, AnswerSh
 }
 
 /// 原子写：先写 `.tmp` 再 rename，断电不会留下半个文件。
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+///
+/// `durable = true` 时在 rename **之前**对临时文件 `sync_all()`：交卷那一份写不下去
+/// 就等于学生丢卡（而且服务端会按「文件存在」判定已交卷），必须真正落盘。
+/// 自动保存（每 400 ms 一次）用 `false`：每次都 fsync 会把学生机磁盘打满，
+/// 进程崩溃不丢（页缓存还在），只有断电可能丢最近几秒。
+pub fn write_atomic(path: &Path, bytes: &[u8], durable: bool) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    if durable {
+        use std::io::Write as _;
+        // 用**写**句柄 fsync：Windows 上 `File::open` 得到的只读句柄调用
+        // `FlushFileBuffers` 会返回 ERROR_ACCESS_DENIED，fsync 等于没做。
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+    } else {
+        std::fs::write(&tmp, bytes)?;
+    }
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
@@ -625,8 +639,9 @@ mod tests {
         let dir = std::path::Path::new("target").join("answers-test");
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("a.eea");
-        write_atomic(&p, b"one").unwrap();
-        write_atomic(&p, b"two").unwrap();
+        write_atomic(&p, b"one", false).unwrap();
+        // 交卷那次用 durable：这里顺便走一遍真 fsync 路径
+        write_atomic(&p, b"two", true).unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"two");
         assert!(!p.with_extension("tmp").exists(), "不应残留 .tmp");
         std::fs::remove_dir_all(&dir).ok();

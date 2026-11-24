@@ -9,7 +9,7 @@
 //! ## 上限
 //!
 //! - 单张解码后 ≤ 4MB：防止一个超大 data URI 把内存打满；
-//! - 解码后像素 ≤ 4096×4096：防止解压炸弹；
+//! - 解码**前**就按 `Limits` 限死像素 ≤ 4096×4096、解码内存 ≤ 64MB：防解压炸弹；
 //! - 纹理缓存：128 MB 字节预算 + 32 张上限；
 //! - **失败也缓存**：坏图不能每帧重试解码（一张坏掉的 4MB 图会持续吃 CPU）。
 
@@ -112,10 +112,12 @@ fn key_of(uri: &str) -> [u8; 16] {
 }
 
 fn decode_texture(ctx: &egui::Context, bytes: &[u8], key: [u8; 16]) -> Option<egui::TextureHandle> {
-    let img = image::load_from_memory(bytes).ok()?;
+    let img = decode_with_limits(bytes).ok()?;
     if img.width() == 0 || img.height() == 0 {
         return None;
     }
+    // 限制已在解码前生效（见 `decode_with_limits`）；这里再挡一次是双保险：
+    // 万一某个格式的 decoder 不支持限制，也绝不能把超大图上传成纹理。
     if img.width() > MAX_PIXELS || img.height() > MAX_PIXELS {
         return None;
     }
@@ -129,6 +131,26 @@ fn decode_texture(ctx: &egui::Context, bytes: &[u8], key: [u8; 16]) -> Option<eg
         u64::from_le_bytes(key[..8].try_into().unwrap_or_default())
     );
     Some(ctx.load_texture(name, color, egui::TextureOptions::LINEAR))
+}
+
+/// 解码后的内存上限：4096×4096 RGBA 约 64 MiB，留一点余量给解码中间缓冲。
+const MAX_DECODE_ALLOC: u64 = 64 * 1024 * 1024;
+
+/// 在**解码前**用 `image` 的 `Limits` 限死尺寸与内存。
+///
+/// 为什么不能「先 `load_from_memory` 再查宽高」：那样一张 4 MB 的 PNG 可以解压成
+/// 几百 MB 才被拒（`image` 默认 `max_alloc = 512 MiB`），学生机上就是一次内存尖峰，
+/// 极端情况直接 OOM。用 `ImageReader::with_guessed_format` + `limits`，
+/// 解码器读 IHDR 时就按 `max_image_width/height` 拒绝，`reserve()` 再按字节卡一道，
+/// 两种超限都会返回 `ImageError::Limits`。
+fn decode_with_limits(bytes: &[u8]) -> Result<image::DynamicImage, image::ImageError> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_PIXELS);
+    limits.max_image_height = Some(MAX_PIXELS);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    reader.limits(limits);
+    reader.decode()
 }
 
 /// 解析 `data:image/png;base64,…`；其它形式（http/文件路径）一律拒绝。
@@ -198,5 +220,74 @@ mod tests {
         // 合法的 base64，但不是图片
         let uri = "data:image/png;base64,AAAA";
         assert!(texture_for_uri(&ctx, uri).is_none());
+    }
+
+    /// 构造一个只含 IHDR 的 PNG：只声明尺寸，不带像素数据。
+    ///
+    /// CRC 必须算对——`png` 解码器会校验块 CRC，CRC 错会先报 Format 错，
+    /// 那样就测不出「按尺寸限制拒绝」这条路径了。
+    fn png_with_declared_size(width: u32, height: u32) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xffff_ffffu32;
+            for &b in data {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+                }
+            }
+            !crc
+        }
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        // bit depth 8、color type 6（RGBA）、无压缩/过滤/交错
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+
+        let mut chunk = b"IHDR".to_vec();
+        chunk.extend_from_slice(&ihdr);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        out.extend_from_slice(&(ihdr.len() as u32).to_be_bytes());
+        out.extend_from_slice(&chunk);
+        out.extend_from_slice(&crc32(&chunk).to_be_bytes());
+        out
+    }
+
+    /// 声明尺寸超过 4096 的 PNG 必须在**解码像素之前**被限制拒绝。
+    ///
+    /// 为什么重要：旧实现先 `load_from_memory` 再查宽高，解压炸弹能先吃掉几百 MB；
+    /// 现在靠 `Limits` 在读 IHDR 时就报 `ImageError::Limits`。
+    #[test]
+    fn oversized_png_is_rejected_by_limits_before_decoding() {
+        let png = png_with_declared_size(10_000, 10_000);
+        match decode_with_limits(&png) {
+            Err(image::ImageError::Limits(_)) => {}
+            other => panic!("应在分配像素前被尺寸限制拒绝，实际：{other:?}"),
+        }
+    }
+
+    /// 声明尺寸在限制内的 PNG 不会被「限制」误伤（此处仍因缺像素数据而失败，
+    /// 但错误不能是 Limits —— 那是我们自己的检查，不是文件本身的问题）。
+    #[test]
+    fn small_png_is_not_rejected_by_limits() {
+        let png = png_with_declared_size(64, 64);
+        if let Err(image::ImageError::Limits(e)) = decode_with_limits(&png) {
+            panic!("64×64 不应触发限制：{e:?}");
+        }
+    }
+
+    /// 通过 `texture_for_uri` 的路径也要拒绝（并且失败会被缓存，不会每帧重试）。
+    #[test]
+    fn oversized_png_uri_returns_none() {
+        let png = png_with_declared_size(9_000, 9_000);
+        let uri = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        let ctx = egui::Context::default();
+        assert!(texture_for_uri(&ctx, &uri).is_none());
+        assert!(texture_for_uri(&ctx, &uri).is_none(), "第二次应走失败缓存");
     }
 }

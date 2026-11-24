@@ -84,19 +84,24 @@ fn main() {
 
 /// 读取 `EXAM_KEYFILE` 指向的 64 位 hex 密钥。
 ///
-/// 任何一步失败都返回 `None`（走开发模式），**不 panic**——
-/// 构建脚本 panic 会让整个编译失败，而"没设环境变量"是完全合法的场景。
+/// **未设置**该变量是合法场景（开发/CI 默认），返回 `None` 走开发模式。
+/// 但**设置了却读不出来**属于配置错误，必须让编译失败——否则会静默产出
+/// 「未嵌密钥」的学生端，只有 `verify-embed.sh` 才能发现（实测：keyfile 被
+/// 记事本另存后带 UTF-8 BOM，`trim()` 不裁 BOM，`hex_decode` 失败，整个包
+/// 退化成需要 master 的开发模式，而构建日志里只有一行 warning）。
 fn read_key() -> Option<[u8; 32]> {
     let path = env::var("EXAM_KEYFILE").ok()?;
-    let text = fs::read_to_string(&path).ok()?;
-    let trimmed = text.trim();
-    let bytes = hex_decode(trimmed)?;
+    let text =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("EXAM_KEYFILE={path} 读不出来：{e}"));
+    // BOM（U+FEFF）不是 Unicode 空白，`trim()` 不会去掉；必须先显式剥掉。
+    let trimmed = text.trim_start_matches('\u{feff}').trim();
+    let bytes = hex_decode(trimmed)
+        .unwrap_or_else(|| panic!("EXAM_KEYFILE 内容不是 64 位十六进制（路径：{path}）"));
     if bytes.len() != 32 {
-        println!(
-            "cargo:warning=EXAM_KEYFILE 内容长度错误：期望 64 个 hex 字符，实际 {}",
+        panic!(
+            "EXAM_KEYFILE 内容长度错误：期望 64 个 hex 字符，实际 {}（路径：{path}）",
             trimmed.len()
         );
-        return None;
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(&bytes);

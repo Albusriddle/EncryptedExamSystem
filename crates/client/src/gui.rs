@@ -159,8 +159,14 @@ pub struct ExamApp {
     last_edit: std::time::Instant,
     /// 保存失败的原因（显示给学生/监考）
     save_error: Option<String>,
-    /// 交卷二次确认：第一次点击后置 true，再点一次才真正冻结
-    confirm_submit: bool,
+    /// 交卷二次确认的**时间戳**（第一次点击时写入）。
+    ///
+    /// 为什么不是 bool：旧实现置 true 后只有「再点一次/点取消/换卷」才复位，
+    /// 误点一次「交卷」后继续答题 40 分钟，之后任何一次点击都会**直接交卷**。
+    /// 现在只在 [`CONFIRM_SUBMIT_WINDOW`] 内有效，且任何编辑/滚动/跳转都会清空。
+    confirm_submit_at: Option<Instant>,
+    /// 上一帧试卷滚动位置（用于「滚动即取消交卷确认」）。
+    last_scroll_y: f32,
     /// 网络时间时钟（解锁成功后才有；debug 跳过门禁时为 None）
     clock: Option<SyncedClock>,
     /// 是否已到结束时刻（到点后锁定试卷）
@@ -203,7 +209,8 @@ impl ExamApp {
             sheet_dirty: false,
             last_edit: std::time::Instant::now(),
             save_error: None,
-            confirm_submit: false,
+            confirm_submit_at: None,
+            last_scroll_y: 0.0,
             review_mode: false,
             last_state_dump: None,
             #[cfg(debug_assertions)]
@@ -249,20 +256,11 @@ impl ExamApp {
                 self.clock = unlocked.net.as_ref().map(|n| SyncedClock::new(n.unix));
                 self.expired = false;
                 let now = self.clock.as_ref().map(|c| c.now_unix()).unwrap_or(0);
-                let path = answer_sheet_path(
+                let sheet_path = answer_sheet_path(
                     unlocked.student_id,
                     unlocked.session_id,
                     &unlocked.paper.fingerprint(),
                 );
-                // 若损坏卡备份失败，后续保存绝不能覆盖原文件。
-                let mut save_path = path.clone();
-                // v0.3.3 及更早的文件名没有指纹段：先迁移，再按新名字读
-                let legacy = path.with_file_name(format!(
-                    "answers-{}-{}.eea",
-                    unlocked.student_id, unlocked.session_id
-                ));
-                migrate_legacy_sheet(&path, &legacy);
-
                 // 已有答题卡且是同一份卷：恢复；否则新建
                 let expected_qids: Vec<String> = unlocked
                     .paper
@@ -270,58 +268,87 @@ impl ExamApp {
                     .iter()
                     .flat_map(|sec| sec.items.iter().map(|it| it.id.clone()))
                     .collect();
-                let mut restored = std::fs::read(&path)
-                    .ok()
-                    .and_then(|b| common::answer_sheet::open(&unlocked.k_manifest, &b).ok())
-                    .filter(|s| {
-                        s.paper_fingerprint == unlocked.paper.fingerprint()
-                            && s.student_id == unlocked.student_id
-                            && s.session_id == unlocked.session_id
-                            && s.qids == expected_qids
-                    });
-                if restored.is_none()
-                    && let Some(rec) = find_recovered_sheet(&path)
-                {
-                    let candidate = std::fs::read(&rec)
-                        .ok()
-                        .and_then(|b| common::answer_sheet::open(&unlocked.k_manifest, &b).ok())
-                        .filter(|s| {
-                            s.paper_fingerprint == unlocked.paper.fingerprint()
-                                && s.student_id == unlocked.student_id
-                                && s.session_id == unlocked.session_id
-                                && s.qids == expected_qids
-                        });
-                    if candidate.is_some() {
-                        // 继续写回 recovered 文件，避免覆盖仍损坏的原卡。
-                        save_path = rec;
-                        restored = candidate;
-                    }
-                }
-                if restored.is_none() && path.exists() {
-                    // 换卷/换包/损坏时旧卡不能默默丢掉：备份名唯一，绝不覆盖已有备份。
-                    let mut bak = path.with_extension("eea.bak");
-                    let mut n = 0u32;
-                    while bak.exists() {
-                        n += 1;
-                        bak = path.with_extension(format!("eea.bak.{n}"));
-                    }
-                    if let Err(e) = std::fs::rename(&path, &bak) {
-                        // 备份失败时不能再写回原路径，改用新文件保留原卡；
-                        // recovered 也必须递增，不能覆盖上次留下的文件。
-                        let mut recovered = path.with_extension("eea.recovered");
-                        let mut r = 0u32;
-                        while recovered.exists() {
-                            r += 1;
-                            recovered = path.with_extension(format!("eea.recovered.{r}"));
-                        }
-                        save_path = recovered;
-                        self.save_error = Some(format!(
-                            "原有答题卡无法读取，且备份失败：{e}\n原文件保持不动：{}",
-                            path.display()
+                let mut restored = None;
+                // 若损坏卡备份失败，后续保存绝不能覆盖原文件（见下面 recovered 分支）。
+                let mut save_path: Option<std::path::PathBuf> = None;
+                match &sheet_path {
+                    Some(path) => {
+                        // v0.3.3 及更早的文件名没有指纹段：先迁移，再按新名字读
+                        let legacy = path.with_file_name(format!(
+                            "answers-{}-{}.eea",
+                            unlocked.student_id, unlocked.session_id
                         ));
-                    } else {
-                        self.save_error =
-                            Some(format!("原有答题卡无法读取，已备份到：{}", bak.display()));
+                        migrate_legacy_sheet(path, &legacy);
+
+                        let mut chosen = path.clone();
+                        restored = std::fs::read(path)
+                            .ok()
+                            .and_then(|b| common::answer_sheet::open(&unlocked.k_manifest, &b).ok())
+                            .filter(|s| {
+                                s.paper_fingerprint == unlocked.paper.fingerprint()
+                                    && s.student_id == unlocked.student_id
+                                    && s.session_id == unlocked.session_id
+                                    && s.qids == expected_qids
+                            });
+                        if restored.is_none()
+                            && let Some(rec) = find_recovered_sheet(path)
+                        {
+                            let candidate = std::fs::read(&rec)
+                                .ok()
+                                .and_then(|b| {
+                                    common::answer_sheet::open(&unlocked.k_manifest, &b).ok()
+                                })
+                                .filter(|s| {
+                                    s.paper_fingerprint == unlocked.paper.fingerprint()
+                                        && s.student_id == unlocked.student_id
+                                        && s.session_id == unlocked.session_id
+                                        && s.qids == expected_qids
+                                });
+                            if candidate.is_some() {
+                                // 继续写回 recovered 文件，避免覆盖仍损坏的原卡。
+                                chosen = rec;
+                                restored = candidate;
+                            }
+                        }
+                        if restored.is_none() && path.exists() {
+                            // 换卷/换包/损坏时旧卡不能默默丢掉：备份名唯一，绝不覆盖已有备份。
+                            let mut bak = path.with_extension("eea.bak");
+                            let mut n = 0u32;
+                            while bak.exists() {
+                                n += 1;
+                                bak = path.with_extension(format!("eea.bak.{n}"));
+                            }
+                            if let Err(e) = std::fs::rename(path, &bak) {
+                                // 备份失败时不能再写回原路径，改用新文件保留原卡；
+                                // recovered 也必须递增，不能覆盖上次留下的文件。
+                                let mut recovered = path.with_extension("eea.recovered");
+                                let mut r = 0u32;
+                                while recovered.exists() {
+                                    r += 1;
+                                    recovered = path.with_extension(format!("eea.recovered.{r}"));
+                                }
+                                chosen = recovered;
+                                self.save_error = Some(format!(
+                                    "原有答题卡无法读取，且备份失败：{e}\n原文件保持不动：{}",
+                                    path.display()
+                                ));
+                            } else {
+                                self.save_error = Some(format!(
+                                    "原有答题卡无法读取，已备份到：{}",
+                                    bak.display()
+                                ));
+                            }
+                        }
+                        save_path = Some(chosen);
+                    }
+                    None => {
+                        // 没有可写目录：**不要**偷偷写到当前目录（开始菜单启动时那是
+                        // System32，写不进去），更不要静默——学生必须知道答案不会落盘。
+                        self.save_error = Some(
+                            "找不到可写的答题卡目录，本次作答不会落盘；\
+                             请把客户端放到可写目录，或设置 LOCALAPPDATA / XDG_DATA_HOME。"
+                                .to_string(),
+                        );
                     }
                 }
                 self.sheet = Some(match restored {
@@ -360,9 +387,9 @@ impl ExamApp {
                 self.last_edit = std::time::Instant::now()
                     .checked_sub(Duration::from_secs(5))
                     .unwrap_or_else(std::time::Instant::now);
-                self.sheet_path = Some(save_path);
+                self.sheet_path = save_path;
                 // 不要无条件清空：备份失败/损坏提示必须保留到学生看到。
-                self.confirm_submit = false;
+                self.confirm_submit_at = None;
                 self.review_mode = false;
                 self.stage = Stage::Paper(Box::new(unlocked));
                 true
@@ -664,7 +691,7 @@ impl eframe::App for ExamApp {
                 });
                 if leave_review || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                     self.review_mode = false;
-                    self.confirm_submit = false;
+                    self.confirm_submit_at = None;
                     // 保留阅读位置，只清待跳转/矩形缓存。
                     self.nav.reset_for_new_paper();
                 }
@@ -716,6 +743,7 @@ impl eframe::App for ExamApp {
 
             // ① 题号卡（点击只写 pending，不立即滚动）
             //    已答/未答按答题卡算；索引 0 号位空着，题号从 1 开始。
+            let now_instant = Instant::now();
             let mut flags = vec![false];
             if let Some(sheet) = &self.sheet {
                 flags.extend(sheet.answers.iter().map(|a| a.is_some()));
@@ -728,19 +756,24 @@ impl eframe::App for ExamApp {
                 &sections,
                 nav_can_submit,
                 nav_submitted,
-                self.confirm_submit,
+                confirm_is_active(self.confirm_submit_at, now_instant),
             );
             #[allow(clippy::collapsible_if)]
             if self.nav.take_submit_requested() {
                 if let Some(sheet) = self.sheet.as_mut() {
                     if !sheet.submitted && !self.expired {
-                        if self.confirm_submit {
-                            sheet.freeze(now_or_wall_clock(now));
-                            self.confirm_submit = false;
-                            self.sheet_dirty = true;
-                            self.last_edit = std::time::Instant::now();
+                        if confirm_is_active(self.confirm_submit_at, now_instant) {
+                            // 与页内按钮同一套判定：超限时绝不冻结（冻结后改不回来）。
+                            match try_submit(sheet, now_or_wall_clock(now)) {
+                                Ok(()) => {
+                                    self.confirm_submit_at = None;
+                                    self.sheet_dirty = true;
+                                    self.last_edit = Instant::now();
+                                }
+                                Err(reason) => self.save_error = Some(reason),
+                            }
                         } else {
-                            self.confirm_submit = true;
+                            self.confirm_submit_at = Some(now_instant);
                         }
                     }
                 }
@@ -750,24 +783,29 @@ impl eframe::App for ExamApp {
             //    必须同一个 CentralPanel：一个 pass 只能有一个 CentralPanel。
             let mut scroll_offset = egui::Vec2::ZERO;
             let mut sheet_changed = false;
+            let mut paper_notice: Option<String> = None;
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(sheet) = self.sheet.as_mut() {
                     // 已交卷的卡即便还没到结束时间也不能改——界面要看起来也不可改，
                     // 否则监考会以为"点了没反应"是程序坏了。
                     let editable = !self.expired && !sheet.submitted;
-                    let (off, ch) = render_paper(
+                    let (off, ch, notice) = render_paper(
                         ui,
                         unlocked,
                         &mut self.nav,
                         now,
                         sheet,
                         editable,
-                        &mut self.confirm_submit,
+                        &mut self.confirm_submit_at,
+                        now_instant,
                         now_or_wall_clock(now),
                     );
                     scroll_offset = off;
                     if ch {
                         sheet_changed = true;
+                    }
+                    if notice.is_some() {
+                        paper_notice = notice;
                     }
                 }
             });
@@ -775,7 +813,17 @@ impl eframe::App for ExamApp {
             if sheet_changed {
                 // 改动只标记脏；真正写盘由 update() 里的 400ms 防抖统一处理
                 self.sheet_dirty = true;
-                self.last_edit = std::time::Instant::now();
+                self.last_edit = Instant::now();
+                // 任何编辑都取消交卷确认：误点一次后继续答题，不该「一碰就交卷」。
+                self.confirm_submit_at = None;
+            }
+            if let Some(msg) = paper_notice {
+                self.save_error = Some(msg);
+            }
+            // 滚动/跳转同样取消确认：学生已经在看别的题了。
+            if (scroll_offset.y - self.last_scroll_y).abs() > 0.5 {
+                self.last_scroll_y = scroll_offset.y;
+                self.confirm_submit_at = None;
             }
 
             // 诊断：EES_DEBUG_NAV=<文件> 时输出题号卡与题目矩形，
@@ -1143,8 +1191,21 @@ fn render_answer_inputs(
                 };
                 match value {
                     Ok(value) => {
-                        if resp.changed() && sheet.set_answer(idx, value, now_unix) {
-                            changed = true;
+                        if resp.changed() {
+                            // 先判「整卡会不会超 16 MiB」再写：超限就拒收这次输入，
+                            // 保留题目原有答案（否则交卷时 `validate` 会失败 → 没有卡）。
+                            if card_would_overflow(sheet, idx, value.as_deref()) {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(200, 60, 60),
+                                    format!(
+                                        "整卡答案超过 {} MiB，本题未保存；请先删减其他题目",
+                                        common::answer_sheet::MAX_TOTAL_ANSWER_BYTES
+                                            / (1024 * 1024)
+                                    ),
+                                );
+                            } else if sheet.set_answer(idx, value, now_unix) {
+                                changed = true;
+                            }
                         }
                     }
                     Err(message) => {
@@ -1153,7 +1214,7 @@ fn render_answer_inputs(
                 }
                 let counter = if is_code {
                     format!(
-                        "{} 字符 · 本题 {}/{} KiB · 整卡 {}/{} MiB",
+                        "{} 字符 · 本题 {}/{} KiB（按字节） · 整卡 {}/{} MiB",
                         text.chars().count(),
                         text.len() / 1024,
                         crate::code_editor::CODE_MAX_BYTES / 1024,
@@ -1194,17 +1255,80 @@ fn essay_value(text: &str) -> Option<String> {
 }
 
 /// 代码答案原样保存：不 trim、不替换缩进、不截断。
+///
+/// 上限按 **UTF-8 字节**（`text.len()`）算，与 `code_editor::CODE_MAX_BYTES` 同义。
+/// 提示里必须写「字节」——中文一字 3 字节，学生按「1 MiB 字符」估会莫名其妙被拒。
 fn code_value(text: &str) -> Result<Option<String>, String> {
     if text.trim().is_empty() {
         return Ok(None);
     }
     if text.len() > crate::code_editor::CODE_MAX_BYTES {
         return Err(format!(
-            "代码超过 {} KiB，未保存；请删减后再试",
+            "代码超过 {} KiB（按 UTF-8 字节计，一个汉字约占 3 字节），未保存；请删减后再试",
             crate::code_editor::CODE_MAX_BYTES / 1024
         ));
     }
     Ok(Some(text.to_string()))
+}
+
+/// 交卷二次确认的有效期。
+///
+/// 5 秒足够「手滑点错再点一次」，又短到误点后继续答题时不会一碰就交卷。
+const CONFIRM_SUBMIT_WINDOW: Duration = Duration::from_secs(5);
+
+/// 交卷确认是否仍有效（题号卡与页内按钮共用，便于单测）。
+fn confirm_is_active(confirm_at: Option<Instant>, now: Instant) -> bool {
+    confirm_at.is_some_and(|at| now.saturating_duration_since(at) <= CONFIRM_SUBMIT_WINDOW)
+}
+
+/// 这次写入是否会把整卡撑过 16 MiB：`总量 − 旧值 + 新值`。
+///
+/// 判据与 `AnswerSheet::validate` 一致，但必须**在写入前**判：
+/// 旧实现先把超限答案写进内存，交卷落盘时才被 `validate` 拒绝，
+/// 结果学生「已交卷但磁盘上永远没有卡」，而且冻结后无法删减。
+fn card_would_overflow(
+    sheet: &common::answer_sheet::AnswerSheet,
+    idx: usize,
+    new: Option<&str>,
+) -> bool {
+    let new_len = new.map_or(0, str::len);
+    let old_len = sheet
+        .answers
+        .get(idx)
+        .and_then(|v| v.as_deref())
+        .map_or(0, str::len);
+    let total = sheet
+        .total_answer_bytes()
+        .saturating_sub(old_len)
+        .saturating_add(new_len);
+    total > common::answer_sheet::MAX_TOTAL_ANSWER_BYTES
+}
+
+/// 交卷前的硬校验：超限时返回给学生的提示（`None` = 可以交卷）。
+fn submit_blocked_reason(sheet: &common::answer_sheet::AnswerSheet) -> Option<String> {
+    let total = sheet.total_answer_bytes();
+    let limit = common::answer_sheet::MAX_TOTAL_ANSWER_BYTES;
+    if total > limit {
+        Some(format!(
+            "答题卡共 {:.1} MiB，超过 {} MiB 上限，未交卷；请删减几道题再交卷",
+            total as f64 / (1024.0 * 1024.0),
+            limit / (1024 * 1024)
+        ))
+    } else {
+        None
+    }
+}
+
+/// 尝试交卷：整卡超限时**不冻结**并返回原因。
+///
+/// 题号卡与页内按钮都走这里，保证两条路径的判定完全一致；抽成函数也便于单测
+/// 「被拒绝时 `submitted` 仍为 false」——冻结是不可逆的，一旦置位学生就改不回来。
+fn try_submit(sheet: &mut common::answer_sheet::AnswerSheet, now_unix: u64) -> Result<(), String> {
+    if let Some(reason) = submit_blocked_reason(sheet) {
+        return Err(reason);
+    }
+    sheet.freeze(now_unix);
+    Ok(())
 }
 
 /// 空位序号：0→①，1→② …（超过 10 个空时退化为 ①+数字）
@@ -1686,7 +1810,7 @@ fn question_divider(ui: &mut egui::Ui) {
     ui.add_space(13.0);
 }
 
-/// 渲染试卷。返回滚动区域的当前偏移，便于诊断验证"跳转是否真的滚动了"。
+/// 渲染试卷。返回（滚动偏移, 是否有改动, 需要显示给学生的一条提示）。
 #[allow(clippy::too_many_arguments)]
 fn render_paper(
     ui: &mut egui::Ui,
@@ -1695,10 +1819,12 @@ fn render_paper(
     now: Option<u64>,
     sheet: &mut common::answer_sheet::AnswerSheet,
     editable: bool,
-    confirm_submit: &mut bool,
+    confirm_at: &mut Option<Instant>,
+    now_instant: Instant,
     now_unix: u64,
-) -> (egui::Vec2, bool) {
+) -> (egui::Vec2, bool, Option<String>) {
     let mut changed = false;
+    let mut notice: Option<String> = None;
     let mut qidx = 0usize;
     let viewport_top = ui.clip_rect().top();
     let out = egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1761,22 +1887,29 @@ fn render_paper(
                 );
             } else if editable {
                 ui.separator();
-                let label = if *confirm_submit {
+                let confirm_active = confirm_is_active(*confirm_at, now_instant);
+                let label = if confirm_active {
                     "确认交卷（不可再修改）"
                 } else {
                     "交卷"
                 };
                 if ui.button(label).clicked() {
-                    if *confirm_submit {
-                        sheet.freeze(now_unix);
-                        *confirm_submit = false;
-                        changed = true;
+                    if confirm_active {
+                        // 交卷前硬校验：整卡超限时**不冻结**（冻结就改不回来了，
+                        // 而且 seal 会失败 → 学生「已交卷」却没有答题卡）。
+                        match try_submit(sheet, now_unix) {
+                            Ok(()) => {
+                                *confirm_at = None;
+                                changed = true;
+                            }
+                            Err(reason) => notice = Some(reason),
+                        }
                     } else {
-                        *confirm_submit = true;
+                        *confirm_at = Some(now_instant);
                     }
                 }
-                if *confirm_submit && ui.button("取消").clicked() {
-                    *confirm_submit = false;
+                if confirm_active && ui.button("取消").clicked() {
+                    *confirm_at = None;
                 }
             }
         });
@@ -1853,7 +1986,7 @@ fn render_paper(
         nav.apply_pending_scroll(ui);
     });
     nav.update_current(viewport_top);
-    (out.state.offset, changed)
+    (out.state.offset, changed, notice)
 }
 
 /// 中文字体候选（按优先级）。
@@ -2072,25 +2205,22 @@ fn answer_sheet_path(
     student_id: u64,
     session_id: u32,
     paper_fingerprint: &str,
-) -> std::path::PathBuf {
+) -> Option<std::path::PathBuf> {
     let name = answer_sheet_file_name(student_id, session_id, paper_fingerprint);
 
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
         && is_writable(dir)
     {
-        return dir.join(&name);
+        return Some(dir.join(&name));
     }
 
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let dir = base.join("ExamSystem").join("answers");
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join(name)
+    // 回退到用户数据目录（Windows `%LOCALAPPDATA%`、Linux `$XDG_DATA_HOME` 等）。
+    // **不再**回退到 `"."`：从开始菜单启动时当前目录是 System32，写不进去，
+    // 而学生完全看不出发生了什么。宁可明确返回 None、由调用方提示「不会落盘」。
+    let dir = crate::paths::user_data_dir()?.join("answers");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(name))
 }
 
 /// 答题卡文件名。
@@ -2105,22 +2235,45 @@ fn answer_sheet_file_name(student_id: u64, session_id: u32, paper_fingerprint: &
 
 /// 备份失败时写入的 `*.eea.recovered*`；下次启动必须优先尝试它，
 /// 否则原卡损坏会让学生再次得到空卡。
+///
+/// 命名规则（见 `poll` 里的备份分支）：`name.eea.recovered` 是第 0 份，
+/// 之后递增成 `.recovered.1`、`.recovered.2`……**序号越大越新**。
+/// 因此恢复必须取序号最大的那份：旧实现 `sort()` 后取第一个（字典序最小），
+/// 恰好是最旧的一份——学生最近一轮作答被永久忽略，后续还会继续写进旧文件。
 fn find_recovered_sheet(path: &std::path::Path) -> Option<std::path::PathBuf> {
     let dir = path.parent()?;
     let name = path.file_name()?.to_string_lossy();
     let prefix = format!("{name}.recovered");
-    let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+    std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().starts_with(&prefix))
-                .unwrap_or(false)
+        .filter_map(|p| {
+            let seq = recovered_seq(p.file_name()?.to_string_lossy().as_ref(), &prefix)?;
+            Some((seq, p))
         })
-        .collect();
-    found.sort();
-    found.into_iter().next()
+        .max_by(|(a_seq, a_path), (b_seq, b_path)| {
+            // 先比序号，再比文件名（极少见的并列时保证结果稳定）。
+            a_seq
+                .cmp(b_seq)
+                .then_with(|| a_path.as_os_str().cmp(b_path.as_os_str()))
+        })
+        .map(|(_, p)| p)
+}
+
+/// 从 `answers-….eea.recovered[.N]` 里解出序号：无后缀 = 0，`.N` = N。
+///
+/// 只接受纯数字后缀，避免把 `…recovered.bak` 之类误当成有效备份。
+fn recovered_seq(file_name: &str, prefix: &str) -> Option<u32> {
+    let rest = file_name.strip_prefix(prefix)?;
+    if rest.is_empty() {
+        return Some(0);
+    }
+    let digits = rest.strip_prefix('.')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// 把旧命名（无指纹段）的答题卡迁移到新名字。
@@ -2162,7 +2315,12 @@ impl ExamApp {
     fn save_sheet_now(&mut self) {
         let (k_manifest, path) = match (&self.stage, &self.sheet_path) {
             (Stage::Paper(u), Some(p)) => (u.k_manifest, p.clone()),
-            _ => return,
+            _ => {
+                // 没有可写目录（见 `answer_sheet_path`）：已经提示过，别再每帧重试，
+                // 否则界面会无限重绘、CPU 一直转。
+                self.sheet_dirty = false;
+                return;
+            }
         };
         let Some(sheet) = self.sheet.as_ref() else {
             return;
@@ -2174,7 +2332,8 @@ impl ExamApp {
                 return;
             }
         };
-        match common::answer_sheet::write_atomic(&path, &sealed) {
+        // 交卷那一份必须真正落盘（断电也要在）；自动保存不 fsync，见 write_atomic 的注释。
+        match common::answer_sheet::write_atomic(&path, &sealed, sheet.submitted) {
             Ok(()) => {
                 self.sheet_dirty = false;
                 self.save_error = None;
@@ -2424,7 +2583,7 @@ mod tests {
             student_review: common::model::StudentReviewPolicy::None,
         };
         let mut nav = crate::nav::NavState::default();
-        let mut confirm = false;
+        let mut confirm_at: Option<Instant> = None;
         let ctx = egui::Context::default();
         // 视口要足够大：内容被滚动区裁剪后，线段会从 shapes 里消失，
         // 数量断言会随字体/DPI 变化而误报。
@@ -2444,7 +2603,8 @@ mod tests {
                     None,
                     &mut sheet,
                     true,
-                    &mut confirm,
+                    &mut confirm_at,
+                    Instant::now(),
                     0,
                 );
             });
@@ -2623,6 +2783,174 @@ mod tests {
             !sheet.set_answer(0, essay_value("第一行\n第二行"), 101),
             "同值不应重复写"
         );
+    }
+
+    /// 造一张带指定各题答案长度的答题卡（只用于上限判定）。
+    fn answer_sheet_with(sizes: &[usize]) -> common::answer_sheet::AnswerSheet {
+        common::answer_sheet::AnswerSheet {
+            version: common::answer_sheet::VERSION,
+            student_id: 1,
+            session_id: 1,
+            paper_fingerprint: "0".repeat(common::answer_sheet::FP_LEN),
+            qids: (0..sizes.len()).map(|i| format!("q{i}")).collect(),
+            answers: sizes.iter().map(|n| Some("x".repeat(*n))).collect(),
+            updated_unix: 0,
+            submitted: false,
+            submitted_unix: None,
+            chosen_code_languages: Default::default(),
+        }
+    }
+
+    /// 整卡上限：恰好 16 MiB 放行，多 1 字节拒绝；改写同长度题目不算超限。
+    ///
+    /// 为什么必须在写入前判：旧实现先写内存、交卷落盘时 `validate` 才失败，
+    /// 学生会「已交卷但磁盘上没有卡」，而且冻结后连删减都做不到。
+    #[test]
+    fn card_limit_allows_exactly_full_and_rejects_one_more() {
+        const LIMIT: usize = common::answer_sheet::MAX_TOTAL_ANSWER_BYTES;
+        let mut sheet = answer_sheet_with(&[LIMIT - 1, 0]);
+
+        // 第 2 题再写 1 字节 → 总量恰好 LIMIT：放行
+        assert!(
+            !card_would_overflow(&sheet, 1, Some("x")),
+            "恰好 16 MiB 应放行"
+        );
+        // 写 2 字节 → 超 1 字节：拒绝
+        assert!(
+            card_would_overflow(&sheet, 1, Some("xx")),
+            "超 1 字节必须拒绝"
+        );
+
+        // 改写第 1 题为同样长度：总量不变，不该误判
+        let same_len = "y".repeat(LIMIT - 1);
+        assert!(
+            !card_would_overflow(&sheet, 0, Some(&same_len)),
+            "同长度改写不改变总量"
+        );
+
+        // 清空第 1 题后，第 2 题可以写满整个上限
+        sheet.answers[0] = None;
+        let full = "x".repeat(LIMIT);
+        assert!(!card_would_overflow(&sheet, 1, Some(&full)));
+    }
+
+    /// 交卷前硬校验：只有超限才拦，恰好用满放行。
+    #[test]
+    fn submit_blocked_only_when_over_limit() {
+        const LIMIT: usize = common::answer_sheet::MAX_TOTAL_ANSWER_BYTES;
+        let at_limit = answer_sheet_with(&[LIMIT]);
+        assert_eq!(
+            submit_blocked_reason(&at_limit),
+            None,
+            "恰好 16 MiB 可以交卷"
+        );
+
+        let over = answer_sheet_with(&[LIMIT + 1]);
+        let msg = submit_blocked_reason(&over).expect("超限必须拦下");
+        assert!(
+            msg.contains("MiB") && msg.contains("未交卷"),
+            "提示要说清原因与后果：{msg}"
+        );
+    }
+
+    /// 被拒绝的交卷**不能**冻结答题卡：`submitted=true` 不可逆，学生会既改不回来、
+    /// 也没有卡（`seal` 会因超限失败）。
+    #[test]
+    fn blocked_submit_does_not_freeze_the_sheet() {
+        const LIMIT: usize = common::answer_sheet::MAX_TOTAL_ANSWER_BYTES;
+
+        let mut over = answer_sheet_with(&[LIMIT + 1]);
+        let err = try_submit(&mut over, 123).expect_err("超限必须拒绝交卷");
+        assert!(err.contains("未交卷"));
+        assert!(
+            !over.submitted,
+            "被拒绝时绝不能置 submitted（否则学生改不回来、也没有卡）"
+        );
+        assert_eq!(over.submitted_unix, None);
+
+        let mut fit = answer_sheet_with(&[LIMIT]);
+        try_submit(&mut fit, 123).expect("恰好 16 MiB 可以交卷");
+        assert!(fit.submitted);
+        assert_eq!(fit.submitted_unix, Some(123), "交卷时间必须一并写入");
+    }
+
+    /// 交卷确认只在 5 秒内有效。
+    ///
+    /// 旧实现是个 bool，置 true 后只有「再点一次/取消/换卷」才复位：误点一次后
+    /// 继续答题 40 分钟，之后再点一次就直接交卷了。
+    #[test]
+    fn confirm_window_expires_after_five_seconds() {
+        let now = Instant::now();
+        assert!(!confirm_is_active(None, now), "没点过时不是确认态");
+        assert!(confirm_is_active(
+            now.checked_sub(Duration::from_secs(4)),
+            now
+        ));
+        assert!(
+            confirm_is_active(now.checked_sub(Duration::from_secs(5)), now),
+            "边界 5 秒仍有效"
+        );
+        assert!(
+            !confirm_is_active(now.checked_sub(Duration::from_secs(6)), now),
+            "6 秒必须失效"
+        );
+        // 时钟回拨/抖动时 `saturating_duration_since` 返回 0：视为刚点过，不 panic。
+        assert!(confirm_is_active(Some(now + Duration::from_secs(1)), now));
+    }
+
+    /// 代码答案上限按 **UTF-8 字节**：中文不能因为「字符数没超」就被放行。
+    #[test]
+    fn code_answer_limit_counts_utf8_bytes() {
+        let limit = crate::code_editor::CODE_MAX_BYTES;
+        assert!(code_value(&"x".repeat(limit)).is_ok(), "1 MiB ASCII 应放行");
+        assert!(
+            code_value(&"x".repeat(limit + 1)).is_err(),
+            "超 1 字节必须拒绝"
+        );
+
+        // 40 万个汉字：字符数 40 万 < 1 Mi，但字节数 1.2 MB > 上限
+        let chinese = "中".repeat(400_000);
+        assert!(chinese.chars().count() < limit);
+        assert!(chinese.len() > limit);
+        let err = code_value(&chinese).expect_err("按字节必须拒绝");
+        assert!(err.contains("字节"), "提示要说明按字节算：{err}");
+
+        // 30 万个汉字 ≈ 900 KB：放行
+        assert!(code_value(&"中".repeat(300_000)).is_ok());
+    }
+
+    /// 多份 recovered 备份时，恢复**序号最大**（最新）的一份。
+    ///
+    /// 写入侧是 `.recovered`、`.recovered.1`、`.recovered.2` 递增，
+    /// 旧实现恢复时 `sort()` 取第一个 = 最旧的一份，最近一轮作答被永久忽略。
+    #[test]
+    fn recovered_sheet_prefers_newest_sequence() {
+        let dir = std::path::Path::new("target").join("sheet-recovered-newest");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("answers-2-1-91d70557.eea");
+        let old = dir.join("answers-2-1-91d70557.eea.recovered");
+        let newest = dir.join("answers-2-1-91d70557.eea.recovered.3");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&newest, b"new").unwrap();
+        // 干扰项：非数字后缀不是有效备份
+        std::fs::write(dir.join("answers-2-1-91d70557.eea.recovered.bak"), b"x").unwrap();
+
+        let found = find_recovered_sheet(&base).expect("应找到备份");
+        assert_eq!(found, newest, "必须取序号最大的那份（最近一轮作答）");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recovered_seq_parses_suffixes() {
+        let prefix = "a.eea.recovered";
+        assert_eq!(recovered_seq("a.eea.recovered", prefix), Some(0));
+        assert_eq!(recovered_seq("a.eea.recovered.0", prefix), Some(0));
+        assert_eq!(recovered_seq("a.eea.recovered.12", prefix), Some(12));
+        assert_eq!(recovered_seq("a.eea.recovered.bak", prefix), None);
+        assert_eq!(recovered_seq("a.eea.recovered.", prefix), None);
+        assert_eq!(recovered_seq("other", prefix), None);
     }
 }
 

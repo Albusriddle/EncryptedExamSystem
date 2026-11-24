@@ -370,7 +370,7 @@ fn choose_with_range(
         });
     }
 
-    // 内存保护：parent 表 (n+1) × (hi_sum+1) 个 u16
+    // 内存保护：parent 表 (n+1) × (hi_sum+1) 个索引
     let cells = (n + 1).saturating_mul(hi_sum + 1);
     // 操作数保护：内层循环约 order.len() × n × hi_sum 次。
     // 大题库 + 宽区间（如 1000 题抽 150、1–255）会到几十亿次，必须回退。
@@ -384,7 +384,12 @@ fn choose_with_range(
 
     let words = hi_sum / 64 + 1;
     let mut dp = vec![vec![0u64; words]; n + 1];
-    let mut parent = vec![vec![u16::MAX; hi_sum + 1]; n + 1];
+    // parent 存的是「洗牌后池子里的下标」，`order.len()` 可以到几十万。
+    // 用 `u16` 存会在题库超过 65 535 题时**静默截断**（几千题的题库看不出来，
+    // 大题库才出现）：回溯时拿到的是另一道题，难度和不对，甚至 `sum -= diffs[pos]`
+    // 下溢——debug 直接 panic，release 回绕成天文数字后 `parent[j][sum]` 越界 panic。
+    // 所以用 `u32`；上限 8e6 个单元 × 4 字节 = 32 MB，仍在可接受范围。
+    let mut parent = vec![vec![u32::MAX; hi_sum + 1]; n + 1];
     dp[0][0] = 1;
 
     for (pos, &d) in diffs.iter().enumerate() {
@@ -400,7 +405,7 @@ fn choose_with_range(
                     && dp[j][s / 64] >> (s % 64) & 1 == 0
                 {
                     dp[j][s / 64] |= 1 << (s % 64);
-                    parent[j][s] = pos as u16;
+                    parent[j][s] = pos as u32;
                 }
             }
         }
@@ -430,7 +435,7 @@ fn choose_with_range(
     let mut j = n;
     while j > 0 {
         let pos = parent[j][sum] as usize;
-        if pos == u16::MAX as usize {
+        if pos == u32::MAX as usize {
             return Err(PickError::NoFeasibleDifficulty {
                 exam_id: bank.exam_id.clone(),
                 pick: n as u32,
@@ -444,6 +449,21 @@ fn choose_with_range(
         j -= 1;
     }
     chosen.reverse();
+    // 复核实际难度和：DP 表与 parent 只保证「可达」，一旦索引或求和有任何偏差，
+    // 这里必须明确报错，而不是把一张超出难度区间的卷子发给学生（`window_fallback`
+    // 也是这么严格的）。
+    let actual: usize = chosen
+        .iter()
+        .map(|&i| bank.questions[i].difficulty.unwrap_or(0) as usize)
+        .sum();
+    if actual < lo_sum || actual > hi_sum {
+        return Err(PickError::NoFeasibleDifficulty {
+            exam_id: bank.exam_id.clone(),
+            pick: n as u32,
+            lo,
+            hi,
+        });
+    }
     Ok(chosen)
 }
 
@@ -1161,6 +1181,46 @@ mod tests {
                 "同学生必须同一份卷"
             );
         }
+    }
+
+    /// 题库超过 65 535 题时，抽题 DP 的 parent 索引不能截断。
+    ///
+    /// 为什么重要：`parent` 原本用 `u16` 存「洗牌后池子里的下标」，而大题库的下标可以到
+    /// 几十万。题库 > 65 535 题且走平均难度模式时，下标被静默截断成另一道题：返回的卷子
+    /// 难度和不对（学生拿到不符合区间的卷），回溯里 `sum -= diffs[pos]` 还可能下溢——
+    /// debug 直接 panic，release 回绕后 `parent[j][sum]` 越界 panic。
+    ///
+    /// 构造要点：前 65 536 题的难度**故意超出区间**（255 > hi_sum），DP 会跳过它们，
+    /// 于是 parent 里记下的位置必然 ≥ 65 536——这正是 `u16` 会截断的范围。
+    /// 规模仍在两条守卫内：`cells = 3×101`、`ops ≈ 70 000×2×101 ≈ 1.4e7`。
+    #[test]
+    fn huge_bank_dp_does_not_truncate_parent_index() {
+        let total = 70_000usize;
+        let mut bank = demo_bank("huge", total, 2);
+        for (i, q) in bank.questions.iter_mut().enumerate() {
+            q.difficulty = Some(if i < 65_536 {
+                255 // 超出 [1,50] 区间，DP 里 `d > hi_sum` 直接跳过
+            } else {
+                (i % 50 + 1) as u8
+            });
+        }
+        let order: Vec<usize> = (0..total).collect();
+
+        let chosen = choose_with_range(&bank, 2, &order, 1, 50).expect("应能抽出 2 题");
+        assert_eq!(chosen.len(), 2, "必须抽满 2 题");
+        assert_ne!(chosen[0], chosen[1], "同一题不能出现两次");
+        assert!(
+            chosen.iter().all(|&i| i >= 65_536),
+            "只能从下标 ≥ 65 536 的题里选（前面的题难度超区间），实际 {chosen:?}"
+        );
+        let sum: usize = chosen
+            .iter()
+            .map(|&i| bank.questions[i].difficulty.expect("题目都设了难度") as usize)
+            .sum();
+        assert!(
+            (2..=100).contains(&sum),
+            "难度和 {sum} 不在 [2, 100]（下标截断会给出区间外的组合，或直接下溢 panic）"
+        );
     }
 
     #[test]

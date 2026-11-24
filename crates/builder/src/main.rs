@@ -1168,7 +1168,7 @@ mod tests {
         sheet.freeze(1_700_000_200);
 
         let file = dir.join("answers-2021001-1.eea");
-        write_atomic(&file, &seal(&k_manifest, &sheet).unwrap()).unwrap();
+        write_atomic(&file, &seal(&k_manifest, &sheet).unwrap(), true).unwrap();
 
         let code = verify_answer_sheet(&file, true, Some(&pkg), Some(master_hex()), None).unwrap();
         assert_eq!(code, 0, "正常答题卡应通过");
@@ -1194,7 +1194,7 @@ mod tests {
         let mut sheet = make_sheet(&pkg_a, &k_a);
         sheet.set_answer(0, Some("A".into()), 1);
         let file = dir.join("answers-2021001-1.eea");
-        write_atomic(&file, &seal(&k_a, &sheet).unwrap()).unwrap();
+        write_atomic(&file, &seal(&k_a, &sheet).unwrap(), true).unwrap();
 
         let code =
             verify_answer_sheet(&file, true, Some(&pkg_b), Some(master_hex()), None).unwrap();
@@ -1221,7 +1221,7 @@ mod tests {
 
         let sheet = make_sheet(&pkg_a, &k_a);
         let file = dir.join("answers-2021001-1.eea");
-        write_atomic(&file, &seal(&k_a, &sheet).unwrap()).unwrap();
+        write_atomic(&file, &seal(&k_a, &sheet).unwrap(), true).unwrap();
 
         let code =
             verify_answer_sheet(&file, true, Some(&pkg_b), Some(master_hex()), None).unwrap();
@@ -1235,7 +1235,7 @@ mod tests {
         let (pkg, k_manifest) = make_package(&dir, &master_hex(), "p.exe");
         let sheet = make_sheet(&pkg, &k_manifest);
         let file = dir.join("answers-2021001-1.eea");
-        write_atomic(&file, &seal(&k_manifest, &sheet).unwrap()).unwrap();
+        write_atomic(&file, &seal(&k_manifest, &sheet).unwrap(), true).unwrap();
         let code = verify_answer_sheet(&file, true, None, Some(master_hex()), None).unwrap();
         assert_eq!(code, 5, "不给包时必须拒绝，不能把未校验绑定当通过");
         std::fs::remove_dir_all(&dir).ok();

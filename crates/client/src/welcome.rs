@@ -10,17 +10,13 @@ use eframe::egui;
 
 use common::branding;
 
-/// 以给定目录为根时的标记文件路径（便于测试）。
-fn marker_path_in(base: &std::path::Path) -> PathBuf {
-    base.join("ExamSystem").join("skip_welcome")
-}
-
 /// 「不再提示」标记文件路径。取不到用户目录时返回 `None`（每次都弹）。
+///
+/// 目录口径统一走 [`crate::paths::user_data_dir`]：以前这里用
+/// `LOCALAPPDATA` / `HOME`（得到 `$HOME/ExamSystem`），而答题卡用
+/// `$HOME/.local/share/ExamSystem`，Linux 上会出现两个 `ExamSystem` 目录。
 fn marker_path() -> Option<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
-    Some(marker_path_in(&base))
+    crate::paths::user_data_dir().map(|dir| dir.join("skip_welcome"))
 }
 
 /// 标记文件内容。写入一个可识别的签名，
@@ -213,14 +209,24 @@ mod tests {
 
     #[test]
     fn marker_path_is_under_examsystem() {
-        let p = marker_path_in(std::path::Path::new("C:/base"));
-        assert!(p.ends_with("ExamSystem/skip_welcome") || p.ends_with("ExamSystem\\skip_welcome"));
+        if let Some(p) = marker_path() {
+            assert!(
+                p.ends_with("skip_welcome"),
+                "标记文件必须叫 skip_welcome，实际 {}",
+                p.display()
+            );
+            assert!(
+                p.to_string_lossy().contains("ExamSystem"),
+                "标记文件必须在数据目录下，实际 {}",
+                p.display()
+            );
+        }
     }
 
     #[test]
     fn dismiss_flag_roundtrip() {
         let base = tmp("roundtrip");
-        let mark = marker_path_in(&base);
+        let mark = base.join("skip_welcome");
         assert!(!mark.is_file(), "初始不应存在标记");
         // 模拟用户勾选「不再提示」
         std::fs::create_dir_all(mark.parent().unwrap()).unwrap();
@@ -234,7 +240,7 @@ mod tests {
     #[test]
     fn empty_or_corrupt_marker_is_not_dismissed() {
         let base = tmp("corrupt");
-        let mark = marker_path_in(&base);
+        let mark = base.join("skip_welcome");
         std::fs::create_dir_all(mark.parent().unwrap()).unwrap();
 
         std::fs::write(&mark, b"").unwrap();
