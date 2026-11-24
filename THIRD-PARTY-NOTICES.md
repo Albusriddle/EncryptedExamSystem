@@ -27,7 +27,7 @@
 |---|---|---|
 | CPython | 发布流水线所用版本（当前 3.13.x；流水线未 pin 解释器，随 runner 镜像变化） | PSF License |
 
-## 3. Rust 依赖（学生端与命令行工具）
+## 3. Rust 依赖（学生端 / 命令行工具 / `exam-server`）
 
 以下 crate 以 MIT 和/或 Apache-2.0 授权，随二进制静态链接：
 
@@ -39,7 +39,9 @@
 `anyhow` / `thiserror`（MIT OR Apache-2.0）、`hex` / `zeroize`（MIT OR Apache-2.0）、
 `winit` / `glutin`（Apache-2.0）、`ab_glyph`（Apache-2.0）、
 `syntect`（MIT）、`fancy-regex`（MIT）、`bincode`（MIT）、
-`ed25519-dalek`（BSD-3-Clause）、`rayon`（MIT OR Apache-2.0）、`windows-sys`（MIT OR Apache-2.0）。
+`ed25519-dalek`（BSD-3-Clause）、`rayon`（MIT OR Apache-2.0）、`windows-sys`（MIT OR Apache-2.0）、
+`rustls` / `rustls-pemfile`（Apache-2.0 OR ISC OR MIT）、`rustls-pki-types`（MIT OR Apache-2.0）、
+`ring`（**Apache-2.0 AND ISC**，ISC 文本见 `licenses/ISC.txt`）、`rcgen` / `time`（MIT OR Apache-2.0）。
 
 ## 3.1 网页版前端（阶段 1）
 

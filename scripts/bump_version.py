@@ -66,6 +66,8 @@ DOC_VERSION_FILES = (
     "docs/题库JSON规范.md",
     "docs/安全边界与威胁模型.md",
     "docs/教师使用手册.md",
+    # v1.5.0 起纳入：这个文件的标题曾手写版本号（"v1.4.x"），每次发版都会漂。
+    "crates/server/README.md",
 )
 
 

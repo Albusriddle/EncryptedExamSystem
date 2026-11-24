@@ -6,11 +6,72 @@
 - 命令行：`exam-builder`（打包、校验、导出 PIN、考后看原卷、校验答题卡）
 - 学生端：`exam-client`（单 exe，双击运行，按场次与网络时间解锁）
 
-> 当前版本 **1.5.0**。Release 正文由 `scripts/release_body.py` 从本文件提取
+> 当前版本 **1.5.1**。Release 正文由 `scripts/release_body.py` 从本文件提取
 > **当前版本那一节**，因此 `## 更新摘要（vX.Y.Z）` 小节必须存在且唯一。
 >
-> **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 61 个版本，最新在前）；
+> **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 62 个版本，最新在前）；
 > 更早版本（v0.13.2 及以前）未逐条整理，需要时查 `git tag` 与 `git log`。
+
+## 更新摘要（v1.5.1）
+
+本版是 v1.5.0 的**复审修复**（1 个 P1 + 8 个 P2 + 26 个 P3），不新增功能。
+
+### 管理端（P1）
+
+- 补上 v1.5.0 声称但**实际没有**的「使用 HTTPS（自签证书，推荐）」勾选框（默认开，关闭需二次确认）；
+- `--tls` 现在**显式**写进命令行：老师机上若残留旧版 `exam-server`，会立刻以「未知参数」失败，
+  而不是悄悄跑明文而界面显示 https；
+- 地址随勾选切换 scheme；底部说明改为自签口径；明文跳转端口被占用时在日志里提示（不拦启动）。
+
+### TLS 健壮性
+
+- **证书自动重签**：距到期 < 30 天、教师机换了 IP/域名（SAN 不覆盖）、目录里没有 `server.json`
+  元数据、或证书文件损坏时，启动会自动重签并打印原因；重签前把旧文件备份成 `.bak.<时间戳>`；
+- 横幅新增 `SAN：…` 与 `证书到期：…（UTC；到期前 30 天重启会自动重签）`；
+- **私钥先收紧后落盘**：写 `.tmp` → 收紧权限 → rename；收紧失败只告警（不再让整场考试起不来），
+  加载已有证书时也会补一次收紧；
+- `ServerConfig` 显式声明 `ALPN = http/1.1`；TLS 关闭时发送 `close_notify`；
+- 明文跳转端口加**连接上限 64**；横幅改为「先绑定成功再宣告」，失败时写明「旧书签自动跳转未启动」；
+- `--tls off` 时提示 `--http-redirect-port` 被忽略；`--port` 与跳转端口相同时自动关闭跳转；
+- 握手/读取错误**降噪**（前 5 次完整、之后每 100 次采样），并提示「可能是用 http:// 访问了 HTTPS 端口」；
+- `drain_briefly` 的读超时恢复为 200 ms（v1.5.0 曾退化成 10 s，可被「声明大 body 但不发」占线程）。
+
+### 安全响应头与页面
+
+- 行内 `<script>`/`<style>` 拆到 `/assets/app.{js,css}`，页面不再有行内 `style=` 属性；
+- 所有响应（含 4xx/5xx）加 `Content-Security-Policy`（`script-src 'self'`、`style-src 'self'`、
+  `frame-ancestors 'none'` 等）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、
+  `Referrer-Policy: no-referrer`、`Permissions-Policy`；
+- `--tls off` 时页面顶部也显示「当前为明文 HTTP，仅限排障」。
+
+### 网页前端（数据正确性）
+
+- **交卷不再误报失败**：`POST /api/submit` 成功后立即本地渲染「已交卷」页，随后的「复查卷面」
+  只作尽力而为，任何失败都不再弹「交卷失败」；
+- **交卷前等在途保存**：`saveDirty` 加 in-flight 锁，`submit` 保存失败就中止交卷并提示重试——
+  修掉「最后 ≤600 ms 作答可能不在封存卡里」的竞态；
+- 服务端自动收卷（保存 409 或 `/api/time` 返回 `submitted: true`）时切到「已交卷」页并说明原因；
+- 关页冲尾：`keepalive` 只在 ≤64 KiB 时使用，失败只清「确实发出」的题；退出失败不再假装成功；
+  会话失效的横幅会说明「有 N 题未同步」；`answers` 改为无原型对象；多选不再用选择器拼 key；
+  自动交卷失败按 2 s→20 s 退避；PIN/学号输入加 `autocomplete` 防浏览器记住；断线横幅加 `role="alert"`；
+  清理死代码（`escapeHtml`、未用的 `review` 变量等）。
+
+### 文档与合规
+
+- 风险接受记录 R-05 更新为「默认 HTTPS（自签）；明文端口只做 301」，补偿措施补 TLS，
+  残余风险改为「主动中间人 / 主机木马 / 浏览器不可控」；
+- `THIRD-PARTY-NOTICES.md` 补 v1.5.0 新增的 6 个依赖，`ring` 注明 **Apache-2.0 AND ISC** 并新增
+  `licenses/ISC.txt`（`build_exe.py` 现在**缺它即构建失败**）；
+- 教师手册：指纹核对改为可执行路径（先点「继续前往」，再点地址栏「不安全 → 证书无效 → 查看证书」）；
+  补「旧书签 8080 自动跳转」「`--tls off` 何时用」「证书位置与自动重签」；
+- 审阅报告新增第一百二十轮；`crates/server/README.md` 纳入版本标记维护（15 → 16 个文件）。
+
+### 验证
+
+- Rust **350**（+9）；pytest **429 passed + 1 skipped**（收集 430）；
+- 真浏览器（headless Chromium）：严格 CSP 下页面正常渲染（登录卡可见、考试/已交卷区块隐藏）、
+  登录→作答→保存正常；到点自动交卷后显示「已交卷」页且**没有**误报「交卷失败」；
+- `smoke-web.sh`（HTTPS）、`drill --students 6`、`verify-embed` 17 项、`preflight` 15 项 全过；CI 8/8。
 
 ## 更新摘要（v1.5.0）
 
@@ -22,7 +83,8 @@
 - `exam-server` 启动时若 `<answers-dir>/tls/` 没有证书，**自动生成**一张 ECDSA P-256 自签证书：
   - SAN 含本机局域网 IP、`127.0.0.1`、`localhost`（少一个就会报「名称不匹配」）；
   - EKU `serverAuth` + keyUsage 合规——缺了 Chrome 会报**不可绕过**的 `ERR_SSL_KEY_USAGE_INCOMPATIBLE`；
-  - 有效期 365 天，到期重启自动重生成；私钥 0600（Windows 受保护 DACL）。
+  - 有效期 365 天，**到期前 30 天自动重签**；换网段/IP（SAN 不含当前地址）或旧目录缺元数据也会自动重签，
+    证书/私钥损坏时备份后重签（日志打印「证书已重签：<原因>」）；私钥 0600（Windows 受保护 DACL）。
 - 启动横幅打印 `https://<IP>:8443/` 与**证书指纹（SHA-256）**；页面上也有一行提示，
   告诉学生「点『高级 → 继续前往』」，并提醒 iPad/iPhone 用 Safari（iOS 上的 Chrome 无法绕过）。
 - 支持 `--tls-cert/--tls-key`（学校内网 CA 签发的证书）、`--tls-host`（SAN 自定义）、
