@@ -103,6 +103,26 @@ fn accept_status(code: u16) -> bool {
     (200..300).contains(&code)
 }
 
+/// curl 兜底分支的参数。
+///
+/// **必须带 `-A`**：实测 `https://www.aliyun.com` 对 curl 的默认 UA 直接返回 403，
+/// 而「只认 2xx」之后该源会整条失效——Linux/CI 上三源变两源，2 源容差只有 10 秒，
+/// fail-closed 的概率明显上升。Windows 分支的 `WinHttpOpen` 已经带同一个 agent 串，
+/// 这里保持同口径，避免两平台「能取到几个源」不一样。
+///
+/// 抽成函数是为了能单测参数拼装（而不是只能整条命令跑真网络）。
+#[cfg_attr(windows, allow(dead_code))] // Windows 走 WinHTTP，不用 curl
+fn curl_args(url: &str, timeout: Duration) -> Vec<String> {
+    vec![
+        "-fsSI".to_string(),
+        "-A".to_string(),
+        "EncryptedExamSystem/0.1".to_string(),
+        "--max-time".to_string(),
+        timeout.as_secs().to_string(),
+        url.to_string(),
+    ]
+}
+
 /// 发一个 HTTPS GET，只取 `Date` 响应头。
 #[cfg(windows)]
 fn fetch_date_header(url: &str, timeout: Duration) -> Result<String, String> {
@@ -249,8 +269,9 @@ impl Drop for HandleGuard {
 #[cfg(not(windows))]
 fn fetch_date_header(url: &str, timeout: Duration) -> Result<String, String> {
     // `-f`：HTTP ≥ 400 直接非零退出，避免把错误页的 Date 当时间（与 Windows 分支口径一致）。
+    // `-A` 见 [`curl_args`] 的注释：不带 UA 时 aliyun 会回 403。
     let out = std::process::Command::new("curl")
-        .args(["-fsSI", "--max-time", &timeout.as_secs().to_string(), url])
+        .args(curl_args(url, timeout))
         .output()
         .map_err(|e| format!("无法执行 curl: {e}"))?;
     if !out.status.success() {
@@ -375,7 +396,9 @@ fn fetch_body(url: &str, timeout: Duration) -> Result<String, String> {
         if status_ok == 0 {
             return Err(format!("读取 HTTP 状态码失败（错误码 {}）", GetLastError()));
         }
-        if !(200..300).contains(&status) {
+        // 与 fetch_date_header 共用同一判定（`accept_status`）：两处各写一份的话，
+        // 将来改「3xx 算不算成功」必漏一处。
+        if !accept_status(status as u16) {
             return Err(format!("时间服务 HTTP {status}"));
         }
         let mut body = Vec::new();
@@ -1075,6 +1098,30 @@ mod tests {
         // 月末合法日期
         assert!(parse_rfc3339("2026-01-31T10:00:00+08:00").is_some());
         assert!(parse_rfc3339("2026-12-31T10:00:00+08:00").is_some());
+    }
+
+    /// curl 兜底分支必须显式带 UA。
+    ///
+    /// 实测 `https://www.aliyun.com` 对 curl 默认 UA 返回 403、带本 UA 返回 200；
+    /// 「只认 2xx」之后不带 UA 就等于把该源判死（Linux/CI 上三源变两源）。
+    #[test]
+    fn curl_args_carry_user_agent() {
+        let args = curl_args("https://www.aliyun.com", std::time::Duration::from_secs(3));
+        let at = args
+            .iter()
+            .position(|a| a == "-A")
+            .expect("必须显式给 UA（否则 aliyun 回 403）");
+        assert_eq!(
+            args.get(at + 1).map(String::as_str),
+            Some("EncryptedExamSystem/0.1"),
+            "UA 要与 Windows 分支的 WinHttpOpen agent 一致"
+        );
+        assert!(args.iter().any(|a| a == "https://www.aliyun.com"));
+        assert!(
+            args.iter().any(|a| a == "3"),
+            "超时秒数要在参数里：{args:?}"
+        );
+        assert!(args.iter().any(|a| a == "-fsSI"));
     }
 
     #[test]

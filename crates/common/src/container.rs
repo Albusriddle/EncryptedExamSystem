@@ -283,6 +283,10 @@ pub fn build_payload_with_options(
     // 重复题号会让网页端按 `qid` 存答案时互相覆盖（`BTreeMap<String, String>`），教师端
     // 判分也会用另一道题的标准答案去判——系统性错判，而且看不出来。
     // 这里只做「构建期一次」的检查，成本可忽略。
+    //
+    // 注意这是**对外行为变化**：绕过 CLI 的第三方/旧工具以前「什么都能打包」，现在
+    // 会直接报错。这是意图（宁可打包失败，也不要发出会错判的卷），调用方应先处理
+    // `ExamBank::validate` 的错误。
     for bank in banks {
         bank.validate().map_err(|e| {
             ContainerError::Format(format!("题库校验失败（exam_id={}）：{e}", bank.exam_id))
@@ -632,28 +636,33 @@ fn resolve_session_picks(
 /// 并且把**场次号**写进报错——否则老师看到「时间格式错误」根本不知道说的是哪一场。
 ///
 /// 返回 `(start, end)`（Unix 秒）；时区缺失、格式非法、或结束不晚于开始都返回 `Err`。
-pub fn session_times(session: &Session) -> Result<(u64, u64), String> {
-    let start = crate::timegate::parse_rfc3339_strict(&session.start).ok_or_else(|| {
+/// 解析场次时间窗（**严格**：必须显式时区偏移，且结束必须晚于开始）。
+///
+/// 构建期看到的是 `model::Session`，运行期看到的是 `container::SessionHeader`，
+/// 两者只有字符串；共用这一个入口，避免「构建期严、运行期松」——
+/// 无偏移时间会被当成 UTC，UTC+8 的考场整体偏 8 小时且不报错。
+pub fn parse_session_window(session_id: u32, start: &str, end: &str) -> Result<(u64, u64), String> {
+    let s = crate::timegate::parse_rfc3339_strict(start).ok_or_else(|| {
         format!(
-            "场次 #{} 的开始时间不合法：需要带时区偏移的 RFC3339（例如 2026-12-20T09:00:00+08:00），实际 {:?}",
-            session.session_id, session.start
+            "场次 #{session_id} 的开始时间必须带时区偏移（例如 +08:00）且格式合法，实际 {start:?}"
         )
     })?;
-    let end = crate::timegate::parse_rfc3339_strict(&session.end).ok_or_else(|| {
+    let e = crate::timegate::parse_rfc3339_strict(end).ok_or_else(|| {
         format!(
-            "场次 #{} 的结束时间不合法：需要带时区偏移的 RFC3339（例如 2026-12-20T11:00:00+08:00），实际 {:?}",
-            session.session_id, session.end
+            "场次 #{session_id} 的结束时间必须带时区偏移（例如 +08:00）且格式合法，实际 {end:?}"
         )
     })?;
-    if end <= start {
+    if e <= s {
         return Err(format!(
-            "场次 #{} 的结束时间必须晚于开始时间（开始 {}，结束 {}）",
-            session.session_id,
-            crate::timegate::format_unix_local_zoned(start),
-            crate::timegate::format_unix_local_zoned(end)
+            "场次 #{session_id} 的结束时间必须晚于开始时间（实际 {start:?} .. {end:?}）"
         ));
     }
-    Ok((start, end))
+    Ok((s, e))
+}
+
+/// `model::Session` 版本的便利入口（构建期校验用）。
+pub fn session_times(session: &Session) -> Result<(u64, u64), String> {
+    parse_session_window(session.session_id, &session.start, &session.end)
 }
 
 /// 构建期校验：这些错误必须在打包时炸，绝不能留到考场。

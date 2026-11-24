@@ -368,16 +368,29 @@ pub fn resolve_manifest_key(
     // **解析失败不能把正常包打死**：机房机器可能残留一个垃圾 `EXAM_MASTER`
     // （上一位考生/老师设的），此时密钥已经由包内或编译期确定，master 只是用来
     // 「核对」的。旧实现直接 `?` 上抛，学生看到「解析主密钥」失败、以为是包坏了。
-    if master_file.is_some() || std::env::var("EXAM_MASTER").is_ok() {
-        match read_master_arg(master_file.as_deref()) {
+    if let Some(path) = master_file {
+        // 老师**明确**传了 `--master-file`：读不出来/解析不了就是意图失败，必须报错。
+        // 静默忽略会把「拿错包 / 拿错密钥」掩盖成一次成功解锁。
+        let given = read_master_arg(Some(path.as_str()))
+            .with_context(|| format!("--master-file 无法使用（{path}）"))?;
+        let derived = container::manifest_key(&given);
+        anyhow::ensure!(
+            derived == k,
+            "显式传入的 master 与包内嵌的密钥不匹配（可能拿错了包或密钥）"
+        );
+    } else if std::env::var("EXAM_MASTER").is_ok() {
+        // 环境变量只作「核对」：机房机器可能残留上一位考生的垃圾值，解析失败降级为警告。
+        match read_master_arg(None) {
             Ok(given) => {
                 let derived = container::manifest_key(&given);
                 anyhow::ensure!(
                     derived == k,
-                    "显式传入的 master 与包内嵌的密钥不匹配（可能拿错了包或密钥）"
+                    "环境变量 EXAM_MASTER 与包内嵌的密钥不匹配（可能拿错了包或密钥）"
                 );
             }
-            Err(e) => eprintln!("⚠ 已忽略无法解析的 master（包内密钥可用，不影响本次解锁）：{e:#}"),
+            Err(e) => {
+                eprintln!("⚠ 已忽略无法解析的 EXAM_MASTER（包内密钥可用，不影响本次解锁）：{e:#}")
+            }
         }
     }
     Ok((k, source))

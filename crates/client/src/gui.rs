@@ -598,8 +598,14 @@ impl eframe::App for ExamApp {
                 if let Some(sheet) = self.sheet.as_mut()
                     && !sheet.submitted
                 {
-                    sheet.freeze(now_or_wall_clock(now));
-                    self.sheet_dirty = true;
+                    let (should_freeze, note) = expiry_action(sheet);
+                    if should_freeze {
+                        sheet.freeze(now_or_wall_clock(now));
+                        self.sheet_dirty = true;
+                    } else {
+                        // 超限：不冻结，把「需监考处理」常驻在顶部错误条里。
+                        self.save_error = note;
+                    }
                 }
                 // 标题栏也换成"已结束"：学生切到别的窗口后，一眼能看出状态；
                 // 同时让 release 包的行为可以被外部自动化验证（读窗口标题）。
@@ -1111,8 +1117,15 @@ fn render_answer_inputs(
                     );
                 }
             });
-            if parts != before && sheet.set_answer(idx, Some(encode_parts(&parts)), now_unix) {
-                changed = true;
+            if parts != before {
+                // 与问答题同一个上限判据：先算编码后的长度再写，超限就保留原答案。
+                // 填空/改错以前没有这道守卫，可以把卡撑过 16 MiB——到点冻结后就变成
+                // 「已交卷但磁盘上没有卡」，且冻结后无法删减。
+                match write_answer_checked(sheet, idx, Some(encode_parts(&parts)), now_unix) {
+                    Ok(true) => changed = true,
+                    Ok(false) => {}
+                    Err(()) => overflow_label(ui),
+                }
             }
         }
         QuestionBody::Code { blank_count, .. } => {
@@ -1140,8 +1153,12 @@ fn render_answer_inputs(
                     );
                 });
             }
-            if fixes != before && sheet.set_answer(idx, Some(encode_fixes(&fixes)), now_unix) {
-                changed = true;
+            if fixes != before {
+                match write_answer_checked(sheet, idx, Some(encode_fixes(&fixes)), now_unix) {
+                    Ok(true) => changed = true,
+                    Ok(false) => {}
+                    Err(()) => overflow_label(ui),
+                }
             }
         }
         QuestionBody::Text => {
@@ -1194,17 +1211,10 @@ fn render_answer_inputs(
                         if resp.changed() {
                             // 先判「整卡会不会超 16 MiB」再写：超限就拒收这次输入，
                             // 保留题目原有答案（否则交卷时 `validate` 会失败 → 没有卡）。
-                            if card_would_overflow(sheet, idx, value.as_deref()) {
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(200, 60, 60),
-                                    format!(
-                                        "整卡答案超过 {} MiB，本题未保存；请先删减其他题目",
-                                        common::answer_sheet::MAX_TOTAL_ANSWER_BYTES
-                                            / (1024 * 1024)
-                                    ),
-                                );
-                            } else if sheet.set_answer(idx, value, now_unix) {
-                                changed = true;
+                            match write_answer_checked(sheet, idx, value, now_unix) {
+                                Ok(true) => changed = true,
+                                Ok(false) => {}
+                                Err(()) => overflow_label(ui),
                             }
                         }
                     }
@@ -1302,6 +1312,46 @@ fn card_would_overflow(
         .saturating_sub(old_len)
         .saturating_add(new_len);
     total > common::answer_sheet::MAX_TOTAL_ANSWER_BYTES
+}
+
+/// 三条输入分支（问答 / 填空 / 改错）共用的写入入口。
+///
+/// 返回 `Err(())` = 整卡超限、**没有写入**（调用方显示提示并保留原答案）；
+/// `Ok(changed)` = 已按正常路径写入（`changed=false` 表示值没变）。
+/// 抽成函数是为了能单测「填空/改错也走同一道上限」——UI 分支本身跑不起来。
+fn write_answer_checked(
+    sheet: &mut common::answer_sheet::AnswerSheet,
+    idx: usize,
+    value: Option<String>,
+    now_unix: u64,
+) -> Result<bool, ()> {
+    if card_would_overflow(sheet, idx, value.as_deref()) {
+        return Err(());
+    }
+    Ok(sheet.set_answer(idx, value, now_unix))
+}
+
+/// 「整卡超限」的统一提示：填空 / 改错 / 问答三条输入分支共用一份文案。
+fn overflow_label(ui: &mut egui::Ui) {
+    ui.colored_label(
+        egui::Color32::from_rgb(200, 60, 60),
+        format!(
+            "整卡答案超过 {} MiB，本题未保存；请先删减其他题目",
+            common::answer_sheet::MAX_TOTAL_ANSWER_BYTES / (1024 * 1024)
+        ),
+    );
+}
+
+/// 到点时的收卷决策：返回（是否冻结，需要常驻显示的提示）。
+///
+/// 为什么不能无条件冻结：整卡超限时 `seal` 必然失败，冻结后学生既交不出去、也删减不了，
+/// 磁盘上永远没有卡。此时**不冻结**、把原因留在顶部提示里，由监考现场处理（删题或补录）。
+/// 抽成纯函数是因为 `update()` 的收卷分支没法在测试里跑。
+fn expiry_action(sheet: &common::answer_sheet::AnswerSheet) -> (bool, Option<String>) {
+    match submit_blocked_reason(sheet) {
+        Some(reason) => (false, Some(format!("{reason}（已到结束时间，需监考处理）"))),
+        None => (true, None),
+    }
 }
 
 /// 交卷前的硬校验：超限时返回给学生的提示（`None` = 可以交卷）。
@@ -2832,6 +2882,57 @@ mod tests {
         sheet.answers[0] = None;
         let full = "x".repeat(LIMIT);
         assert!(!card_would_overflow(&sheet, 1, Some(&full)));
+    }
+
+    /// 填空/改错也必须走「写入前判整卡上限」。
+    ///
+    /// 旧实现只守卫了问答题：填空题可以把卡撑过 16 MiB，自动保存时 `seal` 失败，
+    /// 到点冻结后就变成「已交卷但磁盘上没有卡」，而且冻结后无法删减。
+    #[test]
+    fn fill_writes_are_limited_too() {
+        const LIMIT: usize = common::answer_sheet::MAX_TOTAL_ANSWER_BYTES;
+        // 第 1 题占掉「上限 - 32 字节」，只剩 32 字节空间给第 2 题。
+        let mut sheet = answer_sheet_with(&[LIMIT - 32, 0]);
+
+        // 编码后远超剩余 32 字节：必须拒写，原答案保持为空
+        let too_big = common::answer_sheet::encode_parts(&["x".repeat(40)]);
+        assert!(
+            write_answer_checked(&mut sheet, 1, Some(too_big), 1).is_err(),
+            "超限的填空必须被拒"
+        );
+        assert_eq!(
+            sheet.answers[1].as_deref().unwrap_or(""),
+            "",
+            "被拒时不能写入内存（原答案必须保持为空）"
+        );
+
+        // 放得下的填空正常写入
+        let small = common::answer_sheet::encode_parts(&["x".to_string()]);
+        assert_eq!(
+            write_answer_checked(&mut sheet, 1, Some(small), 1),
+            Ok(true),
+            "限内必须写入"
+        );
+        assert!(sheet.answers[1].is_some());
+    }
+
+    /// 到点自动收卷：超限时**不冻结**（否则「已冻结但磁盘上没有卡」），并给出监考提示。
+    ///
+    /// 为什么单独测：`update()` 里的收卷分支跑不起来（需要真实窗口与时钟），
+    /// 所以把决策抽成 `expiry_action`；这里固定「超限 → 不冻结」与「正常 → 冻结」两条。
+    #[test]
+    fn expiry_does_not_freeze_an_oversized_sheet() {
+        const LIMIT: usize = common::answer_sheet::MAX_TOTAL_ANSWER_BYTES;
+
+        let over = answer_sheet_with(&[LIMIT + 1]);
+        let (freeze, note) = expiry_action(&over);
+        assert!(!freeze, "超限时不得冻结（冻结后既交不出去也改不了）");
+        let note = note.expect("超限必须给出提示");
+        assert!(note.contains("监考"), "提示要指向下一步：{note}");
+        assert!(!over.submitted, "决策本身不应改状态");
+
+        let ok = answer_sheet_with(&[16]);
+        assert_eq!(expiry_action(&ok), (true, None), "正常卡到点必须冻结");
     }
 
     /// 交卷前硬校验：只有超限才拦，恰好用满放行。

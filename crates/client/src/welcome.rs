@@ -16,8 +16,38 @@ use common::branding;
 /// `LOCALAPPDATA` / `HOME`（得到 `$HOME/ExamSystem`），而答题卡用
 /// `$HOME/.local/share/ExamSystem`，Linux 上会出现两个 `ExamSystem` 目录。
 fn marker_path() -> Option<PathBuf> {
-    crate::paths::user_data_dir().map(|dir| dir.join("skip_welcome"))
+    let path = crate::paths::user_data_dir()?.join("skip_welcome");
+    migrate_legacy_marker(&path);
+    Some(path)
 }
+
+/// 把旧版 Linux 上的标记搬到统一目录（一次性，失败忽略）。
+///
+/// 旧版这里用 `$HOME`，得到 `$HOME/ExamSystem/skip_welcome`；目录口径统一后
+/// 标记落在 `$HOME/.local/share/ExamSystem/`。不迁移的话，老用户升级后会**再看一次**
+/// 欢迎弹窗——考试当天这算干扰。用 copy+remove 而不是 rename：两者可能在不同挂载点。
+#[cfg(not(windows))]
+fn migrate_legacy_marker(new_path: &std::path::Path) {
+    if new_path.exists() {
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let legacy = home.join("ExamSystem").join("skip_welcome");
+    if !legacy.exists() {
+        return;
+    }
+    if let Some(dir) = new_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if std::fs::copy(&legacy, new_path).is_ok() {
+        let _ = std::fs::remove_file(&legacy);
+    }
+}
+
+#[cfg(windows)]
+fn migrate_legacy_marker(_new_path: &std::path::Path) {}
 
 /// 标记文件内容。写入一个可识别的签名，
 /// 避免"空文件/损坏文件"被误判成用户主动选择（实测踩过：

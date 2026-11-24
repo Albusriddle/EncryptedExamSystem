@@ -431,7 +431,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8], durable: bool) -> std::io::Result
     } else {
         std::fs::write(&tmp, bytes)?;
     }
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+    if durable {
+        // rename 本身也要落盘：只 fsync 文件、不 fsync 目录时，断电后目录项可能回退到
+        // 旧名字（旧卡是完整的，但「刚交的卡」会看不见）。Windows 没有对应语义，忽略错误。
+        #[cfg(unix)]
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

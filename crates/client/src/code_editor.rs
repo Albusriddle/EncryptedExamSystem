@@ -15,9 +15,10 @@ use syntect::util::LinesWithEndings;
 
 /// 单题代码答案上限（**UTF-8 字节**），与 `gui::code_value` 保持一致。
 ///
-/// 保存侧是唯一权威：编辑器**不按字符截断**——`char_limit(CODE_MAX_BYTES)`
-/// 按字符计，中文一字 3 字节，学生能输入 1 MiB 字符却在保存时被拒（约 3 MiB 字节）。
-/// 这里只用于显示计数与高亮阈值。
+/// 保存侧是唯一权威：真正拒绝答案的是 `gui::code_value`（按 UTF-8 字节）。
+/// 编辑器只保留一个**更宽松的字符上限**（4 倍字节上限）做防呆：按字符算的
+/// `char_limit(CODE_MAX_BYTES)` 会误伤中文（一字 3 字节，1 MiB 字符≈3 MiB 字节，
+/// 能输入却保存不了），完全不设又会让学生在误粘贴几十 MB 时先卡住界面。
 pub const CODE_MAX_BYTES: usize = 1024 * 1024;
 /// 超过此大小不做语法分析，只显示等宽文本，避免每帧解析 1 MiB。
 const HIGHLIGHT_MAX_BYTES: usize = 256 * 1024;
@@ -392,7 +393,9 @@ pub fn render_code_editor(
                         egui::TextEdit::multiline(text)
                             .id(egui::Id::new(("answer_editor", idx)))
                             .code_editor()
-                            // 不设 `char_limit`：上限按 UTF-8 字节算，见 CODE_MAX_BYTES 的注释。
+                            // 防呆上限（不是权威口径）：权威判定在保存时按 UTF-8 字节。
+                            // 取 4 倍是为了「中文也不会被提前截断」，同时挡住误粘贴几十 MB。
+                            .char_limit(CODE_MAX_BYTES.saturating_mul(4))
                             .desired_rows(lines)
                             .desired_width(edit_width)
                             .layouter(&mut layouter)

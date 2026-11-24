@@ -268,6 +268,18 @@ mod tests {
         }
     }
 
+    /// 有效的小 PNG 必须**真的能解码**。
+    ///
+    /// 旧用例只断言「错误不是 Limits」——把 `max_alloc` 调小或 `max_image_*` 用错时
+    /// 它照样通过（截断文件返回 Format/Eof 也算通过）。这里用真实的 1×1 PNG 走同一条
+    /// `decode_with_limits` 路径，断言 `Ok` 且宽高正确。
+    #[test]
+    fn small_valid_png_decodes_with_limits() {
+        let bytes = decode_data_uri(PNG_1PX).expect("1×1 PNG 的 data URI 应能解码");
+        let image = decode_with_limits(&bytes).expect("限制内的小图必须能解码");
+        assert_eq!((image.width(), image.height()), (1, 1));
+    }
+
     /// 声明尺寸在限制内的 PNG 不会被「限制」误伤（此处仍因缺像素数据而失败，
     /// 但错误不能是 Limits —— 那是我们自己的检查，不是文件本身的问题）。
     #[test]
