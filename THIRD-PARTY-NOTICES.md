@@ -38,8 +38,8 @@
 `rand` / `rand_chacha`（MIT OR Apache-2.0）、`clap`（MIT OR Apache-2.0）、
 `anyhow` / `thiserror`（MIT OR Apache-2.0）、`hex` / `zeroize`（MIT OR Apache-2.0）、
 `winit` / `glutin`（Apache-2.0）、`ab_glyph`（Apache-2.0）、
-`syntect`（MIT）、`fancy-regex`（MIT）、`regex`（MIT OR Apache-2.0）、
-`bincode`（MIT）、`plist`（MIT）、`yaml-rust`（MIT OR Apache-2.0）。
+`syntect`（MIT）、`fancy-regex`（MIT）、`bincode`（MIT）、
+`ed25519-dalek`（BSD-3-Clause）、`rayon`（MIT OR Apache-2.0）、`windows-sys`（MIT OR Apache-2.0）。
 
 ## 3.1 网页版前端（阶段 1）
 
