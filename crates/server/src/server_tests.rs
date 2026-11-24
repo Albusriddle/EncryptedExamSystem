@@ -2096,15 +2096,17 @@ fn every_response_carries_security_headers() {
         let mut buf: Vec<u8> = Vec::new();
         write_response(&mut buf, response).expect("写响应");
         let text = String::from_utf8_lossy(&buf).to_string();
+        // 直接断言常量本身，而不是抄一份字面量：CSP 收紧时这里自动跟上
+        // （v1.5.1 就因为测试里抄了旧字面量，CI 才抓到「收紧了但测试没跟上」）。
         for header in [
-            "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-            "X-Content-Type-Options: nosniff",
-            "X-Frame-Options: DENY",
-            "Referrer-Policy: no-referrer",
-            "Permissions-Policy: geolocation=(), camera=(), microphone=()",
+            format!("Content-Security-Policy: {CONTENT_SECURITY_POLICY}"),
+            "X-Content-Type-Options: nosniff".to_string(),
+            "X-Frame-Options: DENY".to_string(),
+            "Referrer-Policy: no-referrer".to_string(),
+            "Permissions-Policy: geolocation=(), camera=(), microphone=()".to_string(),
         ] {
             assert!(
-                text.contains(header),
+                text.contains(&header),
                 "缺少安全响应头 {header}；实际：\n{text}"
             );
         }
