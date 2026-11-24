@@ -16,6 +16,13 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# 第 3 节会在仓库根下造 .preflight/（临时题库 + 打包产物），原逻辑只在跑完那一节
+# 时才删。中途 Ctrl-C / 被杀就会留下未跟踪目录，`git add -A` 会把它带进提交。
+# 这里统一在退出时清理；成功路径的 rm 保留（幂等）。
+TMP=""
+cleanup_tmp() { [ -n "${TMP:-}" ] && rm -rf "$TMP" || true; }
+trap cleanup_tmp EXIT
+
 FULL=0
 [ "${1:-}" = "--full" ] && FULL=1
 

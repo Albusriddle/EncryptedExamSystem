@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """只输出当前 VERSION 对应的小节，避免 GitHub Release 带全部历史。"""
+
 from __future__ import annotations
 
 import re

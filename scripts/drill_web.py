@@ -65,7 +65,9 @@ def wait_port(port: int, deadline_s: float = 30.0) -> bool:
 class Server:
     """exam-server 的生命周期。`crash()` 用 SIGKILL 模拟断电/被误杀。"""
 
-    def __init__(self, exe: Path, package: Path, keyfile: Path, port: int, answers: Path, log: Path):
+    def __init__(
+        self, exe: Path, package: Path, keyfile: Path, port: int, answers: Path, log: Path
+    ):
         self.exe = exe
         self.package = package
         self.keyfile = keyfile
@@ -227,6 +229,8 @@ def build_package(builder: Path, work: Path, students: list[int]) -> tuple[Path,
 
     package = work / "pkg"
     keyfile = work / "key.txt"
+    # 主密钥只走环境变量：命令行参数会出现在进程列表里（AGENTS §5），
+    # builder 的 build/verify/verify-answer-sheet 都支持 EXAM_MASTER 回退。
     env = dict(os.environ, EXAM_MASTER=master)
     proc = subprocess.run(
         [
@@ -242,8 +246,6 @@ def build_package(builder: Path, work: Path, students: list[int]) -> tuple[Path,
             str(package),
             "--emit-keyfile",
             str(keyfile),
-            "--master",
-            master,
         ],
         capture_output=True,
         encoding="utf-8",
@@ -349,19 +351,21 @@ def recheck_after_restart(port: int, previous: list[dict]) -> tuple[list[str], d
         got = paper.get("answers") or {}
         for qid, want in item.get("answers", {}).items():
             if got.get(qid) != want:
-                failures.append(f"{sid}: 重启后答案丢失 {qid}: 期望 {want!r}，实际 {got.get(qid)!r}")
+                failures.append(
+                    f"{sid}: 重启后答案丢失 {qid}: 期望 {want!r}，实际 {got.get(qid)!r}"
+                )
                 break
     return failures, tokens
 
 
-def submit_all(port: int, students: list[int], tokens: dict[int, str], workers: int) -> tuple[list[float], list[str]]:
+def submit_all(
+    port: int, students: list[int], tokens: dict[int, str], workers: int
+) -> tuple[list[float], list[str]]:
     def one(sid: int) -> tuple[float, str | None]:
         token = tokens.get(sid)
         if not token:
             return 0.0, f"{sid}: 没有 token，跳过交卷"
-        status, payload, _, dt = http_json(
-            port, "POST", "/api/submit", {}, token=token, csrf=True
-        )
+        status, payload, _, dt = http_json(port, "POST", "/api/submit", {}, token=token, csrf=True)
         if status != 200:
             return dt, f"{sid}: 交卷 {status} {payload}"
         return dt, None
@@ -450,7 +454,9 @@ def main() -> int:
     _force_utf8_stdio()
     parser = argparse.ArgumentParser(description="网页考试局域网演练（并发 + 崩溃恢复 + 收卡校验）")
     parser.add_argument("--students", type=int, default=40, help="参与演练的学生数（默认 40）")
-    parser.add_argument("--workers", type=int, default=0, help="并发线程数（默认 = 学生数，上限 64）")
+    parser.add_argument(
+        "--workers", type=int, default=0, help="并发线程数（默认 = 学生数，上限 64）"
+    )
     parser.add_argument("--port", type=int, default=0, help="监听端口（默认自动挑一个空闲端口）")
     parser.add_argument("--work", default="target/web-drill", help="工作目录")
     parser.add_argument("--server", default="", help="exam-server 路径")
@@ -466,7 +472,10 @@ def main() -> int:
 
     for exe in (server_exe, builder_exe):
         if not exe.is_file():
-            print(f"缺少二进制：{exe}\n先跑：cargo build --release -p server -p builder -p client", file=sys.stderr)
+            print(
+                f"缺少二进制：{exe}\n先跑：cargo build --release -p server -p builder -p client",
+                file=sys.stderr,
+            )
             return 2
 
     students = [2021001 + i for i in range(max(1, args.students))]
@@ -489,9 +498,12 @@ def main() -> int:
         server.start()
         results, wall = run_phase(port, students, workers)
         errors = [e for item in results for e in item["errors"]]
-        print(f"  墙钟 {wall:.1f}s；" + "；".join(
-            summarize(k, merge_latencies(results, k)) for k in ("login", "paper", "save")
-        ))
+        print(
+            f"  墙钟 {wall:.1f}s；"
+            + "；".join(
+                summarize(k, merge_latencies(results, k)) for k in ("login", "paper", "save")
+            )
+        )
         if errors:
             failures += errors[:10]
         tokens = {item["student"]: item.get("token", "") for item in results}
@@ -522,8 +534,15 @@ def main() -> int:
         print("\n[4/4] 收卡核对（.eea 数量 / 事件条数 / 状态文件 / verify-answer-sheet）…")
         sheets = sorted(answers_dir.glob("*.eea"))
         events, malformed = count_events(answers_dir)
-        states = sorted((answers_dir / "state").glob("*.json")) if (answers_dir / "state").is_dir() else []
-        print(f"  .eea={len(sheets)}  submit 事件={events}（坏行 {malformed}）  状态文件={len(states)}")
+        states = (
+            sorted((answers_dir / "state").glob("*.json"))
+            if (answers_dir / "state").is_dir()
+            else []
+        )
+        print(
+            f"  .eea={len(sheets)}  submit 事件={events}（坏行 {malformed}）"
+            f"  状态文件={len(states)}"
+        )
         if len(sheets) != len(students):
             failures.append(f".eea 数量不对：期望 {len(students)}，实际 {len(sheets)}")
         if events != len(students):
@@ -533,6 +552,10 @@ def main() -> int:
         verify_failures = verify_sheets(builder_exe, package, master, answers_dir)
         if verify_failures:
             failures += verify_failures[:10]
+        elif not sheets:
+            # 空集合时 verify_sheets 返回空列表；不单独判就会打印「✓ 0 份全部通过」，
+            # 人工读日志会被这行误导（虽然后面的数量核对会让退出码正确）。
+            failures.append("没有生成任何答题卡（交卷阶段全部失败？）")
         else:
             print(f"  ✓ {len(sheets)} 份答题卡全部通过 verify-answer-sheet")
     finally:
@@ -545,7 +568,11 @@ def main() -> int:
             print("  -", item)
         server.tail_log()
         return 1
-    print("✓ 演练通过：并发请求无错误、崩溃后可恢复、答题卡齐全且校验通过")
+    # 用 --no-restart 跑时不能宣称「崩溃后可恢复」——那一阶段根本没执行。
+    if args.no_restart:
+        print("✓ 演练通过：并发请求无错误、答题卡齐全且校验通过（本次跳过了崩溃恢复阶段）")
+    else:
+        print("✓ 演练通过：并发请求无错误、崩溃后可恢复、答题卡齐全且校验通过")
     return 0
 
 

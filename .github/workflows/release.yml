@@ -21,6 +21,9 @@ permissions:
 #   必须先由 builder 把 payload（含密钥）打进去，产物才是学生的自解压包。
 jobs:
   build-windows:
+    # 发布链路最慢（Windows 构建 + PyInstaller + 全量测试）。没有超时会一直占着
+    # runner 到默认 6 小时上限；60 分钟足够覆盖目前的实测时长。
+    timeout-minutes: 60
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

@@ -33,6 +33,9 @@ banks/*
 
 # ---- 验收脚本临时目录 ----
 .verify-tmp/
+# preflight-release.sh 的临时目录（内含临时题库 JSON 与打包产物）；
+# 脚本中途被 Ctrl-C/杀掉时它会残留，不 ignore 就会被 `git add -A` 带进提交。
+.preflight/
 
 # ---- 构建产物（走 GitHub Releases，不入库）----
 *.exe

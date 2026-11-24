@@ -28,7 +28,18 @@ fail() { echo "  ✗ $1"; exit 1; }
 ok()   { echo "  ✓ $1"; }
 
 echo "== 构建 =="
-cargo build --release -p client -p builder 2>&1 | grep -E "warning: client@|Finished" || true
+# 构建输出先落文件再判断：原来写成 `cargo build … | grep … || true`，`|| true` 把
+# 编译失败整个吞掉——只要 target/release 里还留着上一次的产物，后面照样全绿。
+# 这是提交前必跑的关卡（AGENTS §2），不能自欺。
+cargo build --release -p client -p builder > "$TMP/build-main.log" 2>&1 || {
+  # 失败时把日志留到 target/ 并直接打尾部：脚本退出会清掉 $TMP，
+  # 只写「见 .verify-tmp/…」等于让人看一个已经不存在的文件。
+  cp "$TMP/build-main.log" "$ROOT/target/verify-embed-build.log" 2>/dev/null || true
+  tail -40 "$TMP/build-main.log" >&2
+  fail "cargo build 失败（完整日志：target/verify-embed-build.log）"
+}
+grep -E "warning: client@|Finished" "$TMP/build-main.log" || true
+# 不再额外 ok 一行：文档把本脚本记为「17 项」，多打一个 ✓ 会让那个数字对不上。
 
 MASTER="$("$BUILDER" keygen 2>/dev/null)"
 [ "${#MASTER}" -eq 64 ] || fail "keygen 输出长度不是 64"
@@ -53,8 +64,9 @@ echo
 echo "== 路径 0：默认打包（包内嵌密钥，学生零配置）=="
 # 这是**最重要的一条**：教师没有 Rust 工具链，必须能在不重编译 client 的
 # 前提下产出学生双击可用的包。若这条失败，整个产品交付不出去。
-"$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
-  --stub "$CLIENT" --out "$TMP/zero_conf.exe" --master "$MASTER" 2>&1 \
+# 主密钥只走环境变量：命令行参数会出现在进程列表里（AGENTS §5）。
+EXAM_MASTER="$MASTER" "$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
+  --stub "$CLIENT" --out "$TMP/zero_conf.exe" 2>&1 \
   | grep -c "已内嵌密钥" >/dev/null || fail "默认打包未内嵌密钥"
 ok "默认打包已内嵌密钥"
 
@@ -76,8 +88,8 @@ ok "名单外学生被拒绝"
 
 echo
 echo "== 路径 1：显式 --no-embed-key（调试模式）=="
-"$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
-  --stub "$CLIENT" --out "$TMP/dev.exe" --master "$MASTER" --no-embed-key >/dev/null 2>&1
+EXAM_MASTER="$MASTER" "$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
+  --stub "$CLIENT" --out "$TMP/dev.exe" --no-embed-key >/dev/null 2>&1
 
 if "$TMP/dev.exe" --student 2021001 --package "$TMP/dev.exe" >/dev/null 2>&1; then
   fail "未嵌入时竟然不需要 master"
@@ -90,8 +102,8 @@ ok "带 master 可解锁"
 
 echo
 echo "== 路径 2：已嵌入（发布模式）=="
-"$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
-  --stub "$CLIENT" --out "$TMP/ignored.exe" --master "$MASTER" \
+EXAM_MASTER="$MASTER" "$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
+  --stub "$CLIENT" --out "$TMP/ignored.exe" \
   --emit-keyfile "$TMP/kf.txt" >/dev/null 2>&1
 [ "$(wc -c < "$TMP/kf.txt")" -eq 64 ] || fail "keyfile 长度不是 64"
 
@@ -109,8 +121,8 @@ grep -q "已嵌入 K_manifest" "$TMP/build.log" \
 ok "build.rs 已嵌入密钥"
 
 cp "$CLIENT" "$TMP/stub_emb.exe"
-"$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
-  --stub "$TMP/stub_emb.exe" --out "$TMP/student.exe" --master "$MASTER" >/dev/null 2>&1
+EXAM_MASTER="$MASTER" "$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
+  --stub "$TMP/stub_emb.exe" --out "$TMP/student.exe" >/dev/null 2>&1
 
 "$TMP/student.exe" --student 2021001 --package "$TMP/student.exe" \
   | grep -c "解锁成功" >/dev/null || fail "嵌入后仍无法免密解锁"
@@ -156,15 +168,15 @@ echo "== stub 身份检测（防止拿错二进制当学生端）=="
 # v3 起密钥默认写在包里，stub 是否编译期内嵌已不影响学生能否使用；
 # 这里改为验证：非本项目的 exe 必须被识别出来。
 cargo build --release -p client >/dev/null 2>&1
-OUT=$("$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
-      --stub "$CLIENT" --out "$TMP/plain.exe" --master "$MASTER" 2>&1)
+OUT=$(EXAM_MASTER="$MASTER" "$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
+      --stub "$CLIENT" --out "$TMP/plain.exe" 2>&1)
 echo "$OUT" | grep -c "没有密钥状态标记" >/dev/null && fail "本项目的 client 被误判为陌生 stub"
 ok "本项目 client 被正确识别"
 
 # 非本项目的 exe 必须提示无标记
 printf 'NOT_A_CLIENT' > "$TMP/fake.exe"
-OUT=$("$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
-      --stub "$TMP/fake.exe" --out "$TMP/fake_out.exe" --master "$MASTER" 2>&1)
+OUT=$(EXAM_MASTER="$MASTER" "$BUILDER" build --manifest "$TMP/live.json" --banks banks/ \
+      --stub "$TMP/fake.exe" --out "$TMP/fake_out.exe" 2>&1)
 echo "$OUT" | grep -c "没有密钥状态标记" >/dev/null || fail "非本项目 exe 未被识别"
 ok "非本项目 exe 被正确识别"
 

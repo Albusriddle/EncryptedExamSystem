@@ -43,6 +43,7 @@ python scripts/bump_version.py --check           # 只检查标记是否一致
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -111,15 +112,11 @@ class MarkerDoc:
         if not match:
             self.problems.append(f"{self.rel}：{label} 里找不到 version 字段")
             return
-        self.text = (
-            self.text[: match.start(2)] + version + self.text[match.end(2) :]
-        )
+        self.text = self.text[: match.start(2)] + version + self.text[match.end(2) :]
 
-    def save(self) -> bool:
-        if self.missing or self.text == self.original:
-            return False
-        self.path.write_text(self.text, encoding="utf-8", newline="")
-        return True
+    def changed(self) -> bool:
+        """内容是否与磁盘上的不同（`bump` 与 `--check` 共用同一判定）。"""
+        return not self.missing and self.text != self.original
 
 
 def _release_note_sections(text: str) -> list[str]:
@@ -184,13 +181,9 @@ def plan(root: Path, version: str) -> tuple[list[MarkerDoc], list[str]]:
         if len(sections) != len(set(sections)):
             problems.append("docs/release-notes.md：有重复的版本小节")
         count = len(set(sections))
-        notes.text, matched = re.subn(
-            r"(共 )\d+( 个版本)", rf"\g<1>{count}\g<2>", notes.text
-        )
+        notes.text, matched = re.subn(r"(共 )\d+( 个版本)", rf"\g<1>{count}\g<2>", notes.text)
         if matched != 1:
-            problems.append(
-                f"docs/release-notes.md：「共 N 个版本」 期望 1 处，实际 {matched} 处"
-            )
+            problems.append(f"docs/release-notes.md：「共 N 个版本」 期望 1 处，实际 {matched} 处")
 
     # 7) 其余带「适用版本」标记的文档（历史叙述里的「vX.Y.Z 起」不在匹配范围内）
     for rel in DOC_VERSION_FILES:
@@ -215,10 +208,38 @@ def _first_diff(original: str, current: str) -> str:
     """给出第一处差异，便于直接看出「哪个标记没跟上」。"""
     old_lines = original.splitlines()
     new_lines = current.splitlines()
-    for index, (old, new) in enumerate(zip(old_lines, new_lines), 1):
+    for index, (old, new) in enumerate(zip(old_lines, new_lines, strict=False), 1):
         if old != new:
             return f"第 {index} 行\n      现在：{old}\n      应为：{new}"
     return f"行数不同：{len(old_lines)} → {len(new_lines)}"
+
+
+def write_all(changed: list[MarkerDoc]) -> int:
+    """两阶段写盘：先把所有新内容写到 `<文件>.tmp-<pid>`，全部成功后再统一 `os.replace`。
+
+    为什么要两阶段：逐个 `write_text` 时，中途失败（磁盘满、文件被占用）会留下
+    「版本号一半新一半旧」的仓库，而 `--check` 只能事后发现。这里保证「要么全改、
+    要么全不改」；万一 `os.replace` 阶段仍失败，用内存里的原文把已替换的恢复回去，
+    再删掉剩余 tmp。
+    """
+    staged: list[tuple[Path, MarkerDoc]] = []
+    replaced: list[MarkerDoc] = []
+    try:
+        for doc in changed:
+            tmp = doc.path.with_name(f"{doc.path.name}.tmp-{os.getpid()}")
+            tmp.write_text(doc.text, encoding="utf-8", newline="")
+            staged.append((tmp, doc))
+        for tmp, doc in staged:
+            os.replace(tmp, doc.path)
+            replaced.append(doc)
+    except OSError as exc:
+        for doc in replaced:
+            doc.path.write_text(doc.original, encoding="utf-8", newline="")
+        for tmp, _doc in staged:
+            tmp.unlink(missing_ok=True)
+        print(f"写盘失败，已回滚：{exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def check(root: Path, version: str) -> int:
@@ -240,14 +261,14 @@ def bump(root: Path, version: str, dry_run: bool) -> int:
     if problems:
         _report(problems)
         return 1
-    changed = [d for d in docs if not d.missing and d.text != d.original]
+    changed = [d for d in docs if d.changed()]
     if not changed:
         print(f"已经是 {version}，无需改动")
         return 0
     for d in changed:
         print(f"{'（dry-run）' if dry_run else ''}改：{d.rel}")
-        if not dry_run:
-            d.save()
+    if not dry_run and write_all(changed) != 0:
+        return 1
     print(f"\n{'将要' if dry_run else '已'}把 {len(changed)} 个文件改到 {version}")
     if not dry_run:
         print("下一步：跑发布预检（bash scripts/preflight-release.sh）再提交。")
@@ -255,7 +276,7 @@ def bump(root: Path, version: str, dry_run: bool) -> int:
 
 
 def _report(problems: list[str]) -> None:
-    print("发现 %d 个问题，未改动任何文件：" % len(problems), file=sys.stderr)
+    print(f"发现 {len(problems)} 个问题，未改动任何文件：", file=sys.stderr)
     for item in problems:
         print(f"  - {item}", file=sys.stderr)
 

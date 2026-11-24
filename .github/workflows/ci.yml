@@ -8,6 +8,8 @@ on:
 # PR/push 检查全部在 Linux 上跑：Windows runner 计费更高，能省则省。
 jobs:
   rust:
+    # 没有超时会一直占着 runner 到默认 6 小时上限，把队列堵死。
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +32,8 @@ jobs:
         run: cargo test --workspace
 
   python:
+    # 没有超时会一直占着 runner 到默认 6 小时上限，把队列堵死。
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +57,13 @@ jobs:
         run: |
           uv sync --locked --extra gui
           uv run ruff check .
+          # 格式也必须卡住：release 工作流会跑 format --check，只在这里跑 check
+          # 等于把格式问题留到打 tag 才暴露。
+          uv run ruff format --check .
+          # scripts/ 下的 python（drill_web / bump_version / release_body）是仓库资产，
+          # 不在 admin 的 lint 范围里；不在这里检查就永远没人管。
+          uv run ruff check ../scripts
+          uv run ruff format --check ../scripts
           uv run pytest -q
 
   # 发布预检：复现 release.yml 的关键假设。
@@ -62,11 +73,20 @@ jobs:
   # 这里用 --target 构建，专门覆盖"CI 布局与产物定位"这一段，
   # 让回归在 PR 阶段就被发现，而不是打 tag 之后。
   release-preflight:
+    # 没有超时会一直占着 runner 到默认 6 小时上限，把队列堵死。
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # 不装 uv 时 preflight 里的 pytest 步骤会被静默跳过（脚本只打印「跳过」，
+      # 不计 ok/bad），日志却仍以「✓ 发布预检通过」收尾——门禁比文档承诺的更弱。
+      - uses: astral-sh/setup-uv@v5
+      # 装上 GUI extra：否则管理端 UI 用例会被 importorskip 跳过，
+      # 这一步就只剩「部分测试通过」。
+      - name: 安装管理端依赖（含 GUI）
+        run: cd admin && uv sync --locked --extra gui
       - name: 安装 Linux GUI 构建依赖
         run: |
           sudo apt-get update
@@ -80,6 +100,8 @@ jobs:
   # 而 release 只在打 tag 时才构建——历史上因此发生过"exe 一启动就崩"。
   # 这里在每次 PR/push 就按发布的方式打一遍，并跑 --selftest / --version。
   admin-package:
+    # 没有超时会一直占着 runner 到默认 6 小时上限，把队列堵死。
+    timeout-minutes: 40
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,6 +110,11 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: 构建 Rust 产物
         run: cargo build --release --workspace
+      # Windows 专属测试只在 Windows 上编译（secure_fs 的 4 个 ACL 用例、
+      # banner_host_follows_bind_address 等）。ubuntu 的 rust job 永远跑不到它们，
+      # 不在这里跑的话，坏了要等打 tag 的 release 才暴露。
+      - name: Rust 测试（Windows，含只在该平台编译的用例）
+        run: cargo test --workspace
       - name: 安装管理端依赖（GUI + 打包）
         run: cd admin && uv sync --extra gui --extra build
       - name: 打包并自检
@@ -125,6 +152,8 @@ jobs:
 
   # 端到端：真的打一个包再用学生端解开，防止"单元测试全绿但装不起来"。
   e2e:
+    # 没有超时会一直占着 runner 到默认 6 小时上限，把队列堵死。
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -159,10 +188,11 @@ jobs:
           }
           JSON
 
-          "$BIN/exam-builder" build \
+          # 主密钥只走环境变量：命令行参数会出现在进程列表里（AGENTS §5）。
+          EXAM_MASTER="$MASTER" "$BIN/exam-builder" build \
             --manifest ./live.json --banks banks/ \
-            --stub "$BIN/exam-client" --out ./StudentClient --master "$MASTER"
-          "$BIN/exam-builder" verify --package ./StudentClient --master "$MASTER"
+            --stub "$BIN/exam-client" --out ./StudentClient
+          EXAM_MASTER="$MASTER" "$BIN/exam-builder" verify --package ./StudentClient
 
           fail() { echo "✗ $1"; exit 1; }
 
@@ -216,6 +246,8 @@ jobs:
         run: bash scripts/verify-embed.sh
 
   secret-scan:
+    # 没有超时会一直占着 runner 到默认 6 小时上限，把队列堵死。
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -226,6 +258,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   tools-scripts:
+    # 没有超时会一直占着 runner 到默认 6 小时上限，把队列堵死。
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -275,6 +309,8 @@ jobs:
 
   # 网页考试：打包 → 启动 exam-server → 登录/作答/交卷 → 校验 .eea
   web-smoke:
+    # 没有超时会一直占着 runner 到默认 6 小时上限，把队列堵死。
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

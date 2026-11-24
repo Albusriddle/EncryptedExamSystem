@@ -45,7 +45,7 @@ JSON
 EXAM_MASTER=$MASTER "$BUILDER" build \
   --manifest "$WORK/live.json" --banks "$ROOT/banks" \
   --stub "$CLIENT" --out "$WORK/pkg" \
-  --emit-keyfile "$WORK/key.txt" --master "$MASTER" >/dev/null 2>&1
+  --emit-keyfile "$WORK/key.txt" >/dev/null 2>&1
 
 "$SERVER" --package "$WORK/pkg" --keyfile "$WORK/key.txt" \
   --port "$PORT" --answers-dir "$WORK/answers" >"$WORK/server.log" 2>&1 &
@@ -60,12 +60,24 @@ done
 # 这一行是 v1.4.3 新增的启动结论，缺失说明时间校验被绕过或日志被改坏。
 grep -q "时间校验：" "$WORK/server.log" || { cat "$WORK/server.log"; echo "启动日志缺少时间校验结论"; exit 1; }
 C="curl -sS -H Content-Type:application/json -H X-EES-CSRF:1"
-$C -c "$WORK/c.txt" -d '{"student_id":2021001,"pin":null}' "http://127.0.0.1:$PORT/api/login" | grep -q '"ok":true' || { cat "$WORK/server.log"; exit 1; }
+# 响应先落文件再 grep：`curl | grep -q` 在 pipefail 下会假失败——grep 一匹配就退出，
+# curl 写后续字节触发 EPIPE，整条管道返回非 0。响应体目前很小不会触发，但一旦变大
+# 就会变成偶发红灯；仓库在 verify-embed.sh 里已经踩过并改成两段式。
+$C -c "$WORK/c.txt" -d '{"student_id":2021001,"pin":null}' \
+  "http://127.0.0.1:$PORT/api/login" -o "$WORK/login.json"
+grep -q '"ok":true' "$WORK/login.json" \
+  || { cat "$WORK/server.log"; echo "登录失败：$(cat "$WORK/login.json")"; exit 1; }
 $C -b "$WORK/c.txt" "http://127.0.0.1:$PORT/api/paper" -o "$WORK/paper.json"
 QID=$($PY -c "import json,sys;d=json.load(open('$WORK/paper.json',encoding='utf-8'));print(d['paper']['sections'][0]['items'][0]['id'])")
-$C -b "$WORK/c.txt" -X PUT -d "{\"qid\":\"$QID\",\"value\":\"B\"}" "http://127.0.0.1:$PORT/api/answer" | grep -q '"ok":true'
-$C -b "$WORK/c.txt" -X POST -d '{}' "http://127.0.0.1:$PORT/api/submit" | grep -q '"ok":true'
+$C -b "$WORK/c.txt" -X PUT -d "{\"qid\":\"$QID\",\"value\":\"B\"}" \
+  "http://127.0.0.1:$PORT/api/answer" -o "$WORK/answer.json"
+grep -q '"ok":true' "$WORK/answer.json" \
+  || { echo "保存答案失败：$(cat "$WORK/answer.json")"; exit 1; }
+$C -b "$WORK/c.txt" -X POST -d '{}' "http://127.0.0.1:$PORT/api/submit" -o "$WORK/submit.json"
+grep -q '"ok":true' "$WORK/submit.json" \
+  || { echo "交卷失败：$(cat "$WORK/submit.json")"; exit 1; }
 ls "$WORK/answers"/*.eea >/dev/null
-"$BUILDER" verify-answer-sheet "$WORK"/answers/*.eea --package "$WORK/pkg" --master "$MASTER" >"$WORK/verify.log" 2>&1
+EXAM_MASTER=$MASTER "$BUILDER" verify-answer-sheet "$WORK"/answers/*.eea \
+  --package "$WORK/pkg" >"$WORK/verify.log" 2>&1
 grep -q "结构 ✓" "$WORK/verify.log"
 echo "✓ 网页考试冒烟通过"

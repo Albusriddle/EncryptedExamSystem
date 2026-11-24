@@ -26,6 +26,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 VER="${1:-$(git describe --tags --always 2>/dev/null || echo dev)}"
+# 版本号会拼进路径，而下面有 rm -rf。不放白名单的话，手动传 `../x`/`--full`
+# 这类参数会把 rm 指到非预期位置、或造出 `ExamAdmin---full` 这种怪包。
+# 允许多一段 `-N-g<sha>`（git describe 的形状），但不允许以 `-` 开头、不含空串。
+case "$VER" in
+  "" | -* | *[!A-Za-z0-9._-]*)
+    echo "✗ 版本号不合法：$VER（只允许字母、数字、点、下划线、连字符，且不能以 - 开头）"
+    exit 1
+    ;;
+esac
 OUTDIR="$ROOT/dist"
 STAGE="$OUTDIR/ExamAdmin-$VER"
 
@@ -47,9 +56,13 @@ rm -f "$STAGE/ExamAdmin/stub-template.exe" "$STAGE/ExamAdmin/使用说明.md"
 echo "  ✓ ExamAdmin/"
 
 # 2. 学生端模板（打包时必须用，教师不需理解它）
-cp "$OUTDIR/ExamAdmin/_internal/exam-builder.exe" "$STAGE/ExamAdmin/" 2>/dev/null || true
+# 这里不能 `|| true`：缺了 exam-builder 的发布包，教师端根本没法打包，
+# 而原来失败了还照样打印「✓ 内含 …」，等于把坏包说成好包。
+cp "$OUTDIR/ExamAdmin/_internal/exam-builder.exe" "$STAGE/ExamAdmin/" \
+  || { echo "  ✗ 缺少 _internal/exam-builder.exe（先跑 admin/buildtools/build_exe.py）"; exit 1; }
 cp "$ROOT/target/release/exam-client.exe" "$STAGE/ExamAdmin/stub-template.exe" 2>/dev/null \
-  || cp "$ROOT/target/x86_64-pc-windows-msvc/release/exam-client.exe" "$STAGE/ExamAdmin/stub-template.exe"
+  || cp "$ROOT/target/x86_64-pc-windows-msvc/release/exam-client.exe" "$STAGE/ExamAdmin/stub-template.exe" \
+  || { echo "  ✗ 找不到 exam-client.exe（先 cargo build --release --workspace）"; exit 1; }
 echo "  ✓ ExamAdmin/ 内含 stub-template.exe 与 exam-builder.exe"
 
 # 3. 示例题库（拿来就能试）
