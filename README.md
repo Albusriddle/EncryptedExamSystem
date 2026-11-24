@@ -4,7 +4,7 @@
 >
 > 本系统的定位是**「防误操作 + 现场监考」**，不是密码学意义上的强防作弊系统。防什么、不防什么，见 [安全边界与威胁模型](docs/安全边界与威胁模型.md)；已经明确接受、且**没有**修复的风险，见 [风险接受记录](docs/风险接受记录.md)。
 
-当前版本：**1.4.8**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
+当前版本：**1.4.9**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
 
 | 组件 | 技术形态 | 职责 |
 |---|---|---|
@@ -186,8 +186,8 @@ cd .. && bash scripts/make-release-zip.sh <版本>
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cd admin && uv run pytest -q
-uv run ruff check . && uv run ruff format --check .
+bash scripts/run-admin-tests.sh            # Windows 上按 JUnit 结论，避免 Qt teardown 127/139 误判
+cd admin && uv run ruff check . && uv run ruff format --check .
 cd .. && bash scripts/verify-embed.sh
 bash scripts/preflight-release.sh          # 加 --full 连管理端打包一起查
 ```
@@ -219,12 +219,12 @@ worker/              Cloudflare Worker 时间服务（**目录为空，未实现
 
 ---
 
-## 8. 测试与验证基线（v1.4.8）
+## 8. 测试与验证基线（v1.4.9）
 
 | 项 | 基线 |
 |---|---|
-| Rust | 317 个 `#[test]` |
-| Python | 403 用例（`pytest` 收集口径，含参数化展开） |
+| Rust | 325 个 `#[test]` |
+| Python | 421 用例（`pytest` 收集口径，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 15 项（非 `--full`） |
 | CI | 8 个 job：`rust` / `python` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `tools-scripts` / `web-smoke` |

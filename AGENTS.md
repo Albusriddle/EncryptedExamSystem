@@ -36,8 +36,8 @@
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                     # 必须全部通过
-cd admin && uv run pytest -q               # 必须全部通过
-uv run ruff check . && uv run ruff format --check .
+bash scripts/run-admin-tests.sh            # 必须全部通过（Windows 上按 JUnit 结论，避免 Qt teardown 127/139 误判）
+(cd admin && uv run ruff check . && uv run ruff format --check .)
 bash scripts/verify-embed.sh               # 全过
 bash scripts/preflight-release.sh          # 全过
 ```
@@ -105,7 +105,7 @@ bash scripts/preflight-release.sh          # 全过
 | 时间门禁在派生入场密钥**之前** | `client/src/workflow.rs::unlock` 的步骤顺序 |
 | 同 `(student_id, session_id, salt)` 必得同一份试卷 | `common/src/picker.rs`，改动需保持 `GOLDEN_FP` 或显式说明 |
 | 试卷指纹只哈希题目 **ID** | 修改会导致已发试卷失效 |
-| `VERSION` 是唯一版本来源，三处同步 | `VERSION` / `Cargo.toml` / `admin/pyproject.toml` |
+| `VERSION` 是唯一版本来源，三处同步 | `VERSION` / `Cargo.toml` / `admin/pyproject.toml`；两个锁文件（`Cargo.lock` / `admin/uv.lock`）与文档里的版本标记由 `scripts/bump-version.sh` 派生 |
 | 对外文案唯一来源 | `branding.json`（Rust `include_str!`，Python 运行时读） |
 | Python 与 Rust 的校验规则一致 | `ProjectState.validate()` ↔ `validate_sessions_impl()` |
 | `admin/app/core/` 不依赖 Qt | 核心逻辑可脱离 GUI 独立测试 |
@@ -156,7 +156,11 @@ bash scripts/preflight-release.sh          # 全过
 - 提交身份：`Albusriddle <albusriddle@foxmail.com>`。
 - 提交信息：中文，首行 `type(scope): 摘要`（type ∈ feat/fix/docs/test/chore/refactor/perf），正文写**根因**、**方案**、**验证结果**。
 - 发布流程：
-  1. 改 `VERSION` + `Cargo.toml` + `admin/pyproject.toml`
+  1. 先在 `docs/release-notes.md` 写好新版本的 `## 更新摘要（vX.Y.Z）` 小节，再跑
+     `bash scripts/bump-version.sh <版本>`——它同步 **5 个版本文件**（`VERSION` / `Cargo.toml` /
+     `admin/pyproject.toml` / `admin/uv.lock` / `Cargo.lock`）与 **15 个文件里的标记位**
+     （各文档「适用版本 / 当前版本 / 基线小节」），历史叙述不会被改；
+     一致性由发布预检 6c 步的 `bump_version --check` 把关
   2. 全量验证全绿，并**推送 commit 后等 CI 全绿**（尤其是 Windows 的 admin-package job）
   3. `git tag v<版本>` 并推送 tag
   4. 等 `release` 工作流完成，**核对资产齐全**（zip + 两个 exe）

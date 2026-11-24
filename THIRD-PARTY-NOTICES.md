@@ -25,7 +25,7 @@
 
 | 组件 | 版本 | 许可 |
 |---|---|---|
-| CPython | 3.13.x | PSF License |
+| CPython | 发布流水线所用版本（当前 3.13.x；流水线未 pin 解释器，随 runner 镜像变化） | PSF License |
 
 ## 3. Rust 依赖（学生端与命令行工具）
 
