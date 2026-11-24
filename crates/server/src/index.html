@@ -29,6 +29,8 @@
   textarea.code { min-height:220px; }
   .bar { position:sticky; top:0; z-index:2; background:inherit; padding:10px 0; display:flex; gap:12px; align-items:center; }
   .ok { color:#1f8a4c; } .warn { color:#b03030; }
+  button.plain { background:transparent; color:#777; border-color:transparent; font-size:13px; padding:6px 8px; }
+  button.plain:hover { color:#b03030; }
   .toast { position:fixed; right:16px; bottom:16px; background:#222; color:#fff; padding:10px 14px; border-radius:6px; opacity:0; transition:opacity .2s; }
   .toast.show { opacity:.92; }
   #login { max-width: 420px; margin: 12vh auto; }
@@ -54,7 +56,7 @@
 
   <section id="exam" style="display:none">
     <div id="net" class="net"></div>
-    <div class="bar"><strong id="title">考试</strong><span id="clock" class="muted"></span><span id="saveState" class="muted"></span><button id="submitBtn" class="secondary" style="margin-left:auto">交卷</button></div>
+    <div class="bar"><strong id="title">考试</strong><span id="clock" class="muted"></span><span id="saveState" class="muted"></span><button id="submitBtn" class="secondary" style="margin-left:auto">交卷</button><button id="logoutBtn" class="plain">退出</button></div>
     <div id="note" class="note" style="display:none"></div>
     <div id="questions"></div>
   </section>
@@ -80,6 +82,7 @@ let serverOffset = 0;    // 服务端时间 - 本机时间（秒）
 let endUnix = 0;
 let editors = new Map(); // qid -> CodeMirror 实例
 let reloginNeeded = false;
+let me = null;            // 本次登录的学号（「已交卷」页要显示它）
 
 const $ = (id) => document.getElementById(id);
 function toast(text) { const t = $('toast'); t.textContent = text; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2000); }
@@ -136,6 +139,7 @@ async function login() {
 // 把 /api/paper 的结果落到界面上（登录、刷新、刚交卷都走这里）。
 function apply(data) {
   $('login').style.display = 'none';
+  me = data.student_id;
   submitted = !!data.submitted;
   review = data.review || 'none';
   endUnix = data.end_unix || 0;
@@ -143,10 +147,7 @@ function apply(data) {
   $('title').textContent = `学号 ${data.student_id} · 场次 #${data.session_id}`;
   if (!data.paper) {
     // 已交卷 + 策略不允许回看：不下发卷面，切到「已交卷」页。
-    paper = null; answers = {};
-    $('exam').style.display = 'none';
-    $('done').style.display = 'block';
-    $('doneMsg').textContent = `学号 ${data.student_id} 的答题卡已封存。`;
+    showDone(data.student_id);
     return;
   }
   paper = data.paper;
@@ -163,6 +164,17 @@ function apply(data) {
     note.textContent = '已交卷，当前为只读回看（到结束时间后自动收起）。';
   }
   updateClock();
+}
+
+/// 切到「已交卷」页。提交后会话 cookie 会立即失效（默认策略），
+/// 此时再取 /api/paper 会 401 —— 所以这个页面必须能本地渲染。
+function showDone(studentId) {
+  paper = null;
+  answers = {};
+  dirty.clear();
+  $('exam').style.display = 'none';
+  $('done').style.display = 'block';
+  $('doneMsg').textContent = studentId ? `学号 ${studentId} 的答题卡已封存。` : '答题卡已封存。';
 }
 
 function escapeHtml(t) { return String(t == null ? '' : t).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -372,7 +384,12 @@ async function submit(auto = false) {
     toast('已交卷');
     lockAll();
     // 交卷后按策略决定还显不显示卷面：重新取一次 paper（服务端会按策略返回 null）。
-    apply(await api('/api/paper'));
+    // 默认策略下 cookie 已被服务端置为失效，这次请求会 401 —— 那不是错误，直接本地渲染。
+    try {
+      apply(await api('/api/paper'));
+    } catch (e) {
+      if (e.status === 401) showDone(me); else throw e;
+    }
   } catch (e) {
     if (e.status === 401) { needRelogin(); } else { toast('交卷失败：' + e.message); }
   }
@@ -392,7 +409,40 @@ boot();
 $('loginBtn').addEventListener('click', login);
 $('pin').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 $('sid').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+// 关页/切后台时把还没发出去的作答冲掉（keepalive 能在页面卸载后继续发）。
+// 不做本地存储：服务端才是权威副本，这里只补「最后 0–600 ms」的缺口。
+function flushBeacon() {
+  if (submitted || !dirty.size) return;
+  for (const qid of [...dirty]) {
+    try {
+      fetch('/api/answer', {
+        method: 'PUT',
+        keepalive: true,
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-EES-CSRF': '1' },
+        body: JSON.stringify({ qid, value: answers[qid] || '' }),
+      });
+    } catch (_) { /* 页面正在关闭，失败也没法再提示 */ }
+  }
+  dirty.clear();
+}
+window.addEventListener('pagehide', flushBeacon);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushBeacon();
+});
+
+// 主动退出：先冲尾，再让服务端删 token 并清 cookie，最后回登录页。
+async function logout() {
+  if (!confirm('退出后需要重新输入学号；已保存的答案不会丢。')) return;
+  await saveDirty();
+  try { await api('/api/logout', { method: 'POST', body: '{}' }); } catch (_) { /* 离线也允许退出 */ }
+  paper = null;
+  dirty.clear();
+  location.reload();
+}
+
 $('submitBtn').addEventListener('click', () => submit(false));
+$('logoutBtn').addEventListener('click', logout);
 window.addEventListener('beforeunload', e => { if (!submitted && paper) { e.preventDefault(); e.returnValue = ''; } });
 if (!navigator.onLine) setNet('网络已断开：作答暂存在本页，恢复后会自动保存。请不要关闭页面。');
 </script>

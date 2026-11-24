@@ -229,6 +229,37 @@ impl Response {
     }
 }
 
+/// 会话 cookie 的有效期（秒）。滑动续期：只要还在答题就一直有效。
+///
+/// 为什么不是「直到考试结束」：共享设备上留一个长期可续的会话，下一个人打开浏览器
+/// 就直接进了前一个学生的卷子。60 分钟纯空闲才失效，配合「提交/退出即失效」，
+/// 既能让关掉浏览器的学生重开后自动回到原卷，又不会把会话留在机器上。
+const SESSION_COOKIE_MAX_AGE: u64 = 3600;
+
+/// 正常会话 cookie（60 分钟，滑动续期）。
+fn session_cookie(token: &str) -> String {
+    format!(
+        "ees_token={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_COOKIE_MAX_AGE}"
+    )
+}
+
+/// 立即失效的会话 cookie（提交、退出）。
+fn expired_session_cookie() -> String {
+    "ees_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0".to_string()
+}
+
+/// 交卷之后的会话 cookie。
+///
+/// 默认策略（「仅教师可查看原卷」）下立即失效：交完就不该再有可续的会话。
+/// 允许回看时保持会话——否则学生交完卷就再也看不到自己写的（回看策略形同虚设）。
+fn post_submit_cookie(app: &App, token: &str) -> String {
+    if app.review == common::model::StudentReviewPolicy::Free {
+        session_cookie(token)
+    } else {
+        expired_session_cookie()
+    }
+}
+
 /// 限制同时进行的 Argon2 登录数：每人 64 MiB，150 人并发会打爆内存。
 struct Gate {
     slots: Mutex<usize>,
@@ -534,6 +565,7 @@ fn route(app: &App, req: &Request) -> Response {
         ("GET", "/api/paper") => paper(app, req),
         ("PUT", "/api/answer") => save_answer(app, req),
         ("POST", "/api/submit") => submit(app, req),
+        ("POST", "/api/logout") => logout(app, req),
         ("GET", "/api/time") => time_info(app, req),
         _ => Response::error(404, "not found"),
     }
@@ -609,12 +641,27 @@ fn login(app: &App, req: &Request) -> Response {
                 state.students.remove(&old);
             }
             state.students.insert(token.clone(), student);
-            Response::json(200, json!({"ok": true})).with_cookie(format!(
-                "ees_token={token}; Path=/; HttpOnly; SameSite=Strict"
-            ))
+            Response::json(200, json!({"ok": true})).with_cookie(session_cookie(&token))
         }
         Err(msg) => Response::error(401, msg),
     }
+}
+
+/// 主动退出：清 cookie，并把 token 从内存状态里删掉（旧 cookie 立刻 401）。
+///
+/// 为什么服务端也要删：只清 cookie 的话，拷走 cookie 的人还能继续用这个会话。
+/// 答案早已在磁盘上，删掉内存里的 Student 不影响重登恢复。
+fn logout(app: &App, req: &Request) -> Response {
+    if !csrf_ok(req) {
+        return Response::error(403, "缺少 CSRF 头");
+    }
+    if let Some(token) = cookie_token(req) {
+        let mut state = app.lock_state();
+        if let Some(student) = state.students.remove(&token) {
+            state.tokens_by_student.remove(&student.student_id);
+        }
+    }
+    Response::json(200, json!({"ok": true})).with_cookie(expired_session_cookie())
 }
 
 fn csrf_ok(req: &Request) -> bool {
@@ -758,7 +805,7 @@ fn paper(app: &App, req: &Request) -> Response {
             map.insert("answers".into(), Value::Null);
             map.insert("answer_text".into(), Value::Null);
         }
-        return Response::json(200, base);
+        return Response::json(200, base).with_cookie(session_cookie(&token));
     }
     let answer_text: HashMap<&str, String> = st
         .paper
@@ -775,7 +822,8 @@ fn paper(app: &App, req: &Request) -> Response {
         map.insert("answers".into(), json!(st.answers));
         map.insert("answer_text".into(), json!(answer_text));
     }
-    Response::json(200, base)
+    // 每次取卷都续一次期：学生只要还在答题，会话就不会因为「60 分钟」被掐断。
+    Response::json(200, base).with_cookie(session_cookie(&token))
 }
 
 /// 回看策略的线上表示。
@@ -985,14 +1033,16 @@ fn submit(app: &App, req: &Request) -> Response {
             if let Some(name) = st.exported.clone() {
                 // 不能只看「文件存在」：断电可能留下半截卡，那样学生会永远交不了卷。
                 if is_valid_sheet(app, &app.answers_dir.join(&name)) {
-                    return Response::json(200, json!({"ok": true, "already": true, "file": name}));
+                    return Response::json(200, json!({"ok": true, "already": true, "file": name}))
+                        .with_cookie(post_submit_cookie(app, &token));
                 }
                 // 状态说已交卷，但答题卡文件不见了（被手工删掉、盘符换了、目录被清）。
                 // 退回去重写一份：学生没有卡比重复写一份严重得多。
                 st.exported = None;
                 st.submitted = false;
             } else {
-                return Response::json(200, json!({"ok": true, "already": true, "file": null}));
+                return Response::json(200, json!({"ok": true, "already": true, "file": null}))
+                    .with_cookie(post_submit_cookie(app, &token));
             }
         }
         // 抢占：先把 submitted 置位，避免与自动收卷同时冻结（会写出两份同名校验一致的
@@ -1032,10 +1082,12 @@ fn submit(app: &App, req: &Request) -> Response {
             st.exported = Some(name.clone());
             st.last_seen = now;
             Response::json(200, json!({"ok": true, "file": name}))
+                .with_cookie(post_submit_cookie(app, &token))
         }
         Err(e) => {
             st.submitted = false; // 撤回抢占：让学生能再试一次
-            Response::error(500, e)
+            // 交卷失败、学生还要继续答：会话必须留着。
+            Response::error(500, e).with_cookie(session_cookie(&token))
         }
     }
 }
@@ -1340,6 +1392,7 @@ fn time_info(app: &App, req: &Request) -> Response {
         return Response::error(401, "登录已失效");
     };
     let (start, end) = session_window(app, st.session_id).unwrap_or((0, 0));
+    // 前端每 15 秒轮询一次：这里顺手续期，长考试不会被 60 分钟 TTL 掐断。
     Response::json(
         200,
         json!({
@@ -1352,6 +1405,7 @@ fn time_info(app: &App, req: &Request) -> Response {
             "clock_offset_secs": app.clock.offset_secs(),
         }),
     )
+    .with_cookie(session_cookie(&token))
 }
 
 /// 场次窗口是否开着：`[start, end)`，与客户端 `decide_session` 同口径。

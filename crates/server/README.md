@@ -73,7 +73,8 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `POST` | `/api/login` | `{student_id, pin?}`，成功返回 HttpOnly cookie |
 | `GET` | `/api/paper` | 本人试卷 + 已保存答案（不含标准答案）；另给 `answer_text`（填空/改错的纯文本显示值）、`review`（`none`/`free`）。已交卷且策略不允许回看时 `paper`/`answers`/`answer_text` 都是 `null` |
 | `PUT` | `/api/answer` | `{qid, value}`，单题 ≤1 MiB，整卡 ≤16 MiB |
-| `POST` | `/api/submit` | 冻结并写出 `.eea` |
+| `POST` | `/api/submit` | 冻结并写出 `.eea`；默认策略下同时让会话立即失效 |
+| `POST` | `/api/logout` | 主动退出：清 cookie 并从内存删 token（旧 cookie 立刻 401） |
 | `GET` | `/api/time` | 服务器时间与剩余秒数；附带 `time_mode` / `clock_offset_secs` 便于排障 |
 
 ## 已具备（阶段 1）
@@ -83,6 +84,7 @@ exam-server --package StudentClient.exe --keyfile key.txt \
   重登即可拿回未交卷的作答；
 - 服务重启后重新登录会恢复答案与交卷状态；
 - CSRF：**登录 / 作答 / 交卷都要求 `X-EES-CSRF: 1`**（防登录 CSRF：否则任意网页都能用别人的学号把受害者登进攻击者的会话）；
+- **会话 cookie（v1.4.12）**：登录下发 `Max-Age=3600`（`HttpOnly; SameSite=Strict`），并在 `/api/paper`、`/api/time` 上**滑动续期**——只要还在答题就不会被 60 分钟 TTL 掐断；交卷（默认策略）与退出会让 cookie 立即失效，避免共享设备上留下可续会话；
 - **回看策略（v1.4.11）**：服务端按包里的 `student_review` 决定交卷后还下不下发卷面；
   默认 `none`（「仅教师可查看原卷」）时，交卷后 `/api/paper` 只返回 `submitted`/`review`，
   网页端切到「已交卷」页。以前网页端完全忽略这个策略；

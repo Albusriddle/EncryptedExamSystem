@@ -1759,3 +1759,124 @@ fn fill_answer_text_round_trips_with_blank_count() {
         stored
     );
 }
+
+// ---------------------------------------------------------------------------
+// 12. v1.4.12：会话 cookie（60 分钟滑动续期 / 提交即失效 / 退出即失效）
+// ---------------------------------------------------------------------------
+
+/// 取响应里的 `Set-Cookie`（没有就返回空串）。
+fn set_cookie(resp: &Response) -> String {
+    resp.headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
+}
+
+/// 登录必须下发「60 分钟、HttpOnly、SameSite=Strict」的 cookie。
+///
+/// 为什么是 60 分钟而不是会话 cookie：关掉浏览器就没了的话，学生重开要重新输学号；
+/// 为什么不是「直到考试结束」：共享设备上会留下一个长期可续的会话。
+#[test]
+fn login_cookie_has_one_hour_ttl() {
+    let f = Fixture::new("cookie-ttl");
+    let resp = f.login(STUDENT);
+    assert_status(&resp, 200, "登录应成功");
+    let cookie = set_cookie(&resp);
+    assert!(
+        cookie.contains("Max-Age=3600"),
+        "必须带 60 分钟 TTL：{cookie}"
+    );
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+}
+
+/// 前端每 15 秒轮询 `/api/time`，响应里必须顺带续期——否则 2 小时的考试会在
+/// 第 60 分钟被 TTL 掐断（学生莫名其妙被要求重新登录）。
+#[test]
+fn time_poll_refreshes_the_session_cookie() {
+    let f = Fixture::new("cookie-slide");
+    let token = f.login_ok(STUDENT);
+    let resp = f.route(&request("GET", "/api/time", peer(1), Vec::new()).token(&token));
+    assert_status(&resp, 200, "取时应成功");
+    let cookie = set_cookie(&resp);
+    assert!(cookie.contains("Max-Age=3600"), "取时应续期：{cookie}");
+    assert!(
+        cookie.contains(&token),
+        "续期的必须是同一个 token：{cookie}"
+    );
+}
+
+/// 默认策略（仅教师可查看原卷）：交卷后会话立即失效。
+#[test]
+fn submit_expires_the_session_cookie() {
+    let f = Fixture::new("cookie-submit");
+    let token = f.login_ok(STUDENT);
+    assert_status(&f.save(&token, "q-single", "B"), 200, "保存应成功");
+    let resp = f.submit(&token);
+    assert_status(&resp, 200, "交卷应成功");
+    let cookie = set_cookie(&resp);
+    assert!(cookie.contains("Max-Age=0"), "交卷后必须失效：{cookie}");
+}
+
+/// 允许回看时，交卷后会话保持（否则学生交完就看不到自己写的）。
+#[test]
+fn submit_keeps_the_cookie_when_review_is_free() {
+    let mut f = Fixture::new("cookie-submit-free");
+    let token = f.login_ok(STUDENT);
+    assert_status(&f.save(&token, "q-single", "B"), 200, "保存应成功");
+    f.set_review(common::model::StudentReviewPolicy::Free);
+    let resp = f.submit(&token);
+    assert_status(&resp, 200, "交卷应成功");
+    let cookie = set_cookie(&resp);
+    assert!(
+        cookie.contains("Max-Age=3600"),
+        "允许回看时必须保持会话：{cookie}"
+    );
+}
+
+/// 退出：清 cookie，并把 token 从内存删掉（旧 cookie 立刻 401）。
+#[test]
+fn logout_clears_cookie_and_invalidates_token() {
+    let f = Fixture::new("cookie-logout");
+    let token = f.login_ok(STUDENT);
+    assert_status(&f.save(&token, "q-single", "B"), 200, "保存应成功");
+
+    let out = f.route(
+        &post_json("/api/logout", json!({}), peer(1))
+            .csrf()
+            .token(&token),
+    );
+    assert_status(&out, 200, "退出应成功");
+    assert!(
+        set_cookie(&out).contains("Max-Age=0"),
+        "退出必须清 cookie：{}",
+        set_cookie(&out)
+    );
+
+    // 旧 token 立刻失效；答案在磁盘上，重登后仍在。
+    let after = f.route(&request("GET", "/api/paper", peer(1), Vec::new()).token(&token));
+    assert_status(&after, 401, "退出后旧 token 必须失效");
+    let again = f.login_ok(STUDENT);
+    let data = f.paper_json(&again);
+    assert_eq!(
+        data["answer_text"]["q-single"].as_str(),
+        Some("B"),
+        "退出不影响已保存的答案"
+    );
+}
+
+/// 退出也要求 CSRF 头（否则任意网页都能把学生踢下线）。
+#[test]
+fn logout_requires_csrf() {
+    let f = Fixture::new("cookie-logout-csrf");
+    let token = f.login_ok(STUDENT);
+    let resp = f.route(&post_json("/api/logout", json!({}), peer(1)).token(&token));
+    assert_status(&resp, 403, "没有 CSRF 头必须拒绝");
+    // 会话仍然可用
+    assert_status(
+        &f.route(&request("GET", "/api/paper", peer(1), Vec::new()).token(&token)),
+        200,
+        "被拒的退出不应影响会话",
+    );
+}
