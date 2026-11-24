@@ -224,7 +224,7 @@ worker/              Cloudflare Worker 时间服务（**目录为空，未实现
 
 | 项 | 基线 |
 |---|---|
-| Rust | 350 个 `#[test]` |
+| Rust | 351 个 `#[test]` |
 | Python | 429 passed + 1 skipped（收集 430，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 15 项（非 `--full`） |
