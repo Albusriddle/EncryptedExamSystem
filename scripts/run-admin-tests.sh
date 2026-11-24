@@ -12,7 +12,9 @@ LOG="$ROOT/target/ees-admin-pytest-$RANDOM.log"
 XML="$ROOT/target/ees-admin-junit-$RANDOM.xml"
 rm -f "$LOG" "$XML"
 set +e
-QT_QPA_PLATFORM=offscreen uv run pytest -q --junitxml="$XML" "$@" >"$LOG" 2>&1
+# PYTHONUNBUFFERED：conftest 在 offscreen 下用 os._exit 跳过 Qt teardown，
+# 缓冲的 stdout 会一起丢掉——CI 里出现过「pytest 失败但日志空白」。
+PYTHONUNBUFFERED=1 QT_QPA_PLATFORM=offscreen uv run pytest -q --junitxml="$XML" "$@" >"$LOG" 2>&1
 code=$?
 set -e
 cat "$LOG"
