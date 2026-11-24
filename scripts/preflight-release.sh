@@ -102,8 +102,11 @@ head_ "3. 端到端：学生端必须零配置可解锁"
 if [ -n "$BUILDER" ] && [ -n "$CLIENT" ] && [ -n "$MASTER" ]; then
   TMP="$ROOT/.preflight"
   rm -rf "$TMP"; mkdir -p "$TMP"
-  NS=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
-  NE=$(date -u -d '1 hour'     +%Y-%m-%dT%H:%M:%SZ)
+  # 用 Python 生成时间窗：`date -d` 是 GNU 扩展，macOS/BSD 上不存在
+  # （CI 与 Windows-MSYS 恰好都是 GNU date，所以这个坑只在维护者本机暴露）。
+  # 用 timezone.utc 而不是 datetime.UTC：本脚本不假设 Python 3.11。
+  NS=$(python -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+  NE=$(python -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
   cat > "$TMP/m.json" <<JSON
 {"version":2,"salt":"00112233445566778899aabbccddeeff",
  "sessions":[{"session_id":1,"start":"$NS","end":"$NE",

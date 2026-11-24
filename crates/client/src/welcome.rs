@@ -28,21 +28,28 @@ fn marker_path() -> Option<PathBuf> {
 /// 欢迎弹窗——考试当天这算干扰。用 copy+remove 而不是 rename：两者可能在不同挂载点。
 #[cfg(not(windows))]
 fn migrate_legacy_marker(new_path: &std::path::Path) {
-    if new_path.exists() {
-        return;
-    }
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return;
     };
-    let legacy = home.join("ExamSystem").join("skip_welcome");
-    if !legacy.exists() {
+    migrate_marker_from(new_path, &home.join("ExamSystem").join("skip_welcome"));
+}
+
+/// 把旧位置的标记搬到新位置（一次性）。
+///
+/// 单独拆出来是为了能测：调用方要读 `HOME`，而测试改环境变量在 edition 2024 下是
+/// `unsafe`（仓库约定不这么写测试）。用 copy+remove 而不是 rename：两者可能跨挂载点。
+#[cfg(not(windows))]
+fn migrate_marker_from(new_path: &std::path::Path, legacy: &std::path::Path) {
+    if new_path.exists() || !legacy.exists() {
         return;
     }
-    if let Some(dir) = new_path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if let Some(parent) = new_path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return;
     }
-    if std::fs::copy(&legacy, new_path).is_ok() {
-        let _ = std::fs::remove_file(&legacy);
+    if std::fs::copy(legacy, new_path).is_ok() {
+        let _ = std::fs::remove_file(legacy);
     }
 }
 
@@ -235,6 +242,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// 旧标记会被搬到新位置，且新位置已存在时不覆盖。
+    ///
+    /// 为什么：目录口径统一后 `skip_welcome` 换了位置，不迁移老用户会**再看一次**
+    /// 欢迎弹窗——考试当天这算干扰。
+    #[cfg(not(windows))]
+    #[test]
+    fn legacy_marker_is_migrated_once() {
+        let root = tmp("marker-migrate");
+        let legacy = root.join("old").join("skip_welcome");
+        let fresh = root.join("new").join("skip_welcome");
+        std::fs::create_dir_all(legacy.parent().expect("父目录")).expect("建旧目录");
+        std::fs::write(&legacy, MARKER_CONTENT).expect("写旧标记");
+
+        migrate_marker_from(&fresh, &legacy);
+        assert!(fresh.exists(), "旧标记必须被搬到新位置");
+        assert_eq!(std::fs::read(&fresh).expect("读新标记"), MARKER_CONTENT);
+        assert!(!legacy.exists(), "搬完应删掉旧标记");
+
+        // 再跑一次：新标记已存在 → 不动（不能把用户后来的选择覆盖掉）
+        std::fs::write(&fresh, b"user-changed").expect("改写新标记");
+        std::fs::write(&legacy, MARKER_CONTENT).expect("旧标记又出现");
+        migrate_marker_from(&fresh, &legacy);
+        assert_eq!(
+            std::fs::read(&fresh).expect("读新标记"),
+            b"user-changed",
+            "新标记已存在时不得被旧标记覆盖"
+        );
+        assert!(legacy.exists(), "没搬的情况下旧标记应保持原样");
+
+        // 旧标记不存在：纯 no-op
+        let missing = root.join("missing").join("skip_welcome");
+        migrate_marker_from(&fresh, &missing);
+        assert_eq!(std::fs::read(&fresh).expect("读新标记"), b"user-changed");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
