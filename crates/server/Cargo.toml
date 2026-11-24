@@ -17,6 +17,16 @@ hex = { workspace = true }
 clap = { workspace = true }
 rand = { workspace = true }
 
+# TLS（v1.5.0）：rustls + ring 纯 Rust 实现，静态链接、不依赖系统 OpenSSL。
+# 显式关掉默认的 aws-lc-rs：它在 Windows 上要 cmake/nasm，发布物只有 Windows，构建链越简单越好。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+# 自签证书生成（默认特性即可：ring 后端 + PEM 输出）
+rcgen = "0.12"
+sha2 = { workspace = true }
+# rcgen 用 time 表示证书有效期；这里直接用同一个版本算 notBefore/notAfter
+time = { version = "0.3", features = ["std"] }
+
 # 状态文件权限收紧（secure_fs.rs）：Windows 上直接调用 advapi32 设受保护 DACL，
 # 不走 `icacls.exe` 子进程（其输出是本地化文本，解析它等于依赖系统语言）。
 [target.'cfg(windows)'.dependencies]

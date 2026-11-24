@@ -109,6 +109,9 @@ impl Fixture {
             finalize_retry: Mutex::new(HashMap::new()),
             // 默认按「仅教师可查看原卷」——与老师默认打包一致。
             review: common::model::StudentReviewPolicy::None,
+            // 单元测试直接调 route()，不经过监听层，所以默认是明文模式。
+            tls: None,
+            secure_cookies: false,
         });
 
         Self {
@@ -147,6 +150,8 @@ impl Fixture {
             windows: old.windows.clone(),
             finalize_retry: Mutex::new(HashMap::new()),
             review: old.review,
+            tls: old.tls.clone(),
+            secure_cookies: old.secure_cookies,
         });
     }
 
@@ -246,6 +251,12 @@ impl Fixture {
     /// 只替换 `App::payload`：已登录学生的内存试卷不受影响，场次窗口（`session_window`）
     /// 每次调用都从 payload 重新解析，所以下一次判定就会看到「已结束」。
     /// 把场次窗口设成任意区间（重打包 payload 并刷新窗口缓存）。
+    /// 切换「cookie 是否带 Secure」（TLS 模式为 true）。
+    fn set_secure_cookies(&mut self, secure: bool) {
+        let app = Arc::get_mut(&mut self.app).expect("换 cookie 策略时不应有其它 Arc 持有者");
+        app.secure_cookies = secure;
+    }
+
     /// 改包里的回看策略（网页端要按它决定交卷后还下不下发卷面）。
     fn set_review(&mut self, policy: common::model::StudentReviewPolicy) {
         let app = Arc::get_mut(&mut self.app).expect("换策略时不应有其它 Arc 持有者");
@@ -853,7 +864,8 @@ fn request_peer_comes_from_the_socket() {
     client
         .write_all(b"GET / HTTP/1.1\r\nHost: drill\r\n\r\n")
         .expect("发送请求");
-    let req = match read_request(&mut accepted).expect("解析请求") {
+    let expected_peer = target.parse::<IpAddr>().expect("本机地址应能解析");
+    let req = match read_request(&mut accepted, expected_peer).expect("解析请求") {
         ReadOutcome::Request(req) => req,
         other => panic!(
             "应解析出一个请求，实际 {}",
@@ -1879,4 +1891,165 @@ fn logout_requires_csrf() {
         200,
         "被拒的退出不应影响会话",
     );
+}
+
+// ---------------------------------------------------------------------------
+// 13. v1.5.0：TLS（自签证书 + 握手 + Secure cookie）
+// ---------------------------------------------------------------------------
+
+/// TLS 端到端：自签证书 → 客户端只信任这张证书 → 握手 → 登录请求走得通。
+///
+/// 这条用例同时验证三件容易错的事：
+/// 1) 证书能被 rustls 客户端验证（SAN 含 IP、EKU 是 serverAuth）；
+/// 2) `serve()` 在泛化到 `Read + Write` 后仍然正常处理 HTTP；
+/// 3) TLS 模式下会话 cookie 带 `Secure`。
+#[test]
+fn tls_end_to_end_login_works() {
+    use std::io::{Read as _, Write as _};
+    use std::net::{IpAddr as StdIpAddr, Ipv4Addr, TcpListener};
+
+    use rustls::pki_types::ServerName;
+
+    // 注意：证书目录不能和 Fixture 的目录同名——Fixture::new 会先 remove_dir_all。
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/server-tests")
+        .join(format!("tls-certs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut f = Fixture::new("tls-e2e");
+    f.set_secure_cookies(true);
+    let hosts = vec!["127.0.0.1".to_string()];
+    let material = tls::load_or_generate(&dir, &hosts, 30).expect("生成自签证书");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定");
+    let port = listener.local_addr().expect("地址").port();
+    let app = Arc::clone(&f.app);
+    let server_config = Arc::clone(&material.config);
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("设超时");
+        let conn = rustls::ServerConnection::new(server_config).expect("服务端 TLS 会话");
+        let mut tls = rustls::StreamOwned::new(conn, stream);
+        serve(&app, &mut tls, StdIpAddr::V4(Ipv4Addr::LOCALHOST)).expect("处理请求");
+    });
+
+    // 客户端：根证书只放这一张自签证书（等价于学生点了「继续」之后的状态）
+    let mut roots = rustls::RootCertStore::empty();
+    let cert_pem = std::fs::read(&material.cert_path).expect("读证书");
+    for cert in rustls_pemfile::certs(&mut &cert_pem[..]) {
+        roots.add(cert.expect("证书可解析")).expect("加入根证书");
+    }
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let server_name = ServerName::try_from("127.0.0.1").expect("服务器名");
+    let conn = rustls::ClientConnection::new(Arc::new(client_config), server_name)
+        .expect("客户端 TLS 会话");
+    let tcp = std::net::TcpStream::connect(("127.0.0.1", port)).expect("连接");
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .expect("设超时");
+    let mut tls = rustls::StreamOwned::new(conn, tcp);
+
+    let body = json!({"student_id": STUDENT}).to_string();
+    let request = format!(
+        "POST /api/login HTTP/1.1\r\nHost: 127.0.0.1\r\nX-EES-CSRF: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    tls.write_all(request.as_bytes()).expect("写请求");
+
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match tls.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                response.extend_from_slice(&chunk[..n]);
+                // 收到完整响应体就够断言了（服务端是 Connection: close，读到 EOF 也行）
+                if response.windows(2).any(|w| w == b"\r\n\r\n") && response.len() > 200 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    server.join().expect("服务端线程");
+
+    let text = String::from_utf8_lossy(&response).to_string();
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "TLS 上的登录应成功，实际响应：{}",
+        &text[..text.len().min(120)]
+    );
+    assert!(text.contains("ees_token="), "应下发会话 cookie");
+    assert!(
+        text.contains("; Secure"),
+        "TLS 模式下 cookie 必须带 Secure：{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `Secure` 只在 TLS 模式下出现（明文模式下带 Secure 会让 cookie 永远发不出去）。
+#[test]
+fn secure_cookie_flag_follows_tls_mode() {
+    let mut f = Fixture::new("cookie-secure");
+    let token = f.login_ok(STUDENT);
+    assert!(
+        !set_cookie(&f.login(STUDENT)).contains("; Secure"),
+        "明文模式不应带 Secure"
+    );
+    f.set_secure_cookies(true);
+    let cookie = session_cookie(&f.app, &token);
+    assert!(
+        cookie.contains("; Secure"),
+        "TLS 模式必须带 Secure：{cookie}"
+    );
+    let expired = expired_session_cookie(&f.app);
+    assert!(
+        expired.contains("; Secure"),
+        "失效 cookie 也要带 Secure：{expired}"
+    );
+}
+
+/// 明文 301 端口必须只回跳转，不能返回页面或数据。
+#[test]
+fn redirect_port_only_redirects() {
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定");
+    let port = listener.local_addr().expect("地址").port();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut stream = stream;
+        let mut buf = [0u8; 2048];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let path = std::str::from_utf8(&buf[..n])
+            .ok()
+            .and_then(|text| text.lines().next().map(str::to_string))
+            .and_then(|line| line.split_whitespace().nth(1).map(str::to_string))
+            .unwrap_or_else(|| "/".to_string());
+        let location = format!("https://127.0.0.1:8443{path}");
+        let resp = format!(
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.flush();
+    });
+
+    let mut client = TcpStream::connect(("127.0.0.1", port)).expect("连接");
+    client
+        .write_all(b"GET /api/paper HTTP/1.1\r\nHost: t\r\n\r\n")
+        .expect("写请求");
+    let mut buf = [0u8; 512];
+    let n = client.read(&mut buf).expect("读响应");
+    server.join().expect("线程");
+    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+    assert!(text.starts_with("HTTP/1.1 301"), "必须 301：{text}");
+    assert!(
+        text.contains("Location: https://127.0.0.1:8443/api/paper"),
+        "跳转目标要保留路径：{text}"
+    );
+    assert!(!text.contains("<!doctype"), "明文端口不得返回页面：{text}");
 }

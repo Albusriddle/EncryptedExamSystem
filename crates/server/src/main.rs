@@ -6,8 +6,8 @@
 //! - 每人只生成自己的试卷（`picker`），接口不会下发“整库”；
 //! - 作答先放内存，交卷时用 `answer_sheet::seal` 写出与离线版同格式的 `.eea`。
 //!
-//! 仍是**阶段 1 实现**，不是生产形态：没有 SQLite、没有 HTTPS，管理端只有启动入口，
-//! 登录限速也很粗糙。正式版本会换成 axum/tokio + SQLite + 管理端入口。
+//! 仍是**阶段 1 实现**，不是生产形态：没有 SQLite，管理端只有启动入口，登录限速也很粗糙。
+//! v1.5.0 起默认 HTTPS（自签证书；`--tls off` 回退明文）。
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
@@ -42,6 +42,7 @@ fn max_body_for(path: &str) -> usize {
 
 mod clock;
 mod secure_fs;
+mod tls;
 
 #[cfg(test)]
 mod server_tests;
@@ -74,21 +75,48 @@ pub(crate) mod seal_hook {
     }
 }
 
+/// TLS 模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum TlsMode {
+    /// 默认：有证书就用，没有就自动生成一张自签证书
+    Auto,
+    /// 明文 HTTP（不推荐：同网段可嗅探；只用于排障）
+    Off,
+}
+
 #[derive(Parser)]
 #[command(name = "exam-server", version, about = "保密考试系统网页版（阶段 1）")]
 struct Cli {
-    /// 已构建的考试包（exam-builder 产物）
+    /// 已构建的考试包（exam-builder 产物；`--gen-cert` 时可省略）
     #[arg(long)]
-    package: PathBuf,
+    package: Option<PathBuf>,
     /// K_manifest（64 位 hex 文件，`exam-builder build --emit-keyfile` 生成）
     #[arg(long)]
-    keyfile: PathBuf,
+    keyfile: Option<PathBuf>,
     /// 监听地址
     #[arg(long, default_value = "0.0.0.0")]
     bind: String,
-    /// 监听端口
-    #[arg(long, default_value_t = 8080)]
+    /// HTTPS 端口（默认 8443）
+    #[arg(long, default_value_t = 8443)]
     port: u16,
+    /// TLS 模式：auto（默认，没证书就自动生成自签证书）/ off（明文，不推荐）
+    #[arg(long, value_enum, default_value_t = TlsMode::Auto)]
+    tls: TlsMode,
+    /// 已有证书（不给就自动生成到 <answers-dir>/tls/）
+    #[arg(long)]
+    tls_cert: Option<PathBuf>,
+    /// 已有私钥
+    #[arg(long)]
+    tls_key: Option<PathBuf>,
+    /// 证书 SAN 里要包含的地址（可多次；默认=本机局域网 IP + 127.0.0.1 + localhost）
+    #[arg(long = "tls-host")]
+    tls_hosts: Vec<String>,
+    /// 明文 301 跳转端口（只回 301 到 https，便于旧书签；0 = 关闭）
+    #[arg(long, default_value_t = 8080)]
+    http_redirect_port: u16,
+    /// 只生成自签证书然后退出（可配 --tls-host / --answers-dir）
+    #[arg(long)]
+    gen_cert: bool,
     /// 指定场次（默认选当前时间窗内的场次）
     #[arg(long)]
     session: Option<u32>,
@@ -155,6 +183,12 @@ struct App {
     windows: HashMap<u32, (u64, u64)>,
     /// 自动收卷失败的退避状态（学号 → (失败次数, 下次重试时刻)）。
     finalize_retry: Mutex<HashMap<u64, (u32, u64)>>,
+    /// TLS 配置；`None` = 明文模式（`--tls off`）。
+    ///
+    /// 存在 App 里是为了让 `handle()` 在同一套「每连接一线程」模型里决定要不要握手。
+    tls: Option<Arc<rustls::ServerConfig>>,
+    /// cookie 是否加 `Secure`（TLS 下必须加）。
+    secure_cookies: bool,
     /// 包里的「学生回看」策略。离线端一直按它控制交卷后能不能看卷；网页端 v1.4.10
     /// 及以前**完全忽略**它（交卷后照样能看全卷），与「仅教师可查看原卷」的默认相反。
     review: common::model::StudentReviewPolicy,
@@ -215,11 +249,11 @@ impl Response {
             headers: Vec::new(),
         }
     }
-    fn html(body: &'static str) -> Self {
+    fn html_owned(body: String) -> Self {
         Self {
             status: 200,
             content_type: "text/html; charset=utf-8",
-            body: body.as_bytes().to_vec(),
+            body: body.into_bytes(),
             headers: Vec::new(),
         }
     }
@@ -237,15 +271,20 @@ impl Response {
 const SESSION_COOKIE_MAX_AGE: u64 = 3600;
 
 /// 正常会话 cookie（60 分钟，滑动续期）。
-fn session_cookie(token: &str) -> String {
+///
+/// TLS 下必须带 `Secure`：否则浏览器会允许这条 cookie 走明文通道，
+/// 而我们在 HTTPS 模式下只监听 TLS 端口——明文请求根本到不了，`Secure` 只是显式声明。
+fn session_cookie(app: &App, token: &str) -> String {
+    let secure = if app.secure_cookies { "; Secure" } else { "" };
     format!(
-        "ees_token={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_COOKIE_MAX_AGE}"
+        "ees_token={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_COOKIE_MAX_AGE}{secure}"
     )
 }
 
 /// 立即失效的会话 cookie（提交、退出）。
-fn expired_session_cookie() -> String {
-    "ees_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0".to_string()
+fn expired_session_cookie(app: &App) -> String {
+    let secure = if app.secure_cookies { "; Secure" } else { "" };
+    format!("ees_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}")
 }
 
 /// 交卷之后的会话 cookie。
@@ -254,9 +293,9 @@ fn expired_session_cookie() -> String {
 /// 允许回看时保持会话——否则学生交完卷就再也看不到自己写的（回看策略形同虚设）。
 fn post_submit_cookie(app: &App, token: &str) -> String {
     if app.review == common::model::StudentReviewPolicy::Free {
-        session_cookie(token)
+        session_cookie(app, token)
     } else {
-        expired_session_cookie()
+        expired_session_cookie(app)
     }
 }
 
@@ -313,6 +352,19 @@ impl Drop for GateSlot<'_> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // --gen-cert：只生成证书，不需要考试包。
+    if cli.gen_cert {
+        let hosts = tls_hosts(&cli);
+        let dir = cli.answers_dir.join("tls");
+        tls::generate(&dir, &hosts, 365)?;
+        println!("已生成自签证书：{}", dir.display());
+        println!("SAN：{}", hosts.join(", "));
+        return Ok(());
+    }
+    let (Some(package), Some(keyfile)) = (cli.package.as_ref(), cli.keyfile.as_ref()) else {
+        anyhow::bail!("缺少 --package / --keyfile（或改用 --gen-cert 只生成证书）");
+    };
+
     // 先校时、再读包、再绑端口：`require` 档不通过就拒绝启动，避免"服务起来了，
     // 但场次判定用的是不可信的教师机时钟"。`warn` 档只打印结论，不阻止启动。
     // 进度提示放在最前面：无外网时这一步要等约 3 秒，否则看起来像卡住。
@@ -329,13 +381,13 @@ fn main() -> Result<()> {
     }
     let server_clock = check.clock;
 
-    let bytes = std::fs::read(&cli.package)
-        .with_context(|| format!("读取考试包 {}", cli.package.display()))?;
+    let bytes =
+        std::fs::read(package).with_context(|| format!("读取考试包 {}", package.display()))?;
     let payload = container::extract_payload(&bytes)
         .context("考试包中没有 payload（请用 exam-builder 生成）")?;
 
-    let key_text = std::fs::read_to_string(&cli.keyfile)
-        .with_context(|| format!("读取 keyfile {}", cli.keyfile.display()))?;
+    let key_text = std::fs::read_to_string(keyfile)
+        .with_context(|| format!("读取 keyfile {}", keyfile.display()))?;
     let key_bytes = hex::decode(key_text.trim()).context("keyfile 不是合法 hex")?;
     anyhow::ensure!(key_bytes.len() == 32, "keyfile 必须是 64 位 hex（32 字节）");
     let mut k_manifest = [0u8; 32];
@@ -367,10 +419,30 @@ fn main() -> Result<()> {
         .with_context(|| format!("创建答题卡目录 {}", cli.answers_dir.display()))?;
     let state_dir = cli
         .state_dir
+        .clone()
         .unwrap_or_else(|| cli.answers_dir.join("state"));
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("创建状态目录 {}", state_dir.display()))?;
     harden_state_dir(&state_dir);
+
+    // ---- TLS：默认开；没证书就自动生成 ----
+    let tls_material = match cli.tls {
+        TlsMode::Off => None,
+        TlsMode::Auto => Some(match (&cli.tls_cert, &cli.tls_key) {
+            // 老师给了自己的证书（例如用内网 CA 签的）：只加载，绝不覆盖。
+            (Some(cert), Some(key)) => tls::load(cert, key)?,
+            (None, None) => {
+                let hosts = tls_hosts(&cli);
+                tls::load_or_generate(&cli.answers_dir.join("tls"), &hosts, 365)?
+            }
+            _ => anyhow::bail!("--tls-cert 与 --tls-key 必须同时给出"),
+        }),
+    };
+    let scheme = if tls_material.is_some() {
+        "https"
+    } else {
+        "http"
+    };
 
     let state_key = *crypto::hkdf_derive(&k_manifest, b"web-state", "web-state");
     let app = Arc::new(App {
@@ -392,6 +464,8 @@ fn main() -> Result<()> {
         windows,
         finalize_retry: Mutex::new(HashMap::new()),
         review: header.student_review,
+        tls: tls_material.as_ref().map(|m| Arc::clone(&m.config)),
+        secure_cookies: tls_material.is_some(),
     });
 
     let listener = bind_listener(&cli.bind, cli.port)?;
@@ -399,10 +473,30 @@ fn main() -> Result<()> {
     // 绑了具体地址（例如只绑 LAN、或只绑 127.0.0.1 调试）就直接用那个地址——
     // 否则绑了回环还会打印一个学生根本连不上的局域网 URL。
     println!(
-        "考试服务已启动：http://{}:{}/",
+        "考试服务已启动：{scheme}://{}:{}/",
         bind_host(&cli.bind),
         cli.port
     );
+    if let Some(material) = &tls_material {
+        if material.generated {
+            println!(
+                "已自动生成自签证书（365 天）：{}（私钥 {}，仅当前用户可读）",
+                material.cert_path.display(),
+                material.key_path.display()
+            );
+        }
+        println!("证书指纹（SHA-256）：{}", material.fingerprint);
+        println!("学生首次打开会提示「不安全」→ 点「高级 → 继续前往」；指纹应与这里一致");
+        if cli.http_redirect_port != 0 {
+            println!(
+                "旧书签 http://{}:{} 会自动跳到 HTTPS",
+                bind_host(&cli.bind),
+                cli.http_redirect_port
+            );
+        }
+    } else {
+        println!("⚠ 当前是明文 HTTP（--tls off）：同网段可嗅探，仅建议排障时使用");
+    }
     println!(
         "场次 #{session_id}；答题卡输出到 {}",
         cli.answers_dir.display()
@@ -425,6 +519,20 @@ fn main() -> Result<()> {
         });
     }
 
+    if tls_material.is_some() && cli.http_redirect_port != 0 {
+        // 只做跳转的明文端口：任何请求都回 301 到 HTTPS。它不返回页面、不碰状态，
+        // 所以「明文端口泄漏答案」的问题不存在——泄漏只发生在真正的数据请求上。
+        let bind = cli.bind.clone();
+        let redirect_port = cli.http_redirect_port;
+        let host = bind_host(&cli.bind);
+        let https_port = cli.port;
+        std::thread::spawn(move || {
+            if let Err(e) = redirect_loop(&bind, redirect_port, host, https_port) {
+                eprintln!("⚠ 明文跳转端口未启动（{redirect_port}）：{e:#}");
+            }
+        });
+    }
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -437,6 +545,45 @@ fn main() -> Result<()> {
             }
             Err(e) => eprintln!("accept 失败：{e}"),
         }
+    }
+    Ok(())
+}
+
+/// 证书 SAN 里的地址：`--tls-host` 优先；默认本机局域网 IP + 回环 + localhost。
+///
+/// 少一个就会让浏览器报「名称不匹配」——比自签本身更吓人，所以宁可多列几个。
+fn tls_hosts(cli: &Cli) -> Vec<String> {
+    if !cli.tls_hosts.is_empty() {
+        return cli.tls_hosts.clone();
+    }
+    vec![local_ip(), "127.0.0.1".to_string(), "localhost".to_string()]
+}
+
+/// 只做跳转的明文端口：读一行请求行，回 301 到 HTTPS，然后关闭。
+///
+/// 它**不返回页面、不碰状态**，所以「明文端口泄漏答案」的问题不存在——
+/// 泄漏只会发生在真正的数据请求上，而那些请求只走 TLS 端口。
+fn redirect_loop(bind: &str, port: u16, host: String, https_port: u16) -> Result<()> {
+    let listener = bind_listener(bind, port)?;
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let host = host.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let path = std::str::from_utf8(&buf[..n])
+                .ok()
+                .and_then(|text| text.lines().next().map(str::to_string))
+                .and_then(|line| line.split_whitespace().nth(1).map(str::to_string))
+                .unwrap_or_else(|| "/".to_string());
+            let location = format!("https://{host}:{https_port}{path}");
+            let resp = format!(
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        });
     }
     Ok(())
 }
@@ -522,29 +669,46 @@ fn handle(app: Arc<App>, mut stream: TcpStream) -> Result<()> {
     }
     let _guard = Guard(&app.conns);
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    match read_request(&mut stream)? {
+    // 超时要设在**裸 TCP** 上：TLS 握手与后续读取都受它约束（StreamOwned 不暴露 set_read_timeout）。
+    let peer = peer_ip(&stream);
+    match app.tls.clone() {
+        Some(config) => {
+            let conn = rustls::ServerConnection::new(config)
+                .context("创建 TLS 会话失败（证书配置有问题？）")?;
+            let mut tls = rustls::StreamOwned::new(conn, stream);
+            serve(&app, &mut tls, peer)
+        }
+        None => serve(&app, &mut stream, peer),
+    }
+}
+
+/// 处理一条已建立（可能已加密）的连接的请求。
+///
+/// 泛化成 `Read + Write` 是为了同一套代码同时跑明文与 TLS；`peer` 由调用方从裸 TCP 取。
+fn serve(app: &App, stream: &mut (impl Read + Write), peer: IpAddr) -> Result<()> {
+    match read_request(stream, peer)? {
         ReadOutcome::Closed => Ok(()),
         ReadOutcome::Oversized(limit) => {
             // 先回状态码，再把没读的 body 短暂读掉：直接 close 会发 RST，
             // 客户端可能只看到「连接被重置」而不是 413。
             let resp = Response::error(413, format!("请求体超过 {limit} 字节"));
-            let _ = write_response(&mut stream, resp);
-            drain_briefly(&mut stream);
+            let _ = write_response(stream, resp);
+            drain_briefly(stream);
             Ok(())
         }
         ReadOutcome::Chunked => {
             let resp = Response::error(411, "不支持分块传输（请带上 Content-Length）");
-            let _ = write_response(&mut stream, resp);
-            drain_briefly(&mut stream);
+            let _ = write_response(stream, resp);
+            drain_briefly(stream);
             Ok(())
         }
-        ReadOutcome::Request(req) => write_response(&mut stream, route(&app, &req)),
+        ReadOutcome::Request(req) => write_response(stream, route(app, &req)),
     }
 }
 
 fn route(app: &App, req: &Request) -> Response {
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/") => Response::html(INDEX_HTML),
+        ("GET", "/") => Response::html_owned(index_html(app)),
         ("GET", "/assets/codemirror.css") => Response::asset(
             "text/css; charset=utf-8",
             include_str!("../assets/codemirror.min.css"),
@@ -641,7 +805,7 @@ fn login(app: &App, req: &Request) -> Response {
                 state.students.remove(&old);
             }
             state.students.insert(token.clone(), student);
-            Response::json(200, json!({"ok": true})).with_cookie(session_cookie(&token))
+            Response::json(200, json!({"ok": true})).with_cookie(session_cookie(app, &token))
         }
         Err(msg) => Response::error(401, msg),
     }
@@ -661,7 +825,7 @@ fn logout(app: &App, req: &Request) -> Response {
             state.tokens_by_student.remove(&student.student_id);
         }
     }
-    Response::json(200, json!({"ok": true})).with_cookie(expired_session_cookie())
+    Response::json(200, json!({"ok": true})).with_cookie(expired_session_cookie(app))
 }
 
 fn csrf_ok(req: &Request) -> bool {
@@ -773,6 +937,18 @@ fn cookie_token(req: &Request) -> Option<String> {
     })
 }
 
+/// 首页 HTML。TLS 模式下插入一行提示：学生看到「不安全」时该怎么点。
+///
+/// 用占位替换而不是两套模板：页面只有一份，改动不会漂。
+fn index_html(app: &App) -> String {
+    let hint = if app.secure_cookies {
+        "<div class=\"note\">本页使用考场内网自签证书：若浏览器提示「不安全」，请点「高级 → 继续前往」；证书指纹应与教师屏幕一致。iPad/iPhone 请用 Safari（Chrome 无法绕过证书警告）。</div>"
+    } else {
+        ""
+    };
+    INDEX_HTML.replace("<!--TLS_HINT-->", hint)
+}
+
 fn paper(app: &App, req: &Request) -> Response {
     let Some(token) = cookie_token(req) else {
         return Response::error(401, "未登录");
@@ -805,7 +981,7 @@ fn paper(app: &App, req: &Request) -> Response {
             map.insert("answers".into(), Value::Null);
             map.insert("answer_text".into(), Value::Null);
         }
-        return Response::json(200, base).with_cookie(session_cookie(&token));
+        return Response::json(200, base).with_cookie(session_cookie(app, &token));
     }
     let answer_text: HashMap<&str, String> = st
         .paper
@@ -823,7 +999,7 @@ fn paper(app: &App, req: &Request) -> Response {
         map.insert("answer_text".into(), json!(answer_text));
     }
     // 每次取卷都续一次期：学生只要还在答题，会话就不会因为「60 分钟」被掐断。
-    Response::json(200, base).with_cookie(session_cookie(&token))
+    Response::json(200, base).with_cookie(session_cookie(app, &token))
 }
 
 /// 回看策略的线上表示。
@@ -1087,7 +1263,7 @@ fn submit(app: &App, req: &Request) -> Response {
         Err(e) => {
             st.submitted = false; // 撤回抢占：让学生能再试一次
             // 交卷失败、学生还要继续答：会话必须留着。
-            Response::error(500, e).with_cookie(session_cookie(&token))
+            Response::error(500, e).with_cookie(session_cookie(app, &token))
         }
     }
 }
@@ -1405,7 +1581,7 @@ fn time_info(app: &App, req: &Request) -> Response {
             "clock_offset_secs": app.clock.offset_secs(),
         }),
     )
-    .with_cookie(session_cookie(&token))
+    .with_cookie(session_cookie(app, &token))
 }
 
 /// 场次窗口是否开着：`[start, end)`，与客户端 `decide_session` 同口径。
@@ -1544,7 +1720,7 @@ enum ReadOutcome {
     Closed,
 }
 
-fn read_request(stream: &mut TcpStream) -> Result<ReadOutcome> {
+fn read_request(stream: &mut impl Read, peer: IpAddr) -> Result<ReadOutcome> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let head_end = loop {
@@ -1605,15 +1781,16 @@ fn read_request(stream: &mut TcpStream) -> Result<ReadOutcome> {
         path,
         headers,
         body,
-        peer: peer_ip(stream),
+        peer,
     }))
 }
 
 /// 把没读掉的请求体短暂读掉，避免 `close` 发 RST 让客户端看不到 413/411。
 ///
 /// 只在上限/分块分支调用；最多读 1 MiB 或 200 ms，绝不无限等价于读完整 body。
-fn drain_briefly(stream: &mut TcpStream) {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+fn drain_briefly(stream: &mut impl Read) {
+    // 超时已经在裸 TCP 上设过（TLS 会话拿不到 set_read_timeout），这里只管读。
+    // 最坏情况是等满那 10 秒读超时——只发生在超大请求体上，可接受。
     let mut buf = [0u8; 8192];
     let mut total = 0usize;
     while total < 1024 * 1024 {
@@ -1640,7 +1817,7 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-fn write_response(stream: &mut TcpStream, resp: Response) -> Result<()> {
+fn write_response(stream: &mut impl Write, resp: Response) -> Result<()> {
     let mut out = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
         resp.status,

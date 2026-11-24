@@ -3,7 +3,8 @@
 网页版学生端：教师在隔离局域网里启动它（管理端「网页考试…」入口），
 学生用浏览器打开 `http://<教师机 IP>:<端口>`，输入学号（可选 PIN）后作答。
 
-> 仅用于**隔离局域网 + 现场监考**；HTTP 明文，不要接入互联网。
+> 仅用于**隔离局域网 + 现场监考**。v1.5.0 起默认 **HTTPS（自签证书）**；
+> 学生首次访问会提示「不安全」，点「高级 → 继续前往」即可（iPad/iPhone 请用 Safari）。
 
 ## 它证明的链路
 
@@ -33,10 +34,10 @@ EXAM_MASTER=<64 位主密钥> exam-builder build --manifest live.json --banks ba
 
 # 2. 启动服务（教师机）
 exam-server --package StudentClient.exe --keyfile key.txt \
-  --port 8080 --answers-dir answers --time-check warn
+  --port 8443 --answers-dir answers --time-check warn
 
 # 3. 学生浏览器访问
-#    http://<教师机 IP>:8080/
+#    https://<教师机 IP>:8443/   （首次会提示不安全 → 高级 → 继续前往）
 ```
 
 命令行参数：
@@ -46,7 +47,12 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `--package` | 已构建的考试包 |
 | `--keyfile` | `--emit-keyfile` 生成的 K_manifest（64 hex） |
 | `--bind` | 监听地址，默认 `0.0.0.0` |
-| `--port` | 端口，默认 `8080` |
+| `--port` | HTTPS 端口，默认 `8443` |
+| `--tls` | `auto`（默认：没证书就自动生成自签证书）/ `off`（明文，仅排障） |
+| `--tls-cert` / `--tls-key` | 用自己的证书（例如学校内网 CA 签发的）；不给就自动生成到 `<answers-dir>/tls/` |
+| `--tls-host` | 证书 SAN 里要包含的地址（可多次）；默认=本机局域网 IP + 127.0.0.1 + localhost |
+| `--http-redirect-port` | 明文 301 跳转端口（默认 `8080`，方便旧书签；`0` = 关闭） |
+| `--gen-cert` | 只生成自签证书然后退出（配合 `--tls-host`） |
 | `--session` | 指定场次；默认选当前时间窗内的场次 |
 | `--answers-dir` | 交卷答题卡输出目录，默认 `answers/` |
 | `--state-dir` | 作答状态目录，默认 `<answers-dir>/state` |
@@ -76,6 +82,18 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `POST` | `/api/submit` | 冻结并写出 `.eea`；默认策略下同时让会话立即失效 |
 | `POST` | `/api/logout` | 主动退出：清 cookie 并从内存删 token（旧 cookie 立刻 401） |
 | `GET` | `/api/time` | 服务器时间与剩余秒数；附带 `time_mode` / `clock_offset_secs` 便于排障 |
+
+## TLS（v1.5.0）
+
+- 默认 HTTPS：启动时若 `<answers-dir>/tls/` 里没有证书，会自动生成一张 **ECDSA P-256 自签证书**
+  （SAN 含本机局域网 IP、`127.0.0.1`、`localhost`；EKU 为 `serverAuth`——缺它浏览器会报
+  **不可绕过**的 `ERR_SSL_KEY_USAGE_INCOMPATIBLE`）；有效期 365 天，到期重启会自动重生成；
+- 启动横幅打印 `https://<IP>:8443/` 与**证书指纹（SHA-256）**：学生点「高级」时展开的证书详情里
+  能看到同一指纹，老师可让学生核对（这是自签场景下防中间人的唯一办法）；
+- 明文端口只做 301：`--http-redirect-port` 起一个**只回跳转**的监听器，不返回页面、不碰状态，
+  旧书签 `http://<IP>:8080/...` 会自动跳到 HTTPS；
+- 已知限制：**iOS 上的 Chrome 用的是 WKWebView，无法绕过证书警告**——iPad/iPhone 请用 Safari；
+  受管 Chromebook 的策略也可能禁止「继续」。这类设备只能改用其他设备，或由老师用 `--tls off` 临时排障。
 
 ## 已具备（阶段 1）
 
@@ -108,7 +126,8 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 
 ## 已知限制
 
-- HTTP 明文（按约定只用于隔离局域网）；
+- 自签证书不是公共 CA：能挡住同网段的**被动嗅探**，但**不防中间人**（除非学生核对指纹）；
+- `--tls off` 时仍是明文 HTTP（仅建议排障）；
 - 状态文件是加密 JSON（不是 SQLite）；没有管理端监控页；
 - 多标签页只靠单会话 token 顶掉旧页面，没有强制关闭；
 - 隔离局域网没有外网时取时必然失败：默认档只告警，此时场次判定退回教师机系统时钟，
