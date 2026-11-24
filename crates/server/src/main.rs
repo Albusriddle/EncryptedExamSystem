@@ -1,4 +1,4 @@
-//! 网页版学生端（阶段 0 原型）。
+//! 网页版学生端（阶段 1）。
 //!
 //! 设计取舍：
 //! - **只从已构建的考试包启动**：读 payload + K_manifest，不持有 master、不持有答案；
@@ -6,7 +6,7 @@
 //! - 每人只生成自己的试卷（`picker`），接口不会下发“整库”；
 //! - 作答先放内存，交卷时用 `answer_sheet::seal` 写出与离线版同格式的 `.eea`。
 //!
-//! 这是**原型**，不是生产实现：没有 SQLite、没有 HTTPS、没有管理端 UI，
+//! 仍是**阶段 1 实现**，不是生产形态：没有 SQLite、没有 HTTPS，管理端只有启动入口，
 //! 登录限速也很粗糙。正式版本会换成 axum/tokio + SQLite + 管理端入口。
 
 use std::collections::{BTreeMap, HashMap};
@@ -24,7 +24,11 @@ use rand::RngCore;
 use serde_json::{Value, json};
 
 const INDEX_HTML: &str = include_str!("index.html");
-const MAX_BODY: usize = 20 * 1024 * 1024;
+/// 单个请求体上限。
+///
+/// 业务上最大的请求是「一题答案 ≤1 MiB」的 JSON，2 MiB 足够。原来 20 MiB × 256 连接
+/// 的最坏内存是 5 GiB —— 一条跑飞的客户端就能把教师机打爆。
+const MAX_BODY: usize = 2 * 1024 * 1024;
 
 mod clock;
 mod secure_fs;
@@ -61,11 +65,7 @@ pub(crate) mod seal_hook {
 }
 
 #[derive(Parser)]
-#[command(
-    name = "exam-server",
-    version,
-    about = "保密考试系统网页版（阶段 0 原型）"
-)]
+#[command(name = "exam-server", version, about = "保密考试系统网页版（阶段 1）")]
 struct Cli {
     /// 已构建的考试包（exam-builder 产物）
     #[arg(long)]
@@ -124,9 +124,20 @@ struct App {
     /// `write` 若被拆成两次（`writeln!` 就是先写正文再写换行），两行会在字节层面
     /// 交错成无法解析的乱码——v1.4.5 的 12 人并发演练实测到：12 条交卷只解析出 2 条。
     event_log: Mutex<()>,
+    /// 状态写盘的串行锁。
+    ///
+    /// 「保存」与「交卷」都在锁外写状态文件。没有这把锁时，保存的「未交卷」快照
+    /// 可能后落地、把交卷写下的「已交卷」覆盖回去——重启后学生回到可编辑状态，
+    /// 已冻结的卡还会被同名校验覆盖。锁序固定 `state_write → state`（先写锁、再短复查
+    /// 内存），反向路径不存在，不会死锁。
+    state_write: Mutex<()>,
+    /// 状态文件临时名序号：并发写各自的 `.tmp`，避免互相 rename 掉。
+    tmp_seq: std::sync::atomic::AtomicU64,
     conns: std::sync::atomic::AtomicUsize,
     gate: Gate,
     state: Mutex<State>,
+    /// 场次时间窗缓存（payload 在进程生命周期内不变，没必要每个请求解密 header）。
+    windows: HashMap<u32, (u64, u64)>,
 }
 
 #[derive(Default)]
@@ -147,6 +158,10 @@ struct Student {
     /// 已导出的答题卡文件名（幂等，避免重复写盘）
     exported: Option<String>,
     last_seen: u64,
+    /// 自动收卷连续失败次数（用于指数退避，避免每 15 s 重试一次必然失败的写盘）。
+    finalize_failures: u32,
+    /// 下次允许重试的时刻（Unix 秒；0 = 立即）。
+    finalize_retry_at: u64,
 }
 
 struct Request {
@@ -213,17 +228,38 @@ impl Gate {
             max,
         }
     }
-    fn acquire(&self) -> std::sync::MutexGuard<'_, usize> {
-        let mut n = self.slots.lock().unwrap();
+    /// 取一个槽位；守卫 Drop 时归还。
+    ///
+    /// 为什么必须 RAII：手写 `release` 时，`unlock()` 里任何 panic 都会让计数永久 +1，
+    /// 4 次之后所有登录都会卡在 `cv.wait` 上——不是报错，是线程永久阻塞。
+    fn acquire(&self) -> GateSlot<'_> {
+        let mut n = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         while *n >= self.max {
-            n = self.cv.wait(n).unwrap();
+            n = self
+                .cv
+                .wait(n)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
         *n += 1;
-        n
+        GateSlot(self)
     }
-    fn release(&self, mut guard: std::sync::MutexGuard<'_, usize>) {
-        *guard -= 1;
-        self.cv.notify_one();
+}
+
+/// 槽位守卫：离开作用域即归还并唤醒一个等待者。
+struct GateSlot<'a>(&'a Gate);
+
+impl Drop for GateSlot<'_> {
+    fn drop(&mut self) {
+        let mut n = self
+            .0
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *n = n.saturating_sub(1);
+        self.0.cv.notify_one();
     }
 }
 
@@ -259,6 +295,9 @@ fn main() -> Result<()> {
     k_manifest.copy_from_slice(&key_bytes);
 
     let (header, _) = container::parse_header(payload, &k_manifest).context("解析 header 失败")?;
+    // 场次窗口只算一次：payload 在进程生命周期内不变，而原来每个请求、每个学生都要
+    // 解密一次 header（50 人 × 每次保存都在锁内做一次 AES-GCM）。
+    let windows = session_windows_from(&header);
     // 用校准后的时间挑场次：本机时钟偏差大时，挑中哪一场会跟着变。
     let now = server_clock.now();
     let active = header.sessions.iter().find(|s| {
@@ -301,7 +340,10 @@ fn main() -> Result<()> {
         conns: std::sync::atomic::AtomicUsize::new(0),
         gate: Gate::new(4),
         event_log: Mutex::new(()),
+        state_write: Mutex::new(()),
+        tmp_seq: std::sync::atomic::AtomicU64::new(0),
         state: Mutex::new(State::default()),
+        windows,
     });
 
     let listener = bind_listener(&cli.bind, cli.port)?;
@@ -317,14 +359,20 @@ fn main() -> Result<()> {
         "场次 #{session_id}；答题卡输出到 {}",
         cli.answers_dir.display()
     );
-    println!("（阶段 0 原型：仅内存保存、无管理端界面；Ctrl+C 结束）");
+    println!("（阶段 1：作答实时落盘、崩溃后重登可恢复；Ctrl+C 结束）");
 
     {
         let sweep = Arc::clone(&app);
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_secs(15));
-                sweep_tick(&sweep);
+                // 单轮 panic 不能带走整个后台线程：否则到点再也不收卷，直到有人重启服务。
+                let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    sweep_tick(&sweep);
+                }));
+                if tick.is_err() {
+                    eprintln!("⚠ 自动收卷本轮 panic（已捕获，下一轮继续）");
+                }
             }
         });
     }
@@ -417,11 +465,18 @@ fn handle(app: Arc<App>, mut stream: TcpStream) -> Result<()> {
     }
     let _guard = Guard(&app.conns);
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let Some(req) = read_request(&mut stream)? else {
-        return Ok(());
-    };
-    let resp = route(&app, &req);
-    write_response(&mut stream, resp)
+    match read_request(&mut stream)? {
+        ReadOutcome::Closed => Ok(()),
+        ReadOutcome::Oversized => write_response(
+            &mut stream,
+            Response::error(413, format!("请求体超过 {MAX_BODY} 字节")),
+        ),
+        ReadOutcome::Chunked => write_response(
+            &mut stream,
+            Response::error(411, "不支持分块传输（请带上 Content-Length）"),
+        ),
+        ReadOutcome::Request(req) => write_response(&mut stream, route(&app, &req)),
+    }
 }
 
 fn route(app: &App, req: &Request) -> Response {
@@ -471,7 +526,7 @@ fn login(app: &App, req: &Request) -> Response {
     // 坏请求就把 60 个名额占满，真实学生会被 429 挡在门外一分钟（现场表现：
     // 「全班突然都登不上，过一会儿又好了」）。挡 PIN 爆破靠的是下面的「每学号 10 次」。
     {
-        let mut state = app.state.lock().unwrap();
+        let mut state = app.lock_state();
         let now = app.now();
         let entry = state.attempts.entry(ip).or_insert((0, now));
         if now.saturating_sub(entry.1) > 60 {
@@ -484,7 +539,7 @@ fn login(app: &App, req: &Request) -> Response {
     }
 
     {
-        let mut state = app.state.lock().unwrap();
+        let mut state = app.lock_state();
         let now = app.now();
         let entry = state.attempts_student.entry(student_id).or_insert((0, now));
         if now.saturating_sub(entry.1) > 60 {
@@ -496,9 +551,11 @@ fn login(app: &App, req: &Request) -> Response {
         entry.0 += 1;
     }
 
-    let slot = app.gate.acquire();
-    let unlocked = app.unlock(student_id, pin.as_deref());
-    app.gate.release(slot);
+    let unlocked = {
+        // 槽位守卫在作用域结束时归还（panic 也不会泄漏，见 GateSlot）。
+        let _slot = app.gate.acquire();
+        app.unlock(student_id, pin.as_deref())
+    };
 
     match unlocked {
         Ok((token, mut student)) => {
@@ -510,7 +567,7 @@ fn login(app: &App, req: &Request) -> Response {
                 student.submitted = submitted;
                 student.exported = exported;
             }
-            let mut state = app.state.lock().unwrap();
+            let mut state = app.lock_state();
             if let Some(old) = state.tokens_by_student.insert(student_id, token.clone()) {
                 state.students.remove(&old);
             }
@@ -539,6 +596,17 @@ impl App {
         self.clock.now()
     }
 
+    /// 取状态锁；**中毒也继续**。
+    ///
+    /// 为什么容忍中毒：生产代码有 10 处取锁，任何一次持锁 panic 都会把锁永久毒化，
+    /// 之后每个请求线程 panic、sweep 线程也死——进程还在监听但全站不可用。
+    /// 宁可带着可能不一致的状态继续，也不要让整场考试直接死掉。
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn unlock(&self, student_id: u64, pin: Option<&str>) -> Result<(String, Student), String> {
         let (header, blob) = container::parse_header(&self.payload, &self.k_manifest)
             .map_err(|e| format!("包解析失败：{e}"))?;
@@ -558,7 +626,9 @@ impl App {
             ) else {
                 continue;
             };
-            if now < start || now > end {
+            // 与客户端 `decide_session` 统一为 [start, end)：同一秒 now == end 时
+            // 两端都算「已结束」，否则网页端能比离线端多答一秒。
+            if !window_open(now, start, end) {
                 continue;
             }
             let Ok(Some(unlocked)) = container::try_unlock_session_with_pin(
@@ -605,6 +675,8 @@ impl App {
                 submitted: false,
                 exported: None,
                 last_seen: now,
+                finalize_failures: 0,
+                finalize_retry_at: 0,
             };
             return Ok((token, student));
         }
@@ -623,7 +695,7 @@ fn paper(app: &App, req: &Request) -> Response {
     let Some(token) = cookie_token(req) else {
         return Response::error(401, "未登录");
     };
-    let mut state = app.state.lock().unwrap();
+    let mut state = app.lock_state();
     let Some(st) = state.students.get_mut(&token) else {
         return Response::error(401, "登录已失效");
     };
@@ -644,22 +716,13 @@ fn paper(app: &App, req: &Request) -> Response {
     )
 }
 
-/// 某场次的时间窗；场次不存在或包坏了返回 `(0, 0)`（调用方按「没有窗口」处理）。
+/// 某场次的时间窗；查启动时缓存的表（payload 不变），场次不存在返回 `(0, 0)`。
 fn session_window(app: &App, session_id: u32) -> (u64, u64) {
-    session_windows(app)
-        .get(&session_id)
-        .copied()
-        .unwrap_or((0, 0))
+    app.windows.get(&session_id).copied().unwrap_or((0, 0))
 }
 
-/// 一次解析出所有场次的时间窗。
-///
-/// 解析 header 要解密 + 反序列化，单个请求量级还好，但 `sweep_tick` 是按学生循环的：
-/// 每个学生解一次 header 纯属浪费（50 人就是 50 次 AES-GCM），所以那里先解一次。
-fn session_windows(app: &App) -> HashMap<u32, (u64, u64)> {
-    let Ok((header, _)) = container::parse_header(&app.payload, &app.k_manifest) else {
-        return HashMap::new();
-    };
+/// 从 header 算出所有场次的时间窗（启动时调用一次）。
+fn session_windows_from(header: &container::Header) -> HashMap<u32, (u64, u64)> {
     header
         .sessions
         .iter()
@@ -699,15 +762,15 @@ fn save_answer(app: &App, req: &Request) -> Response {
     // 校验与写入内存都在锁内完成；**克隆答案**也只是内存操作，真正的写盘放到锁外。
     // 交卷路径在 v1.4.4 已经把写盘挪出锁，保存路径同理（它是全场频率最高的写操作）。
     let (student_id, session_id, answers) = {
-        let mut state = app.state.lock().unwrap();
+        let mut state = app.lock_state();
         let Some(st) = state.students.get_mut(&token) else {
             return Response::error(401, "登录已失效");
         };
         if st.submitted {
             return Response::error(409, "已交卷，不能再修改");
         }
-        let (_, end) = session_window(app, st.session_id);
-        if end != 0 && app.now() > end {
+        let (start, end) = session_window(app, st.session_id);
+        if end != 0 && !window_open(app.now(), start, end) {
             return Response::error(409, "考试已结束");
         }
         let Some(item) = st
@@ -770,14 +833,24 @@ fn save_answer(app: &App, req: &Request) -> Response {
     //
     // 这里用 durable=false：保存是前端 600ms 防抖一次的高频操作，每次都 fsync 会把磁盘打满；
     // 进程崩溃不丢（页缓存还在），只有断电可能丢最近几秒——仍远好于「只在交卷时落盘」。
-    if let Err(e) = app.write_state(student_id, session_id, &answers, false, None, false) {
+    match app.persist_state(
+        Some(&token),
+        student_id,
+        session_id,
+        &answers,
+        false,
+        None,
+        false,
+    ) {
+        Ok(PersistOutcome::Written) => Response::json(200, json!({"ok": true})),
+        // 写盘期间被交卷抢占了：以内存为准，这次保存不算数（客户端该停手了）。
+        Ok(PersistOutcome::SkippedSubmitted) => Response::error(409, "已交卷，不能再修改"),
         // 内存里已经有了，但磁盘上没有：必须让学生知道，让他重试这一题。
-        return Response::error(
+        Err(e) => Response::error(
             500,
             format!("答案已收下但状态写盘失败：{e}（请重试这一题）"),
-        );
+        ),
     }
-    Response::json(200, json!({"ok": true}))
 }
 
 fn submit(app: &App, req: &Request) -> Response {
@@ -794,13 +867,14 @@ fn submit(app: &App, req: &Request) -> Response {
     // 把「加密 + 写盘」放到锁外：否则 50 个人同时交卷时，第一个人加密答题卡的几十毫秒里
     // 其余 49 个请求全堵在锁上，页面表现为「点了没反应」。
     let snapshot = {
-        let mut state = app.state.lock().unwrap();
+        let mut state = app.lock_state();
         let Some(st) = state.students.get_mut(&token) else {
             return Response::error(401, "登录已失效");
         };
         if st.submitted {
             if let Some(name) = st.exported.clone() {
-                if app.answers_dir.join(&name).is_file() {
+                // 不能只看「文件存在」：断电可能留下半截卡，那样学生会永远交不了卷。
+                if is_valid_sheet(&app.answers_dir.join(&name)) {
                     return Response::json(200, json!({"ok": true, "already": true, "file": name}));
                 }
                 // 状态说已交卷，但答题卡文件不见了（被手工删掉、盘符换了、目录被清）。
@@ -835,7 +909,7 @@ fn submit(app: &App, req: &Request) -> Response {
     );
 
     // 第三段（持锁）：回填结果。
-    let mut state = app.state.lock().unwrap();
+    let mut state = app.lock_state();
     let Some(st) = state.students.get_mut(&snapshot.token) else {
         // 锁外被重新登录顶掉：卡已经写出、事件也记了，无需回填。
         return match result {
@@ -854,6 +928,38 @@ fn submit(app: &App, req: &Request) -> Response {
             Response::error(500, e)
         }
     }
+}
+
+/// 写文件并 `fsync`（交卷用）。
+///
+/// 必须用写句柄：只读句柄的 `sync_all()` 在 Windows 上返回 `ERROR_ACCESS_DENIED`，
+/// 等于根本没有刷盘——v1.4.5 的「durable fsync」就是这么空转的。
+fn write_file_durable(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// 答题卡文件看起来是否完整（魔数 `EESANS02`）。用于「已交卷」幂等分支：
+/// 断电可能留下半截文件，此时必须当作**没有卡**并重写，否则学生永远交不了卷。
+fn is_valid_sheet(path: &std::path::Path) -> bool {
+    use std::io::Read as _;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic).is_ok() && magic == *common::answer_sheet::MAGIC
+}
+
+/// 自动收卷连续失败后的重试间隔（秒）：15 s → 30 → 60 → 120 → 300 封顶。
+///
+/// 为什么要退避：失败通常是持续状态（磁盘满、目录只读）。不退避就是每 15 秒做一次
+/// 「序列化 + AES-GCM + 写盘」，50 人规模下会持续加压并把日志刷满。
+fn backoff_secs(failures: u32) -> u64 {
+    const BASE: u64 = 15;
+    const CAP: u64 = 300;
+    BASE.saturating_mul(1u64 << failures.min(5)).min(CAP)
 }
 
 /// 生成答题卡 → 落盘 → 写状态 → 记事件，**全程不接触 `App::state` 锁**。
@@ -891,14 +997,32 @@ fn seal_and_export(
         session_id,
         &sheet.paper_fingerprint[..8]
     );
-    std::fs::write(app.answers_dir.join(&name), &bytes)
+    // 先落卡、再写状态：状态里的「已交卷」只有在卡确实写成功之后才成立；
+    // 而且必须 fsync——交卷瞬间断电若留下半截卡，而状态记着已交卷，学生就再也交不了。
+    write_file_durable(&app.answers_dir.join(&name), &bytes)
         .map_err(|e| format!("写入答题卡失败：{e}"))?;
-    app.write_state(student_id, session_id, answers, true, Some(&name), true)
-        .map_err(|e| format!("保存状态失败：{e}"))?;
+    app.persist_state(
+        None,
+        student_id,
+        session_id,
+        answers,
+        true,
+        Some(&name),
+        true,
+    )
+    .map_err(|e| format!("保存状态失败：{e}"))?;
     let _ = app.log_event(student_id, "submit", &name);
     #[cfg(test)]
     seal_hook::notify(false);
     Ok(name)
+}
+
+/// 一次状态写盘的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistOutcome {
+    Written,
+    /// 期间已被交卷抢占：放弃这次「未交卷」快照。
+    SkippedSubmitted,
 }
 
 /// 待冻结学生的数据快照（交卷接口与自动收卷共用）。
@@ -942,6 +1066,42 @@ impl App {
         Some((answers, submitted, exported))
     }
 
+    /// 串行化写状态：先拿写锁，再按需短复查内存里的 `submitted`。
+    ///
+    /// 「保存」与「交卷」都可能在锁外写盘。若保存的「未交卷」快照后落地，就会把
+    /// 交卷写下的「已交卷」覆盖回去（重启后学生回到可编辑状态、已冻结的卡被改写）。
+    /// 这里用一把写盘锁串行化，并在写前复查：只要内存里已被交卷，就丢弃这次快照。
+    #[allow(clippy::too_many_arguments)]
+    fn persist_state(
+        &self,
+        token: Option<&str>,
+        student_id: u64,
+        session_id: u32,
+        answers: &BTreeMap<String, String>,
+        submitted: bool,
+        exported: Option<&str>,
+        durable: bool,
+    ) -> std::io::Result<PersistOutcome> {
+        let _write_guard = self
+            .state_write
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !submitted && let Some(token) = token {
+            let state = self.lock_state();
+            if state
+                .students
+                .get(token)
+                .is_some_and(|student| student.submitted)
+            {
+                return Ok(PersistOutcome::SkippedSubmitted);
+            }
+        }
+        self.write_state(
+            student_id, session_id, answers, submitted, exported, durable,
+        )?;
+        Ok(PersistOutcome::Written)
+    }
+
     /// 把作答状态写盘（加密 + 原子替换 + 收紧权限）。
     ///
     /// 参数是**数据**而不是 `&Student`：交卷、自动收卷与每次保存都要在锁外写状态，
@@ -966,11 +1126,25 @@ impl App {
             "exported": exported,
         });
         let path = self.state_path(student_id, session_id);
-        let tmp = path.with_extension("json.tmp");
+        // 序号让并发写的临时名互不相同（历史上两个写者共用一个 `.tmp`，
+        // 后 rename 的那个会因源文件已被移走而失败 → 学生偶发 500）。
+        let seq = self
+            .tmp_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("json.{seq}.tmp"));
         let plain = payload.to_string().into_bytes();
         let sealed = crypto::encrypt(&self.state_key, &plain, b"web-state")
             .map_err(|e| std::io::Error::other(format!("加密状态失败：{e}")))?;
-        std::fs::write(&tmp, sealed)?;
+        {
+            use std::io::Write as _;
+            // 必须用写句柄：只读句柄的 sync_all 在 Windows 上是 ERROR_ACCESS_DENIED，
+            // 等于根本没刷盘（v1.4.5 的 durable 就是这么空转的）。
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&sealed)?;
+            if durable {
+                f.sync_all()?;
+            }
+        }
         // 先收紧临时文件、再改名：rename 保留文件自身的 ACL，目标文件从出现的
         // 第一刻起就是「仅当前用户」。目录 DACL 的继承本来也管用，这里是双保险
         // （覆盖目录被替换成继承位不同、或状态目录被 --state-dir 指到别处的情况）。
@@ -979,9 +1153,6 @@ impl App {
             eprintln!("⚠ 状态文件权限收紧失败 {}：{e}", tmp.display());
         }
         std::fs::rename(&tmp, &path)?;
-        if durable {
-            let _ = std::fs::File::open(&path).and_then(|f| f.sync_all());
-        }
         Ok(())
     }
 
@@ -1017,7 +1188,7 @@ fn time_info(app: &App, req: &Request) -> Response {
     let Some(token) = cookie_token(req) else {
         return Response::error(401, "未登录");
     };
-    let state = app.state.lock().unwrap();
+    let state = app.lock_state();
     let Some(st) = state.students.get(&token) else {
         return Response::error(401, "登录已失效");
     };
@@ -1036,6 +1207,14 @@ fn time_info(app: &App, req: &Request) -> Response {
     )
 }
 
+/// 场次窗口是否开着：`[start, end)`，与客户端 `decide_session` 同口径。
+///
+/// 抽成纯函数是为了能直接断言边界（同一秒 now == end 必须算「已结束」）；
+/// 否则只能靠 sleep 去卡那一秒，测试会飘。
+fn window_open(now: u64, start: u64, end: u64) -> bool {
+    now >= start && now < end
+}
+
 /// 周期任务：到点自动收卷 + 清理长时间无活动的 token。
 ///
 /// **锁分段**（v1.4.4）：原来是一把锁从收集做到冻结，冻结一个人要 AES-GCM + 两次写盘
@@ -1046,17 +1225,19 @@ fn time_info(app: &App, req: &Request) -> Response {
 /// 4. 再短暂持锁回填 `submitted` / `exported`。
 fn sweep_tick(app: &App) {
     let now = app.now();
-    // 场次窗口在进程生命周期内不变，锁外解析一次即可（每个学生都解析一次纯属浪费）。
-    let windows = session_windows(app);
+    // 窗口在启动时缓存好了（`App::windows`），这里只读，不再解密 header。
+    let windows = &app.windows;
 
     // 第一阶段：持锁只做内存操作。
     let mut pending: Vec<FreezeSnapshot> = Vec::new();
     let mut stale: Vec<String> = Vec::new();
     {
-        let mut state = app.state.lock().unwrap();
+        let mut state = app.lock_state();
         for (token, st) in state.students.iter() {
             let end = windows.get(&st.session_id).map_or(0, |(_, end)| *end);
-            if end != 0 && now > end && !st.submitted {
+            // 窗口与客户端同口径：[start, end)。失败过的学生按退避时间跳过。
+            if end != 0 && !window_open(now, 0, end) && !st.submitted && now >= st.finalize_retry_at
+            {
                 pending.push(FreezeSnapshot {
                     token: token.clone(),
                     student_id: st.student_id,
@@ -1103,7 +1284,7 @@ fn sweep_tick(app: &App) {
             &snap.answers,
             now,
         );
-        let mut state = app.state.lock().unwrap();
+        let mut state = app.lock_state();
         let Some(st) = state.students.get_mut(&snap.token) else {
             // 锁外被清理或被重新登录顶掉：答题卡与事件已经落盘，不必再回填内存。
             continue;
@@ -1112,26 +1293,44 @@ fn sweep_tick(app: &App) {
             Ok(name) => {
                 st.exported = Some(name);
                 st.last_seen = now;
+                st.finalize_failures = 0;
+                st.finalize_retry_at = 0;
             }
             Err(e) => {
                 // 撤回抢占，让下一轮重试；否则这个学生会一直显示「已交卷」却没有答题卡。
                 st.submitted = false;
+                st.finalize_failures = st.finalize_failures.saturating_add(1);
+                st.finalize_retry_at = now.saturating_add(backoff_secs(st.finalize_failures));
                 eprintln!(
-                    "自动收卷失败（学号 {}，场次 {}）：{e}",
-                    snap.student_id, snap.session_id
+                    "自动收卷失败（学号 {}，场次 {}，第 {} 次）：{e}",
+                    snap.student_id, snap.session_id, st.finalize_failures
                 );
             }
         }
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
+/// 一次请求读取的结果。
+///
+/// 显式区分「太胖」「分块传输」「对端关闭」，是为了能给出**对用户有用**的状态码：
+/// 以前这些都变成 `Err`，连接被直接关掉，客户端只看到连接重置。
+enum ReadOutcome {
+    Request(Request),
+    /// 声明长度超过 `MAX_BODY`（不读 body，直接 413）。
+    Oversized,
+    /// `Transfer-Encoding: chunked`（暂不支持，411 而不是误导性的 400）。
+    Chunked,
+    /// 对端在发请求前关闭。
+    Closed,
+}
+
+fn read_request(stream: &mut TcpStream) -> Result<ReadOutcome> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let head_end = loop {
         let n = stream.read(&mut chunk)?;
         if n == 0 {
-            return Ok(None);
+            return Ok(ReadOutcome::Closed);
         }
         buf.extend_from_slice(&chunk[..n]);
         if let Some(pos) = find_head_end(&buf) {
@@ -1157,11 +1356,20 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
             headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
         }
     }
+    if headers
+        .get("transfer-encoding")
+        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
+    {
+        return Ok(ReadOutcome::Chunked);
+    }
     let len: usize = headers
         .get("content-length")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    anyhow::ensure!(len <= MAX_BODY, "请求体过大");
+    if len > MAX_BODY {
+        // 先判后读：不能为了回一个 413 先把 20 MiB 读进内存。
+        return Ok(ReadOutcome::Oversized);
+    }
     let body_start = head_end + 4;
     while buf.len() < body_start + len {
         let n = stream.read(&mut chunk)?;
@@ -1171,7 +1379,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
         buf.extend_from_slice(&chunk[..n]);
     }
     let body = buf[body_start..(body_start + len).min(buf.len())].to_vec();
-    Ok(Some(Request {
+    Ok(ReadOutcome::Request(Request {
         method,
         path,
         headers,
@@ -1183,10 +1391,8 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
 /// 请求的真实来源 IP。
 ///
 /// 必须是 TCP 对端地址——**不能**用 `X-Forwarded-For`（可伪造，等于让攻击者自选限速桶）。
-/// v1.4.5 及以前这里被硬编码成 `127.0.0.1`：于是全场所有学生共用一个登录限速桶，
-/// 第 21 个学生起就集体 429（40 人演练直接暴露）；「按 IP 限速」形同虚设。
-///
-/// 取不到对端地址（连接已断）时退回本机地址，宁可少限制一次也不要 panic。
+/// v1.4.5 及以前这里被硬编码成 `127.0.0.1`：全场所有学生共用一个登录限速桶，
+/// 第 21 个学生起就集体 429（40 人演练直接暴露）。
 fn peer_ip(stream: &TcpStream) -> IpAddr {
     stream
         .peer_addr()
@@ -1223,6 +1429,7 @@ fn status_text(code: u16) -> &'static str {
         401 => "Unauthorized",
         404 => "Not Found",
         409 => "Conflict",
+        411 => "Length Required",
         413 => "Payload Too Large",
         429 => "Too Many Requests",
         500 => "Internal Server Error",

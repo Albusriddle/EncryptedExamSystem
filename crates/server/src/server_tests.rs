@@ -84,6 +84,8 @@ impl Fixture {
         let payload = build_payload(&banks, &pins, now.saturating_sub(60), now + 3600);
         let k_manifest = container::manifest_key(&MASTER);
         let state_key = *crypto::hkdf_derive(&k_manifest, b"web-state", "web-state");
+        let (header, _) = container::parse_header(&payload, &k_manifest).expect("解析测试 payload");
+        let windows = session_windows_from(&header);
 
         let app = Arc::new(App {
             payload,
@@ -97,9 +99,12 @@ impl Fixture {
             conns: std::sync::atomic::AtomicUsize::new(0),
             gate: Gate::new(4),
             event_log: Mutex::new(()),
+            state_write: Mutex::new(()),
+            tmp_seq: std::sync::atomic::AtomicU64::new(0),
             // 真实默认是 60；这里收窄到 20，让「第 21 次 429」的用例短一点。
             login_rate_limit: 20,
             state: Mutex::new(State::default()),
+            windows,
         });
 
         Self {
@@ -131,8 +136,11 @@ impl Fixture {
             conns: std::sync::atomic::AtomicUsize::new(0),
             gate: Gate::new(4),
             event_log: Mutex::new(()),
+            state_write: Mutex::new(()),
+            tmp_seq: std::sync::atomic::AtomicU64::new(0),
             login_rate_limit: old.login_rate_limit,
             state: Mutex::new(State::default()),
+            windows: old.windows.clone(),
         });
     }
 
@@ -231,6 +239,16 @@ impl Fixture {
     ///
     /// 只替换 `App::payload`：已登录学生的内存试卷不受影响，场次窗口（`session_window`）
     /// 每次调用都从 payload 重新解析，所以下一次判定就会看到「已结束」。
+    /// 把场次窗口设成任意区间（重打包 payload 并刷新窗口缓存）。
+    fn set_window(&mut self, start: u64, end: u64) {
+        let payload = build_payload(&self.banks, &self.pins, start, end);
+        let app = Arc::get_mut(&mut self.app).expect("换 payload 时不应有其它 Arc 持有者");
+        app.payload = payload;
+        let (header, _) = container::parse_header(&app.payload, &app.k_manifest)
+            .expect("解析新 payload 的 header");
+        app.windows = session_windows_from(&header);
+    }
+
     fn expire_session(&mut self) {
         let now = unix_now();
         let payload = build_payload(
@@ -241,6 +259,10 @@ impl Fixture {
         );
         let app = Arc::get_mut(&mut self.app).expect("换 payload 时不应有其它 Arc 持有者");
         app.payload = payload;
+        // 窗口现在启动时缓存：换 payload 必须同步换缓存，否则「过期」不会生效。
+        let (header, _) = container::parse_header(&app.payload, &app.k_manifest)
+            .expect("解析新 payload 的 header");
+        app.windows = session_windows_from(&header);
     }
 }
 
@@ -819,9 +841,18 @@ fn request_peer_comes_from_the_socket() {
     client
         .write_all(b"GET / HTTP/1.1\r\nHost: drill\r\n\r\n")
         .expect("发送请求");
-    let req = read_request(&mut accepted)
-        .expect("解析请求")
-        .expect("应解析出一个请求");
+    let req = match read_request(&mut accepted).expect("解析请求") {
+        ReadOutcome::Request(req) => req,
+        other => panic!(
+            "应解析出一个请求，实际 {}",
+            match other {
+                ReadOutcome::Closed => "Closed",
+                ReadOutcome::Oversized => "Oversized",
+                ReadOutcome::Chunked => "Chunked",
+                ReadOutcome::Request(_) => unreachable!(),
+            }
+        ),
+    };
 
     let expected: IpAddr = target.parse().expect("本机地址应能解析");
     assert_eq!(req.peer, expected, "peer 必须是 TCP 对端地址");
@@ -1253,4 +1284,166 @@ fn automatic_export_does_not_hold_state_lock() {
         "密封阶段不得持有 App::state 锁（旧实现「锁内冻结」在这里会是 false）"
     );
     assert_eq!(f.eea_files().len(), 1, "自动收卷仍应写出答题卡");
+}
+
+// ---------------------------------------------------------------------------
+// 9. 窗口边界 / 收卷退避 / 写盘时序 / 请求体上限（v1.4.8）
+// ---------------------------------------------------------------------------
+
+/// 场次窗口是右开区间：`now == end` 必须算「已结束」。
+///
+/// 为什么单独测：改前服务端用 `now > end`、客户端用 `[start, end)`，同一秒两端
+/// 判定相反（网页端能比离线端多答一秒）。边界只能靠纯函数断言，sleep 卡秒会飘。
+#[test]
+fn window_boundaries_are_half_open() {
+    assert!(window_open(100, 100, 200), "start 那一秒算开着");
+    assert!(window_open(199, 100, 200), "end 前 1 秒仍开着");
+    assert!(!window_open(200, 100, 200), "end 那一秒必须算结束");
+    assert!(!window_open(99, 100, 200), "start 之前不算");
+    assert!(!window_open(201, 100, 200));
+}
+
+/// 集成层确认：窗口到点后登录被拒（`expire_session` 覆盖 end < now，这里覆盖 end ≤ now）。
+#[test]
+fn login_rejected_after_window_end() {
+    let mut f = Fixture::new("window-end-login");
+    let now = unix_now();
+    f.set_window(now.saturating_sub(600), now);
+    // 睡到下一整秒，确保 app.now() >= end（场次时间只有整秒精度）。
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert_status(&f.login(STUDENT), 401, "窗口结束后必须拒绝登录");
+}
+
+/// 自动收卷失败的退避：15→30→60→120→240→300 封顶。
+#[test]
+fn finalize_backoff_grows_then_caps() {
+    assert_eq!(backoff_secs(1), 30);
+    assert_eq!(backoff_secs(2), 60);
+    assert_eq!(backoff_secs(3), 120);
+    assert_eq!(backoff_secs(4), 240);
+    assert_eq!(backoff_secs(5), 300);
+    assert_eq!(backoff_secs(99), 300, "封顶 5 分钟");
+}
+
+/// 交卷之后，任何「未交卷」快照都不许再落盘。
+///
+/// 为什么：保存与交卷都在锁外写盘，保存的快照若后落地，会把「已交卷」覆盖回
+/// 「未交卷」——重启后学生回到可编辑状态，已冻结的卡还会被同名校验覆盖。
+#[test]
+fn stale_snapshot_cannot_overwrite_submitted_state() {
+    let f = Fixture::new("stale-snapshot");
+    let token = f.login_ok(STUDENT);
+    assert_status(&f.submit(&token), 200, "首次交卷应成功");
+
+    let answers = BTreeMap::from([("q-single".to_string(), "B".to_string())]);
+    let outcome = f
+        .app
+        .persist_state(
+            Some(&token),
+            STUDENT,
+            SESSION_ID,
+            &answers,
+            false,
+            None,
+            true,
+        )
+        .expect("写盘不应报错");
+    assert_eq!(
+        outcome,
+        PersistOutcome::SkippedSubmitted,
+        "交卷后旧快照必须被丢弃"
+    );
+
+    let (_, submitted, exported) = f
+        .app
+        .load_state(STUDENT, SESSION_ID)
+        .expect("状态文件应存在");
+    assert!(submitted, "磁盘状态必须还是已交卷");
+    assert!(exported.is_some(), "导出的文件名必须在");
+}
+
+/// 「已交卷」的幂等分支要校验卡文件完整性，不能只看文件是否存在。
+#[test]
+fn sheet_file_validity_requires_magic() {
+    let f = Fixture::new("sheet-magic");
+    let dir = f.app.answers_dir.clone();
+    std::fs::create_dir_all(&dir).expect("建目录");
+
+    let good = dir.join("good.eea");
+    let mut bytes = Vec::from(&common::answer_sheet::MAGIC[..]);
+    bytes.extend_from_slice(&[0u8; 32]);
+    std::fs::write(&good, &bytes).expect("写卡");
+    assert!(is_valid_sheet(&good), "带魔数的卡应判定有效");
+
+    let bad = dir.join("bad.eea");
+    std::fs::write(&bad, b"NOTASHEET").expect("写坏卡");
+    assert!(!is_valid_sheet(&bad), "魔数不对必须判无效");
+
+    let short = dir.join("short.eea");
+    std::fs::write(&short, b"EES").expect("写半截卡");
+    assert!(!is_valid_sheet(&short), "半截卡必须判无效");
+
+    assert!(
+        !is_valid_sheet(&dir.join("missing.eea")),
+        "不存在必须判无效"
+    );
+}
+
+/// 请求体超过上限：回 413，而不是把连接直接掐掉。
+#[test]
+fn oversized_body_gets_413() {
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+
+    let f = Fixture::new("oversize-body");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定");
+    let port = listener.local_addr().expect("地址").port();
+    let mut client = TcpStream::connect(("127.0.0.1", port)).expect("连接");
+    let (server_side, _) = listener.accept().expect("accept");
+
+    // 只发头，不发 body：服务端应在读到 Content-Length 时就决定 413。
+    let head = format!(
+        "POST /api/login HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
+        MAX_BODY + 1
+    );
+    client.write_all(head.as_bytes()).expect("写请求头");
+    handle(Arc::clone(&f.app), server_side).expect("处理请求");
+
+    let mut buf = [0u8; 512];
+    let n = client.read(&mut buf).expect("读响应");
+    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+    assert!(
+        text.starts_with("HTTP/1.1 413"),
+        "超限必须回 413，实际：{}",
+        &text[..text.len().min(80)]
+    );
+}
+
+/// `Transfer-Encoding: chunked` 回 411（明确告诉客户端带 Content-Length）。
+#[test]
+fn chunked_body_gets_411() {
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+
+    let f = Fixture::new("chunked-body");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定");
+    let port = listener.local_addr().expect("地址").port();
+    let mut client = TcpStream::connect(("127.0.0.1", port)).expect("连接");
+    let (server_side, _) = listener.accept().expect("accept");
+
+    client
+        .write_all(
+            b"POST /api/login HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        )
+        .expect("写请求");
+    handle(Arc::clone(&f.app), server_side).expect("处理请求");
+
+    let mut buf = [0u8; 512];
+    let n = client.read(&mut buf).expect("读响应");
+    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+    assert!(
+        text.starts_with("HTTP/1.1 411"),
+        "chunked 必须回 411，实际：{}",
+        &text[..text.len().min(80)]
+    );
 }

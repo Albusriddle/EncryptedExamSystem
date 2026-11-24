@@ -24,8 +24,9 @@
 
 ```bash
 # 1. 先构建考试包（教师端正常流程也可）
-exam-builder build --manifest live.json --banks banks \
-  --stub exam-client.exe --out StudentClient.exe \
+#    master 只走环境变量：`--master` 会出现在进程列表里（仓库安全红线）
+EXAM_MASTER=<64 位主密钥> exam-builder build --manifest live.json --banks banks \
+  --stub stub-template.exe --out StudentClient.exe \
   --emit-keyfile key.txt
 
 # 2. 启动服务（教师机）
@@ -62,7 +63,7 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 注意这一步发生在**绑定端口之前**：无外网的机房最坏要等约 6 秒（两轮 × 3 秒超时），
 这期间端口还不接受连接。请等到打印出「考试服务已启动」再通知学生访问。
 
-## 接口（原型）
+## 接口
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -73,20 +74,22 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `POST` | `/api/submit` | 冻结并写出 `.eea` |
 | `GET` | `/api/time` | 服务器时间与剩余秒数；附带 `time_mode` / `clock_offset_secs` 便于排障 |
 
-## 已具备（阶段 1 进行中）
+## 已具备（阶段 1）
 
 - 答案落盘：`<answers-dir>/state/<学号>-<场次>.json`，原子写 + 交卷幂等；**每次保存都落盘**
   （v1.4.5 起，前端 600 ms 防抖；交卷路径额外 fsync）——教师机崩溃 / 断电 / 误杀进程后
   重登即可拿回未交卷的作答；
 - 服务重启后重新登录会恢复答案与交卷状态；
-- CSRF：所有写接口要求 `X-EES-CSRF: 1`；
+- CSRF：作答 / 交卷要求 `X-EES-CSRF: 1`；登录接口不校验（见已知限制）；
 - 单会话：同一学号重新登录会顶掉旧 token；
 - 登录限速：按**真实对端 IP**（`TcpStream::peer_addr`）与学号各一分钟窗口；
   默认每 IP 60 次/分钟、每学号 10 次/分钟；
 - 到点自动冻结：过期后首次请求会自动导出答题卡；后台线程每 15 秒收一轮，加密与写盘
   在全局状态锁**之外**进行（v1.4.4），不会堵住其他学生的请求；
 - 事件日志：`<answers-dir>/events.jsonl`（并发写有锁 + 整行一次写出，v1.4.5）；
-- 代码题：CodeMirror 5（行号 + C/C++/Java/JS/Go/Rust/Python 高亮），静态资源内嵌；
+- 代码题：CodeMirror 5（行号 + C 系语言用 `clike` 近似高亮 + Python 专属高亮），静态资源内嵌；
+- **写盘时序（v1.4.8）**：保存与交卷的状态写盘串行化并复查，「已交卷」不会被旧快照覆盖；
+  答题卡先 fsync 再记已交卷，半截文件会被识别并重写；
 - **启动校时（v1.4.3）**：三源中位数校验网络时间，偏差存成时钟偏移供场次判定使用；
 - **状态文件权限收紧（v1.4.3）**：Windows 受保护 DACL（仅当前用户）/ Unix `0600`、`0700`，
   旧文件在启动时补收紧。
@@ -98,9 +101,10 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 - 多标签页只靠单会话 token 顶掉旧页面，没有强制关闭；
 - 隔离局域网没有外网时取时必然失败：默认档只告警，此时场次判定退回教师机系统时钟，
   需要现场确认时钟（`--time-check require` 可让它在取时失败时拒绝启动）；
-- 换一个 Windows 账户启动服务会读不到旧状态文件（受保护 DACL 只给原账户），断线恢复随之失效。
+- 换一个 Windows 账户启动服务会读不到旧状态文件（受保护 DACL 只给原账户），断线恢复随之失效；
+- 登录接口不校验 CSRF（同站脚本可代登录；`SameSite=Strict` 已缓解，但不算密码学边界）；
+- 交卷不受场次时间窗限制：到点后仍可补交（便于自动收卷失败时补救），但过期后不能再改答案。
 
-## 下一步（阶段 1）
+## 下一步（阶段 1 剩余）
 
-axum/tokio + SQLite（WAL）+ 管理端「网页考试」入口 + CodeMirror 5 + 登录限速/CSRF +
-断线重连 + 导出/核对 + 文档。
+axum/tokio + SQLite（WAL）+ 管理端监控页（在线人数 / 交卷进度 / 逐人导出）。
