@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/common", "crates/builder", "crates/client", "crates/server"]
 
 [workspace.package]
-version = "1.4.12"
+version = "1.5.0"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -26,3 +26,12 @@ argon2 = "0.5"
 # 信封生成并行化：每生一次 Argon2id(64MiB)，1000 人串行需 91 秒。
 rayon = "1"
 ed25519-dalek = { version = "2", features = ["std"] }
+
+# ring 的 C 代码在本机 MSVC 上带 /Z7（调试信息）编译会报 D8050：
+# 「无法执行 c1.dll：未能将命令行放入调试记录中」。ring 的 C 代码不需要调试信息，
+# 关掉它的 debug 即可让 debug/test 构建也能编过（release 本来就不带 /Z7）。
+[profile.dev.package.ring]
+debug = false
+
+[profile.test.package.ring]
+debug = false

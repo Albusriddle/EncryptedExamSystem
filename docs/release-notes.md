@@ -6,11 +6,56 @@
 - 命令行：`exam-builder`（打包、校验、导出 PIN、考后看原卷、校验答题卡）
 - 学生端：`exam-client`（单 exe，双击运行，按场次与网络时间解锁）
 
-> 当前版本 **1.4.12**。Release 正文由 `scripts/release_body.py` 从本文件提取
+> 当前版本 **1.5.0**。Release 正文由 `scripts/release_body.py` 从本文件提取
 > **当前版本那一节**，因此 `## 更新摘要（vX.Y.Z）` 小节必须存在且唯一。
 >
-> **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 60 个版本，最新在前）；
+> **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 61 个版本，最新在前）；
 > 更早版本（v0.13.2 及以前）未逐条整理，需要时查 `git tag` 与 `git log`。
+
+## 更新摘要（v1.5.0）
+
+本版把网页考试**默认改成 HTTPS**（自签证书），因为明文 HTTP 下同网段的人能直接抓到
+学生的作答、PIN 与会话 cookie。没有新增模块。
+
+### 默认 HTTPS：启动即生成自签证书
+
+- `exam-server` 启动时若 `<answers-dir>/tls/` 没有证书，**自动生成**一张 ECDSA P-256 自签证书：
+  - SAN 含本机局域网 IP、`127.0.0.1`、`localhost`（少一个就会报「名称不匹配」）；
+  - EKU `serverAuth` + keyUsage 合规——缺了 Chrome 会报**不可绕过**的 `ERR_SSL_KEY_USAGE_INCOMPATIBLE`；
+  - 有效期 365 天，到期重启自动重生成；私钥 0600（Windows 受保护 DACL）。
+- 启动横幅打印 `https://<IP>:8443/` 与**证书指纹（SHA-256）**；页面上也有一行提示，
+  告诉学生「点『高级 → 继续前往』」，并提醒 iPad/iPhone 用 Safari（iOS 上的 Chrome 无法绕过）。
+- 支持 `--tls-cert/--tls-key`（学校内网 CA 签发的证书）、`--tls-host`（SAN 自定义）、
+  `--gen-cert`（只生成证书）。`--tls off` 才回到明文（启动横幅与日志会打醒目警告）。
+
+### 明文端口只做 301
+
+- `--http-redirect-port`（默认 8080）起一个**只回跳转**的监听器：任何请求都 301 到 HTTPS，
+  并保留原路径；它不返回页面、不碰状态，所以旧书签不会断，也不构成明文数据面。
+
+### 其它
+
+- 会话 cookie 在 TLS 下加 `Secure`（v1.4.12 的 60 分钟滑动续期、交卷/退出即失效逻辑不变）；
+- 管理端「网页考试」对话框：默认端口 8443、新增「使用 HTTPS」勾选框、地址显示 `https://`，
+  底部说明改为自签证书的使用方式；
+- `scripts/smoke-web.sh` 改走 HTTPS（顺带验证「自动生成证书 → 握手 → 登录/作答/交卷」全链路）；
+  `scripts/drill_web.py` 显式 `--tls off`（演练测并发与崩溃恢复，不掺 TLS 握手）。
+
+### 验证
+
+- Rust 341（+6）：`tls` 模块 3 条（生成/加载、指纹格式、私钥权限、IP SAN）+ 3 条服务端用例
+  （TLS 端到端登录并断言 `; Secure`、`Secure` 只随 TLS 出现、明文跳转端口只回 301）；
+- 真浏览器（headless Chromium）：访问 `https://127.0.0.1:18443/` → 出现「您的连接不是私密连接」
+  （`ERR_CERT_AUTHORITY_INVALID`）→ 点「高级 → 继续前往」→ 页面加载并显示自签提示 →
+  登录 → 作答 → 顶栏显示「已保存」；`curl` 侧：跳转端口回 301 且保留路径、
+  登录响应带 `Max-Age=3600; Secure`；
+- 门禁：fmt / clippy / cargo test 341 / pytest 423 / verify-embed 17 项 / preflight 15 项，
+  `smoke-web.sh`（HTTPS）与 `drill --students 6` 通过。
+
+### 已知限制
+
+- 自签证书挡**被动嗅探**，不挡**主动中间人**——除非学生核对指纹（教师屏会显示）；
+- 受管 Chromebook 的策略可能禁止「继续」；这类设备需换设备或用 `--tls off` 临时排障。
 
 ## 更新摘要（v1.4.12）
 
