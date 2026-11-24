@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/common", "crates/builder", "crates/client", "crates/server"]
 
 [workspace.package]
-version = "1.4.9"
+version = "1.4.10"
 edition = "2024"
 license = "Apache-2.0"
 
