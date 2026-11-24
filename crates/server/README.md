@@ -71,7 +71,7 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 |---|---|---|
 | `GET` | `/` | 登录页 + 作答页 |
 | `POST` | `/api/login` | `{student_id, pin?}`，成功返回 HttpOnly cookie |
-| `GET` | `/api/paper` | 本人试卷 + 已保存答案（不含标准答案） |
+| `GET` | `/api/paper` | 本人试卷 + 已保存答案（不含标准答案）；另给 `answer_text`（填空/改错的纯文本显示值）、`review`（`none`/`free`）。已交卷且策略不允许回看时 `paper`/`answers`/`answer_text` 都是 `null` |
 | `PUT` | `/api/answer` | `{qid, value}`，单题 ≤1 MiB，整卡 ≤16 MiB |
 | `POST` | `/api/submit` | 冻结并写出 `.eea` |
 | `GET` | `/api/time` | 服务器时间与剩余秒数；附带 `time_mode` / `clock_offset_secs` 便于排障 |
@@ -83,6 +83,14 @@ exam-server --package StudentClient.exe --keyfile key.txt \
   重登即可拿回未交卷的作答；
 - 服务重启后重新登录会恢复答案与交卷状态；
 - CSRF：**登录 / 作答 / 交卷都要求 `X-EES-CSRF: 1`**（防登录 CSRF：否则任意网页都能用别人的学号把受害者登进攻击者的会话）；
+- **回看策略（v1.4.11）**：服务端按包里的 `student_review` 决定交卷后还下不下发卷面；
+  默认 `none`（「仅教师可查看原卷」）时，交卷后 `/api/paper` 只返回 `submitted`/`review`，
+  网页端切到「已交卷」页。以前网页端完全忽略这个策略；
+- **网页端作答控件（v1.4.11）**：单选/判断用 radio、多选用 checkbox（答案是 `B` / `AC`），
+  填空/改错用 textarea（服务端把纯文本规范化成离线端的 JSON 编码，判分口径一致）；
+- **断线提示（v1.4.11）**：保存失败时底部红色横幅说明「作答暂存在本页，正在自动重试」，
+  退避重试（2 s→20 s）；剩余时间改为本地倒计时 + 15 s 校准，断线也照样走；
+  教师机重启导致会话失效时，横幅给「重新登录」按钮（答案在服务端磁盘上，重登即恢复）；
 - 单会话：同一学号重新登录会顶掉旧 token；
 - 登录限速：按**真实对端 IP**（`TcpStream::peer_addr`）与学号各一分钟窗口；
   默认每 IP 60 次/分钟、每学号 10 次/分钟；

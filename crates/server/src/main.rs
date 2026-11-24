@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use common::answer_sheet::{encode_fixes, encode_parts};
 use common::{answer_sheet, container, crypto, picker};
 use rand::RngCore;
 use serde_json::{Value, json};
@@ -156,6 +155,9 @@ struct App {
     windows: HashMap<u32, (u64, u64)>,
     /// 自动收卷失败的退避状态（学号 → (失败次数, 下次重试时刻)）。
     finalize_retry: Mutex<HashMap<u64, (u32, u64)>>,
+    /// 包里的「学生回看」策略。离线端一直按它控制交卷后能不能看卷；网页端 v1.4.10
+    /// 及以前**完全忽略**它（交卷后照样能看全卷），与「仅教师可查看原卷」的默认相反。
+    review: common::model::StudentReviewPolicy,
 }
 
 #[derive(Default)]
@@ -358,6 +360,7 @@ fn main() -> Result<()> {
         state: Mutex::new(State::default()),
         windows,
         finalize_retry: Mutex::new(HashMap::new()),
+        review: header.student_review,
     });
 
     let listener = bind_listener(&cli.bind, cli.port)?;
@@ -731,21 +734,107 @@ fn paper(app: &App, req: &Request) -> Response {
     let Some(st) = state.students.get_mut(&token) else {
         return Response::error(401, "登录已失效");
     };
-    st.last_seen = app.now();
+    let now = app.now();
+    st.last_seen = now;
     let (start, end) = session_window(app, st.session_id).unwrap_or((0, 0));
-    Response::json(
-        200,
-        json!({
-            "student_id": st.student_id,
-            "session_id": st.session_id,
-            "server_time": app.now(),
-            "start_unix": start,
-            "end_unix": end,
-            "submitted": st.submitted,
-            "paper": st.paper,
-            "answers": st.answers,
-        }),
-    )
+    let expired = end != 0 && !window_open(now, start, end);
+    let allow_review = app.review.allows_review(st.submitted, expired);
+    let mut base = json!({
+        "student_id": st.student_id,
+        "session_id": st.session_id,
+        "server_time": now,
+        "start_unix": start,
+        "end_unix": end,
+        "submitted": st.submitted,
+        "review": review_name(app.review),
+    });
+    // 已交卷且策略不允许回看：**不下发卷面**。
+    //
+    // 离线端一直是这么做的（`review_available`）；网页端以前完全忽略这个策略——
+    // 老师按默认打包（「仅教师可查看原卷」）时，网页端交卷后照样能看到全卷。
+    if st.submitted && !allow_review {
+        if let Some(map) = base.as_object_mut() {
+            map.insert("paper".into(), Value::Null);
+            map.insert("answers".into(), Value::Null);
+            map.insert("answer_text".into(), Value::Null);
+        }
+        return Response::json(200, base);
+    }
+    let answer_text: HashMap<&str, String> = st
+        .paper
+        .sections
+        .iter()
+        .flat_map(|section| &section.items)
+        .filter_map(|item| {
+            let raw = st.answers.get(&item.id)?;
+            Some((item.id.as_str(), answer_text(item, raw)))
+        })
+        .collect();
+    if let Some(map) = base.as_object_mut() {
+        map.insert("paper".into(), json!(st.paper));
+        map.insert("answers".into(), json!(st.answers));
+        map.insert("answer_text".into(), json!(answer_text));
+    }
+    Response::json(200, base)
+}
+
+/// 回看策略的线上表示。
+fn review_name(policy: common::model::StudentReviewPolicy) -> &'static str {
+    match policy {
+        common::model::StudentReviewPolicy::None => "none",
+        common::model::StudentReviewPolicy::Free => "free",
+    }
+}
+
+/// 把题库里存的原始答案还原成「网页输入框里该显示的文字」。
+///
+/// 填空/改错在存储层是 JSON（离线端的编码），直接塞进 textarea 会显示成
+/// `["a","b"]`——学生一改就会被二次编码，那题必错。
+fn answer_text(item: &picker::PaperItem, raw: &str) -> String {
+    match item.qtype.as_str() {
+        "fill" => answer_sheet::decode_parts(raw).join("\n"),
+        "fix" => answer_sheet::decode_fixes(raw)
+            .iter()
+            .map(|(line, answer)| format!("{line} {answer}").trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => raw.to_string(),
+    }
+}
+
+/// 填空/改错在离线端是 JSON 编码；网页端按「每行一个」转换。
+///
+/// 填空按 `blank_count` 补齐空行：学生只填前两个空时长度会短于期望值，
+/// 补齐后判分口径与离线端一致（缺的算错）。
+fn normalize_answer(item: &picker::PaperItem, value: &str) -> String {
+    match item.qtype.as_str() {
+        "fill" => {
+            let mut parts: Vec<String> = value
+                .split('\n')
+                .map(|line| line.trim_end_matches('\r').to_string())
+                .collect();
+            if let common::model::QuestionBody::Template { blank_count, .. } = item.body
+                && blank_count > 0
+                && parts.len() < blank_count as usize
+            {
+                parts.resize(blank_count as usize, String::new());
+            }
+            answer_sheet::encode_parts(&parts)
+        }
+        "fix" => {
+            let mut fixes: Vec<(String, String)> = Vec::new();
+            for line in value.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let (no, ans) = line.split_once([' ', '\t', ':']).unwrap_or((line, ""));
+                fixes.push((no.trim().to_string(), ans.trim().to_string()));
+            }
+            answer_sheet::encode_fixes(&fixes)
+        }
+        _ => value.to_string(),
+    }
 }
 
 /// 某场次的时间窗；查启动时缓存的表。
@@ -825,30 +914,8 @@ fn save_answer(app: &App, req: &Request) -> Response {
         else {
             return Response::error(400, "题目不在本卷中");
         };
-        // 填空/改错在离线客户端是 JSON 编码；网页端按“每行一个答案”转换，
-        // 否则收卷判分会把它们当空。
-        let normalized = match item.qtype.as_str() {
-            "fill" => {
-                let parts: Vec<String> = value
-                    .lines()
-                    .map(|l| l.trim_end_matches('\r').to_string())
-                    .collect();
-                encode_parts(&parts)
-            }
-            "fix" => {
-                let mut fixes: Vec<(String, String)> = Vec::new();
-                for line in value.lines() {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let (no, ans) = line.split_once([' ', '\t', ':']).unwrap_or((line, ""));
-                    fixes.push((no.trim().to_string(), ans.trim().to_string()));
-                }
-                encode_fixes(&fixes)
-            }
-            _ => value.to_string(),
-        };
+        // 填空/改错的编码转换（与 paper 下发的 `answer_text` 互逆）。
+        let normalized = normalize_answer(item, value);
         let value = normalized.as_str();
         // 先算「换成这一题之后」的总量，再决定写不写：v1.4.3 及以前是先 insert 再算总量，
         // 返回 413 时那份超限答案已经留在内存里了——下次交卷会被写进答题卡与状态文件、

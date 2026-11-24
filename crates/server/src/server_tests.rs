@@ -107,6 +107,8 @@ impl Fixture {
             state: Mutex::new(State::default()),
             windows,
             finalize_retry: Mutex::new(HashMap::new()),
+            // 默认按「仅教师可查看原卷」——与老师默认打包一致。
+            review: common::model::StudentReviewPolicy::None,
         });
 
         Self {
@@ -144,6 +146,7 @@ impl Fixture {
             state: Mutex::new(State::default()),
             windows: old.windows.clone(),
             finalize_retry: Mutex::new(HashMap::new()),
+            review: old.review,
         });
     }
 
@@ -243,6 +246,12 @@ impl Fixture {
     /// 只替换 `App::payload`：已登录学生的内存试卷不受影响，场次窗口（`session_window`）
     /// 每次调用都从 payload 重新解析，所以下一次判定就会看到「已结束」。
     /// 把场次窗口设成任意区间（重打包 payload 并刷新窗口缓存）。
+    /// 改包里的回看策略（网页端要按它决定交卷后还下不下发卷面）。
+    fn set_review(&mut self, policy: common::model::StudentReviewPolicy) {
+        let app = Arc::get_mut(&mut self.app).expect("换策略时不应有其它 Arc 持有者");
+        app.review = policy;
+    }
+
     fn set_window(&mut self, start: u64, end: u64) {
         let payload = build_payload(&self.banks, &self.pins, start, end);
         let app = Arc::get_mut(&mut self.app).expect("换 payload 时不应有其它 Arc 持有者");
@@ -1190,7 +1199,7 @@ fn duplicate_submit_is_idempotent() {
 /// 如果恢复不出来，学生会看到空白卷并重新作答，而答题卡早已冻结。
 #[test]
 fn relogin_after_submit_restores_answers() {
-    let f = Fixture::new("relogin");
+    let mut f = Fixture::new("relogin");
     let token = f.login_ok(STUDENT);
     let qids = f.qids(&token);
     assert_status(&f.save(&token, &qids[0], "B"), 200, "保存单选应成功");
@@ -1203,6 +1212,10 @@ fn relogin_after_submit_restores_answers() {
     let answers_before = before["answers"].clone();
     assert_ne!(answers_before, json!({}), "交卷前应能读到已保存的答案");
     assert_status(&f.submit(&token), 200, "交卷应成功");
+
+    // 交卷后的「答案恢复」只在策略允许回看时才该发生（默认策略是仅教师可查看原卷，
+    // 见 `submitted_paper_is_hidden_when_review_is_teacher_only`）。
+    f.set_review(common::model::StudentReviewPolicy::Free);
 
     let again = f.login_ok(STUDENT);
     assert_ne!(again, token, "重新登录应换新 token（旧 token 被顶掉）");
@@ -1656,5 +1669,93 @@ fn oversized_request_still_gets_a_readable_413() {
         text.starts_with("HTTP/1.1 413"),
         "超限必须回可读的 413，实际：{}",
         &text[..text.len().min(80)]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. v1.4.11：网页端 ① 重登显示 JSON / ③ 回看策略
+// ---------------------------------------------------------------------------
+
+/// `paper` 必须同时给出「存储值」和「显示值」：填空/改错的存储是 JSON。
+///
+/// 为什么：网页端把 `answers` 直接塞进 textarea，学生重登/刷新后会看到
+/// `["a","b"]`，一改就被二次编码，那题必错。
+#[test]
+fn paper_exposes_display_text_for_fill_and_fix() {
+    let f = Fixture::new("answer-text");
+    let token = f.login_ok(STUDENT);
+    assert_status(
+        &f.save(&token, "q-fill", "第一空\n第二空"),
+        200,
+        "保存应成功",
+    );
+
+    let data = f.paper_json(&token);
+    let raw = data["answers"]["q-fill"]
+        .as_str()
+        .expect("存储值必须是字符串");
+    assert!(raw.starts_with('['), "存储值应是 JSON 数组，实际 {raw}");
+    assert_eq!(
+        data["answer_text"]["q-fill"].as_str(),
+        Some("第一空\n第二空"),
+        "显示值必须是学生输入的样子，而不是 JSON"
+    );
+}
+
+/// 默认策略（仅教师可查看原卷）：交卷后不再下发卷面。
+#[test]
+fn submitted_paper_is_hidden_when_review_is_teacher_only() {
+    let f = Fixture::new("review-none");
+    let token = f.login_ok(STUDENT);
+    assert_status(&f.save(&token, "q-single", "B"), 200, "保存应成功");
+    assert_status(&f.submit(&token), 200, "交卷应成功");
+
+    let data = f.paper_json(&token);
+    assert_eq!(data["submitted"], true);
+    assert_eq!(data["review"], "none");
+    assert!(data["paper"].is_null(), "默认策略下交卷后不得下发卷面");
+    assert!(data["answers"].is_null(), "默认策略下交卷后不得下发作答");
+}
+
+/// 策略为「允许回看」且未到结束时间：交卷后仍可看到卷面（只读）。
+#[test]
+fn submitted_paper_is_visible_when_review_is_free() {
+    let mut f = Fixture::new("review-free");
+    let token = f.login_ok(STUDENT);
+    assert_status(&f.save(&token, "q-single", "B"), 200, "保存应成功");
+    assert_status(&f.submit(&token), 200, "交卷应成功");
+    f.set_review(common::model::StudentReviewPolicy::Free);
+
+    let data = f.paper_json(&token);
+    assert_eq!(data["review"], "free");
+    assert!(!data["paper"].is_null(), "允许回看时必须下发卷面");
+    assert_eq!(data["answer_text"]["q-single"].as_str(), Some("B"));
+}
+
+/// 填空的存储/显示必须互逆，且按 `blank_count` 补齐。
+///
+/// 学生只填前两空时长度会短于期望值；补齐后判分口径与离线端一致（缺的算错），
+/// 也不会因为 textarea 的尾随换行被 `lines()` 丢掉。
+#[test]
+fn fill_answer_text_round_trips_with_blank_count() {
+    let item = picker::PaperItem {
+        id: "q-fill".into(),
+        qtype: "fill".into(),
+        stem: String::new(),
+        options: Vec::new(),
+        body: common::model::QuestionBody::Template {
+            template: "____①____ ____②____ ____③____".into(),
+            blank_count: 3,
+        },
+        code_languages: Vec::new(),
+        score: 2,
+    };
+    let stored = normalize_answer(&item, "a\nb");
+    assert_eq!(stored, r#"["a","b",""]"#, "不足 blank_count 必须补齐");
+    assert_eq!(answer_text(&item, &stored), "a\nb\n");
+    // 再存一次必须稳定（幂等），否则学生每改一次就会多一个空
+    assert_eq!(
+        normalize_answer(&item, &answer_text(&item, &stored)),
+        stored
     );
 }
