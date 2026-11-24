@@ -192,3 +192,20 @@ def test_ready_marker_matches_server_source() -> None:
     # GUI 传的两个参数必须仍是服务端的命令行参数（clap 由字段名生成 flag）。
     assert "time_check: clock::TimeMode" in src
     assert "login_rate_limit: u32" in src
+
+
+def test_empty_answers_dir_falls_back_to_package_dir(qapp, tmp_path) -> None:
+    """答题卡目录留空时必须回退到 `<考试包目录>/web-answers`，不能传空串。
+
+    为什么：`--answers-dir ""` 会被 clap 判成「缺参数」直接退出（退出码 2），
+    老师看到的是「启动超时」，而界面明明预填过值——清空一次就再也起不来。
+    """
+    dlg = _make_dialog(tmp_path)
+    try:
+        dlg.edit_answers.setText("")
+        args = dlg._command_args()
+        value = _arg(args, "--answers-dir")
+        assert value, "留空时不能把空串传给服务端"
+        assert value == str(tmp_path / "web-answers"), value
+    finally:
+        dlg.close()

@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -42,9 +43,53 @@ from PySide6.QtWidgets import (
 
 from app.core.banks_io import write_temp_banks
 from app.core.buildcmd import build_command, build_env, safe_pin_dir
+from app.core.paths import settings_path
 from app.core.state import ProjectState
 from app.core.subproc import no_window_kwargs
 from app.ui.widgets import NoWheelComboBox, NoWheelSpinBox, fit_button_text, make_checkbox
+
+
+def pin_stash_dir() -> Path:
+    """PIN 表暂存目录：与 `settings.ini` 同根的应用数据目录。
+
+    为什么不用系统临时目录：暂存的是**明文**学号 + PIN 表。Windows 的 `%TEMP%`
+    是用户私有目录、风险低；但管理端也能在 Linux/macOS 上跑，那里的 `/tmp`
+    全局可读——等于把全场 PIN 摊在公共目录里。
+    """
+    path = settings_path().parent
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def stash_pin_file(src: Path, stamp: str) -> Path:
+    """把 PIN 表复制到应用数据目录，并尽量把权限收到 0600。
+
+    Windows 上 `chmod` 只切「只读」位、拿不到 ACL；目录本身已是用户私有，
+    失败不致命，但不能因此静默——用 warnings 让它在日志里可见。
+    """
+    dest = pin_stash_dir() / f"ees-pin-{stamp}.csv"
+    shutil.copy2(src, dest)
+    try:
+        dest.chmod(0o600)
+    except OSError as e:  # pragma: no cover - 平台相关，Windows 通常不会抛
+        warnings.warn(f"无法把 {dest} 的权限收紧到 0600：{e}", RuntimeWarning, stacklevel=2)
+    return dest
+
+
+def cleanup_stashed_pins() -> int:
+    """删掉上次打包留下的 PIN 暂存文件，返回删除个数。
+
+    为什么在「打包开始时」清理：老师关掉对话框后往往不会再回来处理这些文件；
+    留着就是一份明文 PIN 表。提示语里已写明「下次打包时自动删除」。
+    """
+    removed = 0
+    for path in pin_stash_dir().glob("ees-pin-*.csv"):
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def is_frozen() -> bool:
@@ -883,6 +928,9 @@ class BuildTab(QWidget):
         if self.worker is not None and self.worker.isRunning():
             return
 
+        # 上一次「取消保存 PIN 表」留下的明文暂存文件，在这里清掉（见 cleanup_stashed_pins）。
+        stashed_removed = cleanup_stashed_pins()
+
         self._sync_time_config()
         problems = self.state.validate()
         if problems:
@@ -982,6 +1030,8 @@ class BuildTab(QWidget):
 
         self.log_view.clear()
         self.copy_hint.setText("")
+        if stashed_removed:
+            self._append(f"已清理 {stashed_removed} 个上次暂存的 PIN 表（明文，不留盘）")
         self._cancelled = False
         self._append(f"题库目录 {tmpdir}")
         self._append(f"清单 {manifest_path}")
@@ -1186,7 +1236,7 @@ class BuildTab(QWidget):
                 QMessageBox.warning(
                     self,
                     "PIN 表未保存",
-                    f"已暂存到：\n{stashed}\n\n请手动复制到安全位置；临时文件不会自动删除。",
+                    f"已暂存到：\n{stashed}\n\n请尽快复制到安全位置；下次打包开始时自动删除。",
                 )
                 return stashed
 
@@ -1216,13 +1266,9 @@ class BuildTab(QWidget):
                 continue
 
     def _stash_pin_temp(self, src: Path) -> Path:
-        """复制失败时只保留 PIN 文件，避免把整个题库临时目录留在磁盘。"""
-        import tempfile
-
-        dest = Path(tempfile.gettempdir()) / f"ees-pin-{getattr(self, '_pin_stamp', 'unknown')}.csv"
+        """保存对话框被取消时，把 PIN 表暂存到应用数据目录（不再用系统临时目录）。"""
         try:
-            shutil.copy2(src, dest)
-            return dest
+            return stash_pin_file(src, getattr(self, "_pin_stamp", "unknown"))
         except OSError:
             return src
 

@@ -205,3 +205,53 @@ def test_three_version_sources_agree(rel: str) -> None:
         assert text.strip() == version
     else:
         assert f'"{version}"' in text
+
+
+def _load_bump_module():
+    """把脚本当模块加载，便于 monkeypatch `os.replace` 模拟写盘失败。"""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("bump_version_under_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_replace_failure_leaves_every_file_untouched(tmp_path: Path, monkeypatch) -> None:
+    """写盘阶段第一次 `os.replace` 就失败 → 一个目标文件都不能变，也不能留 tmp。"""
+    root = make_tree(tmp_path)
+    module = _load_bump_module()
+    before = {rel: read(root, rel) for rel in FILES}
+
+    def boom(_src, _dst):
+        raise OSError("模拟磁盘满")
+
+    monkeypatch.setattr(module.os, "replace", boom)
+    assert module.bump(root, NEW, dry_run=False) == 1
+
+    for rel, text in before.items():
+        assert read(root, rel) == text, f"{rel} 被改动了（应当全不改）"
+    assert not list(root.rglob("*.tmp-*")), "失败后不能留下 .tmp-* 文件"
+
+
+def test_replace_failure_rolls_back_already_written_files(tmp_path: Path, monkeypatch) -> None:
+    """第二次 `os.replace` 失败 → 第一份已经替换掉的文件要回滚成原文。"""
+    root = make_tree(tmp_path)
+    module = _load_bump_module()
+    before = {rel: read(root, rel) for rel in FILES}
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError("模拟第 2 个文件写失败")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(module.os, "replace", flaky)
+    assert module.bump(root, NEW, dry_run=False) == 1
+
+    assert calls["n"] == 2, "应当已经替换了第一份、在第二份上失败"
+    for rel, text in before.items():
+        assert read(root, rel) == text, f"{rel} 没有被回滚"
+    assert not list(root.rglob("*.tmp-*")), "失败后不能留下 .tmp-* 文件"

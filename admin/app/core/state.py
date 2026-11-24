@@ -29,6 +29,28 @@ from app.core.bank_import import BankImportError, load_bank_from_path, validate_
 from app.core.models import ExamBank, KdfParams, Manifest, Session, StudentClass
 
 
+def _fsync_dir(directory: Path) -> None:
+    """把目录项刷到磁盘（POSIX）。Windows 不支持对目录 fsync，直接跳过。
+
+    为什么只 fsync 文件不够：rename 的**目录项**也可能还在缓存里，断电后会出现
+    「文件名还是旧的、新内容丢了」。工程文件是教师工作的唯一副本，值得多这一次
+    syscall；失败一律忽略——目录 fsync 在部分网络盘/Windows 上本来就不支持，
+    不能因为优化把「保存成功」变成「保存报错」。
+    """
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _load_classes(raw: object, path: Path) -> list[StudentClass]:
     """解析班级列表，把 pydantic 的原始报错翻译成老师看得懂的一句话。"""
     from pydantic import ValidationError
@@ -503,10 +525,16 @@ class ProjectState:
                 downgraded = True
         tmp = path.with_name(path.name + ".tmp")
         try:
-            tmp.write_bytes(raw)
+            with open(tmp, "wb") as f:
+                f.write(raw)
+                f.flush()
+                # 为什么不复用 secure.atomic_write：secure 强依赖 cryptography，
+                # 而工程保存必须能在「本机缺加密依赖、降级明文」的环境里也工作。
+                os.fsync(f.fileno())
             if path.exists():
                 shutil.copy2(path, path.with_name(path.name + ".bak"))
             os.replace(tmp, path)
+            _fsync_dir(path.parent)
         finally:
             tmp.unlink(missing_ok=True)
         return downgraded

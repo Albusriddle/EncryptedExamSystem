@@ -347,3 +347,33 @@ def test_validate_reports_difficulty_problems() -> None:
     )
     problems = st.validate()
     assert any("可达平均难度" in p for p in problems), problems
+
+
+def test_save_fsyncs_temp_file(tmp_path: Path, monkeypatch) -> None:
+    """保存工程必须 fsync 临时文件：断电后不能出现「空的新文件」。"""
+    from app.core import state as state_mod
+
+    calls: list[int] = []
+    real = state_mod.os.fsync
+
+    def record(fd: int) -> None:
+        calls.append(fd)
+        real(fd)
+
+    monkeypatch.setattr(state_mod.os, "fsync", record)
+    p = tmp_path / "proj.json"
+    ProjectState(students=[1]).save(p)
+    assert calls, "保存时至少要对临时文件 fsync 一次"
+    assert ProjectState.load(p).students == [1]
+
+
+def test_save_keeps_bak_of_previous_version(tmp_path: Path) -> None:
+    p = tmp_path / "proj.json"
+    st = ProjectState(students=[1])
+    st.save(p)
+    st.students = [1, 2]
+    st.save(p)
+    bak = tmp_path / "proj.json.bak"
+    assert bak.is_file(), "覆盖前要留一份 .bak"
+    assert ProjectState.load(bak).students == [1]
+    assert ProjectState.load(p).students == [1, 2]

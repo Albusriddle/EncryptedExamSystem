@@ -35,6 +35,43 @@ MAX_KDF_PARALLEL = 8
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
+def atomic_write(path: Path, data: bytes) -> None:
+    """原子写：先写 `<name>.tmp`，flush + fsync 后再 `os.replace`。
+
+    为什么不能直接 `path.write_bytes(data)`：`.eekey` 是主密钥的**唯一备份**、
+    `receipt-key.pem` 是收据签名私钥。直接覆盖写时断电/崩溃会留下半截文件，
+    而错误要到「恢复主密钥 / 签发收据」时才暴露——那时已经没有可恢复的源。
+    先写临时文件再替换，最坏结果是「还是旧文件」，而不是「文件坏了」。
+
+    失败时清理临时文件并原样抛出：调用方（管理端界面）要把异常显示给老师。
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def restrict_permissions(path: Path) -> str | None:
+    """把文件权限收到「仅当前用户」（0600）；成功返回 None，失败返回警告文案。
+
+    为什么返回警告而不是静默 `except OSError: pass`：Windows 上 `chmod` 只切
+    「只读」位、并不会设置 ACL（文件本来就在用户私有的 `%LOCALAPPDATA%` 下，
+    失败不致命），但**静默吞掉**会让「权限没收紧」这件事永远没人知道；
+    收据私钥、PIN 表这类敏感文件必须让调用方有机会提示老师。
+    """
+    try:
+        path.chmod(0o600)
+    except OSError as e:
+        return f"无法把 {path} 的权限收紧到 0600：{e}"
+    return None
+
+
 def _derive(passphrase: str, salt: bytes) -> bytes:
     if not passphrase:
         raise ValueError("口令不能为空")
@@ -127,7 +164,8 @@ def unseal(magic: bytes, passphrase: str, blob: bytes) -> bytes:
 def backup_master_key(master_hex: str, path: Path, passphrase: str) -> None:
     if not _HEX64.match(master_hex.strip()):
         raise ValueError("主密钥必须是 64 位十六进制")
-    path.write_bytes(seal(MAGIC_KEY, passphrase, master_hex.strip().lower().encode()))
+    # 原子写：备份失败时要保证「旧的备份还在」，而不是两份都没了。
+    atomic_write(path, seal(MAGIC_KEY, passphrase, master_hex.strip().lower().encode()))
 
 
 def restore_master_key(path: Path, passphrase: str) -> str:

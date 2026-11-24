@@ -70,6 +70,54 @@ BUILDER = find_artifact(f"exam-builder{EXE}")
 SERVER = find_artifact(f"exam-server{EXE}")
 
 
+def _version_matches(output: str, want: str) -> bool:
+    """`--version` 输出形如 `exam-builder 1.4.8`；取最后一个空白 token 比对。
+
+    为什么要求**完全相等**而不是 `want in output`：`1.4.8` 是 `1.4.80` 的子串，
+    用包含关系会把版本更旧的二进制判成匹配；而这里要防的恰恰是「嵌进发布包的
+    builder 是旧提交构建的」——水印显示新版本、实际行为是旧的，排障时最难查。
+    """
+    text = (output or "").strip()
+    if not text:
+        return False
+    return text.split()[-1] == want
+
+
+def _require_artifact_version(label: str, exe: Path, want: str) -> bool:
+    """跑一次 `--version` 并核对版本；任何异常/无输出都算失败。"""
+    try:
+        proc = subprocess.run(
+            [str(exe), "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"✗ {label} 无法运行：{e}")
+        return False
+    out = (proc.stdout or "").strip()
+    if not _version_matches(out, want):
+        shown = out.split()[-1] if out else "(无版本输出)"
+        print(f"✗ {label} 版本 {shown} ≠ 仓库 VERSION {want}，先 cargo build --release")
+        return False
+    print(f"✓ {label} 版本匹配：{want}")
+    return True
+
+
+def check_client_template(client: Path | None) -> str | None:
+    """学生端模板缺失时的错误文案；None 表示可以继续。
+
+    抽成函数是为了能单测：`main()` 里找不到 exam-client 以前是**静默跳过**，
+    结果发布包里没有 `stub-template.exe`，直到 `make-release-zip.sh` 才失败——
+    那时报错位置离原因很远。
+    """
+    if client is None or not client.is_file():
+        return "✗ 找不到 exam-client（学生端模板），请先 cargo build --release -p client"
+    return None
+
+
 def copy_legal_files(dest: Path, root: Path | None = None) -> list[str]:
     """把许可证与第三方声明复制进发布目录。
 
@@ -113,19 +161,18 @@ def main() -> int:
         print("✗ 找不到 exam-server（网页考试服务端）")
         return 1
 
-    # 确认 builder 能跑，避免把坏二进制打进去
-    try:
-        ver = subprocess.run(
-            [str(BUILDER), "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=20,
-        )
-        print(f"✓ exam-builder 可用：{ver.stdout.strip() or '(无版本输出)'}")
-    except (OSError, subprocess.SubprocessError) as e:
-        print(f"✗ exam-builder 无法运行：{e}")
+    # 确认两个内嵌二进制都能跑、且版本与仓库 VERSION 一致，避免把旧二进制打进去
+    version_file = ROOT / "VERSION"
+    if not version_file.is_file():
+        print("✗ 找不到 VERSION 文件")
+        return 1
+    want = version_file.read_text(encoding="utf-8").strip()
+    if not want:
+        print("✗ VERSION 文件为空")
+        return 1
+    if not _require_artifact_version("exam-builder", BUILDER, want):
+        return 1
+    if not _require_artifact_version("exam-server", SERVER, want):
         return 1
 
     DIST.mkdir(exist_ok=True)
@@ -215,7 +262,6 @@ def main() -> int:
     print("✓ 自检通过（--selftest 成功）")
 
     # 版本号必须能从包里读到，否则水印会显示 0.0.0
-    want = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     got = ""
     try:
         vp = subprocess.run(
@@ -237,9 +283,12 @@ def main() -> int:
     # 学生端模板与手册放进同一目录：教师只需拷贝这一个文件夹
     rel = out.parent
     src = find_artifact(f"exam-client{EXE}")
-    if src is not None:
-        shutil.copy2(src, rel / f"stub-template{EXE}")
-        print(f"✓ 已附带学生端模板 {rel.name}/stub-template{EXE}")
+    problem = check_client_template(src)
+    if problem or src is None:
+        print(problem or "✗ 找不到 exam-client（学生端模板）")
+        return 1
+    shutil.copy2(src, rel / f"stub-template{EXE}")
+    print(f"✓ 已附带学生端模板 {rel.name}/stub-template{EXE}")
 
     try:
         copied = copy_legal_files(rel)

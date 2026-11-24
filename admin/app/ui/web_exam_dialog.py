@@ -174,6 +174,19 @@ class WebExamDialog(QDialog):
     def _login_rate_limit(self) -> int:
         return int(self.spin_rate_limit.value())
 
+    def _answers_dir(self) -> Path:
+        """答题卡目录：留空时回退到 `<考试包目录>/web-answers`。
+
+        为什么不能直接把空串传给服务端：`--answers-dir ""` 会被 clap 当成「缺参数」
+        直接退出（退出码 2），老师看到的是「启动超时」，而界面明明预填过值——
+        清空一次就再也起不来。界面预填值、建目录、传参必须用**同一个**回退逻辑。
+        """
+        raw = self.edit_answers.text().strip()
+        if raw:
+            return Path(raw)
+        package = Path(self.edit_package.text().strip())
+        return package.parent / "web-answers"
+
     def _command_args(self) -> list[str]:
         """按当前界面值拼出 argv（不含程序路径以外的改动，便于测试）。
 
@@ -185,7 +198,7 @@ class WebExamDialog(QDialog):
             package=Path(self.edit_package.text().strip()),
             keyfile=Path(self.edit_keyfile.text().strip()),
             port=self.spin_port.value(),
-            answers_dir=Path(self.edit_answers.text().strip()),
+            answers_dir=self._answers_dir(),
             bind=self._bind(),
             time_check=self._time_check(),
             login_rate_limit=self._login_rate_limit(),
@@ -236,7 +249,9 @@ class WebExamDialog(QDialog):
         if not server.is_file():
             QMessageBox.warning(self, "找不到服务端", f"缺少 exam-server：{server}")
             return
-        answers = Path(self.edit_answers.text().strip() or (package.parent / "web-answers"))
+        # 建目录与 `--answers-dir` 必须用同一个回退值，否则「留空」时目录建了、
+        # 服务端却因为空参数起不来（见 `_answers_dir`）。
+        answers = self._answers_dir()
         answers.mkdir(parents=True, exist_ok=True)
 
         self._output_buffer = ""

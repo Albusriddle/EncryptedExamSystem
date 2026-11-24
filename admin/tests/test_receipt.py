@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from app.core.receipt import build_receipt, verify_files, verify_receipt
@@ -138,3 +139,26 @@ def test_encrypted_key_backup_roundtrip(tmp_path: Path) -> None:
     export_key(out, key, "backup-pass")
     loaded = load_key(out, "backup-pass")
     assert fingerprint(signer=loaded) == fingerprint(signer=key)
+
+
+def test_receipt_key_creation_is_atomic(tmp_path: Path, monkeypatch) -> None:
+    """私钥写一半失败时不能留下半截文件（否则收据体系里多出一个坏密钥）。"""
+    from app.core import receipt as receipt_mod
+    from app.core import secure as secure_mod
+
+    def boom(_fd: int) -> None:
+        raise OSError(28, "No space left on device")
+
+    target = tmp_path / "receipt-key.pem"
+    # 只在「制造失败」这一段打补丁：后面还要验证正常路径能建出可用的密钥。
+    with monkeypatch.context() as patch:
+        patch.setattr(secure_mod.os, "fsync", boom)
+        with pytest.raises(OSError):
+            receipt_mod.load_or_create_key(target)
+    assert not target.exists()
+    assert not (tmp_path / "receipt-key.pem.tmp").exists()
+
+    # 正常路径仍然可用，且能被读回
+    signer = receipt_mod.load_or_create_key(target)
+    loaded = receipt_mod.load_key(target)
+    assert loaded.public_key().public_bytes_raw() == signer.public_key().public_bytes_raw()

@@ -56,3 +56,33 @@ def test_rejects_absurd_kdf_header_before_argon2() -> None:
     )
     with pytest.raises(ValueError, match="KDF"):
         secure.decrypt_project(blob, "pw")
+
+
+# ---------------------------------------------------------------- 原子写
+
+
+def test_atomic_write_replaces_and_cleans_tmp(tmp_path: Path) -> None:
+    target = tmp_path / "k.eekey"
+    target.write_bytes(b"OLD")
+    secure.atomic_write(target, b"NEW")
+    assert target.read_bytes() == b"NEW"
+    assert not (tmp_path / "k.eekey.tmp").exists(), "临时文件必须被替换掉"
+
+
+def test_atomic_write_keeps_old_file_when_fsync_fails(tmp_path: Path, monkeypatch) -> None:
+    """fsync 失败时目标文件必须还是旧内容，且不留下 .tmp。
+
+    为什么重要：`.eekey` 是主密钥的**唯一备份**；如果「写一半失败」把目标文件
+    覆盖成半截，老师就同时失去了新备份和旧备份，而且要到恢复时才看得出来。
+    """
+
+    def boom(_fd: int) -> None:
+        raise OSError(28, "No space left on device")
+
+    target = tmp_path / "k.eekey"
+    target.write_bytes(b"OLD")
+    monkeypatch.setattr(secure.os, "fsync", boom)
+    with pytest.raises(OSError):
+        secure.backup_master_key("ab" * 32, target, "pw")
+    assert target.read_bytes() == b"OLD", "失败时不能碰目标文件"
+    assert not (tmp_path / "k.eekey.tmp").exists(), "失败时必须清理临时文件"

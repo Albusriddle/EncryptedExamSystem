@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from app.core.paths import settings_path
+from app.core.secure import atomic_write, restrict_permissions
 
 
 def key_path() -> Path:
@@ -39,17 +41,18 @@ def load_or_create_key(path: Path | None = None) -> Ed25519PrivateKey:
         return load_key(p)
     k = Ed25519PrivateKey.generate()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(
+    # 原子写 + 事后收权限：私钥写一半就断电，等于收据体系凭空多出一个坏密钥。
+    atomic_write(
+        p,
         k.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
-        )
+        ),
     )
-    try:
-        p.chmod(0o600)
-    except OSError:
-        pass
+    warn = restrict_permissions(p)
+    if warn:
+        warnings.warn(warn, RuntimeWarning, stacklevel=2)
     return k
 
 
@@ -64,13 +67,18 @@ def export_key(
         if passphrase
         else serialization.NoEncryption()
     )
-    out.write_bytes(
+    # 导出的也是私钥：同样原子写，并在可能时收紧到 0600（失败只警告，不阻断导出）。
+    atomic_write(
+        out,
         k.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=enc,
-        )
+        ),
     )
+    warn = restrict_permissions(out)
+    if warn:
+        warnings.warn(warn, RuntimeWarning, stacklevel=2)
     return out
 
 
