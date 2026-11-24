@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from app.core.webexam import (
     DEFAULT_BIND,
+    DEFAULT_HTTP_REDIRECT_PORT,
     DEFAULT_LOGIN_RATE_LIMIT,
     DEFAULT_PORT,
     DEFAULT_TIME_CHECK,
@@ -32,7 +33,7 @@ from app.core.webexam import (
     validate_inputs,
     web_command,
 )
-from app.ui.widgets import NoWheelComboBox, NoWheelSpinBox, fit_button_text
+from app.ui.widgets import NoWheelComboBox, NoWheelSpinBox, fit_button_text, make_checkbox
 
 #: 就绪等待上限：默认档要等一次三源取时（无外网时约 6 秒），留足余量。
 READY_TIMEOUT_MS = 30_000
@@ -71,6 +72,19 @@ class WebExamDialog(QDialog):
         self.spin_port = NoWheelSpinBox()
         self.spin_port.setRange(1024, 65535)
         self.spin_port.setValue(DEFAULT_PORT)
+
+        # v1.5.0 起服务端默认 HTTPS（自签证书）。关闭它是**危险方向**：明文 HTTP 下
+        # 同网段任何人都能抓到学生作答、PIN 与会话 cookie，所以取消勾选要二次确认。
+        self.chk_tls = make_checkbox("使用 HTTPS（自签证书，推荐）")
+        self.chk_tls.setChecked(True)
+        self.chk_tls.setToolTip(
+            "默认开启：服务端自动生成自签证书，学生首次打开会提示「不安全」，"
+            "点「高级 → 继续前往」即可。\n"
+            "iPad / iPhone 上的 Chrome 无法绕过证书警告，请改用 Safari。\n"
+            "教师屏会显示证书指纹，学生可在浏览器证书详情里核对（防中间人）。\n"
+            "关闭后走明文 HTTP——同网段可嗅探答案，仅建议排障时使用。"
+        )
+        self.chk_tls.toggled.connect(self._on_tls_toggled)
         self.edit_answers = QLineEdit(str(Path(package).parent / "web-answers") if package else "")
 
         # 监听地址：默认所有网卡；多网卡教师机只绑 LAN 地址时，外网侧根本连不上。
@@ -110,10 +124,17 @@ class WebExamDialog(QDialog):
         form.addRow("考试包", self.edit_package)
         form.addRow("K_manifest", self.edit_keyfile)
         form.addRow("端口", self.spin_port)
+        form.addRow("HTTPS", self.chk_tls)
         form.addRow("监听地址", self.combo_bind)
         form.addRow("时间校验", self.combo_time_check)
         form.addRow("同 IP 登录上限", self.spin_rate_limit)
         form.addRow("答题卡目录", self.edit_answers)
+        # 让老师知道证书落在哪、以及为什么学生会看到一次警告页——否则第一节课
+        # 会被「浏览器说不安全」的举手打断。
+        form.addRow(
+            "证书",
+            QLabel("由服务端自动生成到「答题卡目录/tls/」下（首次访问点「高级 → 继续前往」）"),
+        )
 
         self.lbl_url = QLabel("未启动")
         self.lbl_url.setTextInteractionFlags(self.lbl_url.textInteractionFlags())
@@ -142,7 +163,12 @@ class WebExamDialog(QDialog):
         lay.addWidget(self.lbl_url)
         lay.addLayout(row)
         lay.addWidget(self.log, 1)
-        lay.addWidget(QLabel("仅用于隔离局域网 + 现场监考；HTTP 明文，勿接入互联网。"))
+        lay.addWidget(
+            QLabel(
+                "默认 HTTPS（自签证书）：学生首次访问点「高级 → 继续前往」；iPad/iPhone 用 Safari；"
+                "关闭 HTTPS 为明文（同网段可嗅探），仅建议排障时使用。"
+            )
+        )
 
     # -- 参数 -------------------------------------------------------------
 
@@ -202,6 +228,9 @@ class WebExamDialog(QDialog):
             bind=self._bind(),
             time_check=self._time_check(),
             login_rate_limit=self._login_rate_limit(),
+            # TLS 模式必须显式下发：老版 exam-server 不认这个参数会立刻报错，
+            # 而不是「界面显示 https、实际跑 http」这种没人能发现的静默错配。
+            tls="auto" if self.chk_tls.isChecked() else "off",
         )
 
     def _server_path(self) -> Path:
@@ -232,6 +261,7 @@ class WebExamDialog(QDialog):
             bind=self._bind(),
             time_check=self._time_check(),
             login_rate_limit=self._login_rate_limit(),
+            tls="auto" if self.chk_tls.isChecked() else "off",
         )
         if err:
             QMessageBox.warning(self, "无法启动", err)
@@ -241,6 +271,18 @@ class WebExamDialog(QDialog):
                 self, "端口被占用", f"端口 {self.spin_port.value()} 已被其他程序占用"
             )
             return
+        # 旧书签（http://IP:8080/）靠服务端另起的明文端口做 301 跳转。它被占用时**不拦启动**
+        # （主服务照常可用），但必须写进日志：否则老师会以为旧链接还能用，学生打开却是报错。
+        if (
+            self.chk_tls.isChecked()
+            and self.spin_port.value() != DEFAULT_HTTP_REDIRECT_PORT
+            and not port_available(DEFAULT_HTTP_REDIRECT_PORT)
+        ):
+            self.log.appendPlainText(
+                f"⚠ 明文跳转端口 {DEFAULT_HTTP_REDIRECT_PORT} 被占用：旧书签 "
+                f"http://…:{DEFAULT_HTTP_REDIRECT_PORT}/ 不会自动跳到 HTTPS，"
+                "请把新地址（https）发给学生。"
+            )
         # 关掉时间校验是「危险方向」：场次判定会完全依赖教师机时钟，而且不再有任何提示。
         # 按项目约定，危险方向的切换要二次确认，且确认挂在用户动作（这里是点「启动」）上。
         if not self._confirm_time_check_off():
@@ -315,7 +357,50 @@ class WebExamDialog(QDialog):
         if not self._ready and is_ready(self._output_buffer):
             self._ready = True
             self._ready_timer.stop()
-            self.lbl_url.setText(access_url(self.spin_port.value(), advertised_host(self._bind())))
+            self._refresh_url()
+
+    def _refresh_url(self) -> None:
+        """按当前勾选框与端口刷新地址；未就绪时不显示（端口还没绑）。
+
+        地址的 scheme 必须跟着「使用 HTTPS」走：否则关掉 TLS 后界面仍显示 https，
+        老师照着发给学生，全班连不上。
+        """
+        if not self._ready:
+            return
+        self.lbl_url.setText(
+            access_url(
+                self.spin_port.value(),
+                advertised_host(self._bind()),
+                tls=self.chk_tls.isChecked(),
+            )
+        )
+
+    def _on_tls_toggled(self, checked: bool) -> None:
+        """关闭 HTTPS 是危险方向：明文下同网段可抓到答案、PIN 与 cookie。
+
+        确认放在 `toggled`（由用户的点击/键盘触发）而不是 `clicked`，是因为
+        `CompactCheckBox` 的点击区会延伸到说明文字上，`toggled` 更稳；程序化赋值
+        （测试/初始化）前会 `blockSignals`，不会误弹窗。
+        """
+        if checked:
+            self._refresh_url()
+            return
+        answer = QMessageBox.question(
+            self,
+            "确认关闭 HTTPS？",
+            "关闭后学生与教师机之间是**明文 HTTP**：同一局域网内任何人都能抓到学生的"
+            "作答、PIN 与会话 cookie。\n\n只应在排障（或设备无法绕过证书警告）时临时关闭。\n"
+            "确定关闭 HTTPS 吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._refresh_url()
+            return
+        # 用户拒绝：把勾复原。blockSignals 防「setChecked 又触发 toggled」的递归弹窗。
+        self.chk_tls.blockSignals(True)
+        self.chk_tls.setChecked(True)
+        self.chk_tls.blockSignals(False)
 
     def _copy_url(self) -> None:
         from PySide6.QtWidgets import QApplication

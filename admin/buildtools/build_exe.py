@@ -167,7 +167,9 @@ def copy_legal_files(dest: Path, root: Path | None = None) -> list[str]:
     ]
     missing = [str(src) for src, _ in required if not src.is_file()]
     lic_dir = base / "licenses"
-    for name in ("LGPL-3.0.txt", "GPL-3.0.txt"):
+    # ISC.txt：v1.5.0 起 `ring`（TLS 的加密后端）是 Apache-2.0 AND ISC，
+    # 少这份等于发布包缺许可；同 LGPL/GPL 一样，缺了就构建失败。
+    for name in ("LGPL-3.0.txt", "GPL-3.0.txt", "ISC.txt"):
         if not (lic_dir / name).is_file():
             missing.append(str(lic_dir / name))
     if missing:

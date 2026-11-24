@@ -38,6 +38,9 @@ FILES = {
         f"\n## 8. 测试与验证基线（v{OLD}）\n"
         "\n| Rust | 100 个 `#[test]` |\n"
     ),
+    "crates/server/README.md": (
+        f"# exam-server\n\n- 适用版本：**v{OLD}**\n\n正文（这段不能被改）。\n"
+    ),
     "docs/保密考试系统_架构与实施方案.md": (
         f"> 适用版本：**v{OLD}**。\n"
         "\n```bash\n"
