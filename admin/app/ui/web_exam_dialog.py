@@ -314,12 +314,11 @@ class WebExamDialog(QDialog):
         # 明文模式下「证书来源」毫无意义：禁用，免得老师切过去以为生效了。
         self.combo_tls_source.setEnabled(self._inputs_editable and https_on)
         self.cert_box.setEnabled(self._inputs_editable and https_on)
-        # 证书区一显隐，布局需要的空间就变了：把「最小高度」跟着更新，窗口被撑到够用为止。
-        # 只用 resize() 不行——Windows 上字体/DPI 不同，show() 之后 sizeHint 还会再长一截，
-        # 结果窗口比布局矮，日志区（排查启动失败全靠它）被压扁。
         # 下界在构造时就用「证书区可见」的状态钉好了（`self._min_height`）。这里不能按
         # 「当前」minimumSizeHint 去改它：切换来源时布局还没激活，量到的是旧值，
         # 会把下界改小、窗口反而被裁（Windows 上实测 642 < 696）。
+        # 宁可窗口高一点，也不让日志区被压扁——这是 Windows CI 两次红的取舍
+        # （老师排查「服务端起不来」全靠那块日志，而窗口高度多 50 px 没人会抱怨）。
         if self.height() < self._min_height:
             self.resize(max(self.width(), 720), self._min_height)
 
@@ -535,11 +534,20 @@ class WebExamDialog(QDialog):
 
     def _on_finished(self) -> None:
         self._ready_timer.stop()
+        # 先记下「这次跑起来过没有」：`_ready` 下面就被重置了，而退出码要结合它才能分辨
+        # 「跑起来后被停掉」与「压根没起来」。后者最常见的原因就是外部证书自检失败
+        # （私钥不配套 / 缺 serverAuth / 链不可信），日志里已经打了 `✗ …`，
+        # 状态行如果只说「已停止」，老师会以为是自己点错了。
+        was_ready = self._ready
+        exit_code = self.proc.exitCode()
         self._ready = False
         self._set_inputs_enabled(True)
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        self.lbl_url.setText("已停止")
+        if not was_ready and exit_code != 0:
+            self.lbl_url.setText(f"启动失败（退出码 {exit_code}），见下方日志")
+        else:
+            self.lbl_url.setText("已停止")
 
     def _on_ready_timeout(self) -> None:
         if self._ready:

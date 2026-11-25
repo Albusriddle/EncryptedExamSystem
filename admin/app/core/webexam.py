@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
 from pathlib import Path
 
@@ -59,8 +60,30 @@ CERT_FILE_FILTER = "证书 (*.crt *.pem *.cer);;所有文件 (*)"
 KEY_FILE_FILTER = "私钥 (*.key *.pem);;所有文件 (*)"
 
 
+#: 头部嗅探只读这么多字节：PEM 头永远在最前面（`-----BEGIN …` 就在开头几行），
+#: 读全文既慢又危险——老师误选一个 200 MB 的抓包文件时会把整个文件塞进内存
+#: （外加解码后的字符串）。64 KiB 足够覆盖「几段证书 + 私钥 + 注释」的常见 PEM。
+_PEM_SNIFF_BYTES = 64 * 1024
+
+# PEM 的起始标记单独抽出来：把「BEGIN 前缀」与「块名」拼起来再编译，源码里就不会出现
+# 完整的私钥头字面量（CI 的 secret-scan / gitleaks private-key 规则会把它当成真实泄漏——
+# v1.7.0 的测试夹具就因此红过一次）。
+_PEM_BEGIN = "-----BEGIN "
+
+_RE_CERT_HEADER = re.compile(_PEM_BEGIN + r"CERTIFICATE-----")
+# Rust/Python 都能认的正常私钥头：`PRIVATE KEY`（PKCS#8）、`RSA PRIVATE KEY`、
+# `EC PRIVATE KEY`、`DSA PRIVATE KEY`。
+_RE_KEY_HEADER = re.compile(_PEM_BEGIN + r"(?:[A-Z0-9]+ )?PRIVATE KEY-----")
+# 下面两种**服务端不认**（rustls 只接受不带口令的 PEM 私钥），要单独识别出来给专门文案，
+# 否则老师只会看到服务端那句英文的解析失败。
+_RE_OPENSSH_KEY = re.compile(_PEM_BEGIN + r"OPENSSH PRIVATE KEY-----")
+_RE_ENCRYPTED_KEY = re.compile(_PEM_BEGIN + r"ENCRYPTED PRIVATE KEY-----")
+
+
 def pem_kind(path: Path) -> str:
-    """判断一个 PEM 文件里有哪些块：`cert` / `key` / `both` / `unknown`。
+    """判断一个 PEM 文件里有哪些块。
+
+    返回值：`cert` / `key` / `both` / `openssh` / `encrypted` / `unknown`。
 
     为什么只嗅探、不解析 X.509：真正的强校验在服务端**启动自检**里（私钥是否配套、
     EKU、链、有效期、SAN），失败会拒绝启动并把原因打进对话框日志。界面这一层只需要
@@ -69,16 +92,22 @@ def pem_kind(path: Path) -> str:
 
     为什么允许 `both`：内网 CA 常把「叶子 + 中间 + 私钥」放在同一个 PEM 里，
     此时两个框都可以选它——服务端自己能分清。
+
+    为什么只读前 64 KiB：见 `_PEM_SNIFF_BYTES`。用正则而不是两次 `in` 判断：
+    `"PRIVATE KEY" in text` 会把「证书 + 注释里写了 PRIVATE KEY」也判成私钥。
     """
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as fh:
+            head = fh.read(_PEM_SNIFF_BYTES)
     except OSError:
         return "unknown"
-    has_cert = "-----BEGIN CERTIFICATE-----" in text
-    # RSA / EC / PKCS#8 的私钥头分别是 `RSA PRIVATE KEY` / `EC PRIVATE KEY` /
-    # `PRIVATE KEY`，都含 `PRIVATE KEY`；`ENCRYPTED PRIVATE KEY` 也覆盖（服务端不认，
-    # 但界面不该替它判死——让服务端报出更准确的错）。
-    has_key = "-----BEGIN" in text and "PRIVATE KEY" in text
+    text = head.decode("utf-8", "replace")
+    if _RE_OPENSSH_KEY.search(text):
+        return "openssh"
+    if _RE_ENCRYPTED_KEY.search(text):
+        return "encrypted"
+    has_cert = bool(_RE_CERT_HEADER.search(text))
+    has_key = bool(_RE_KEY_HEADER.search(text))
     if has_cert and has_key:
         return "both"
     if has_cert:
@@ -90,6 +119,9 @@ def pem_kind(path: Path) -> str:
 
 def _check_pem_file(path: Path, what: str, kinds: tuple[str, ...]) -> str | None:
     """文件存在性 + 非空 + PEM 类型检查；返回错误文案或 None。"""
+    if path.is_dir():
+        # 目录也能通过 `is_file()` 之外的一些直觉判断，但说「被移动或删除」会误导。
+        return f"{path} 是文件夹，不是一个文件——请选具体文件"
     if not path.is_file():
         return f"找不到{what}：{path}（文件被移动或删除？重新选一次）"
     try:
@@ -100,6 +132,17 @@ def _check_pem_file(path: Path, what: str, kinds: tuple[str, ...]) -> str | None
     kind = pem_kind(path)
     if kind in kinds:
         return None
+    if kind == "openssh":
+        return (
+            f"这是 OpenSSH 格式的私钥（ssh-keygen 生成的那种）：服务端只认 PEM"
+            f"（PKCS#8 / EC / RSA）。请先用 `openssl pkcs8 -topk8 -nocrypt -in <原名> -out <新名>` "
+            f"转成 PEM 再选（当前：{path}）。"
+        )
+    if kind == "encrypted":
+        return (
+            f"这个私钥被口令保护了：服务端只认**不带口令**的 PEM 私钥，启动时无法输入口令。"
+            f"请先解密（去掉口令）再选（当前：{path}）。"
+        )
     want = "私钥" if what == "私钥文件" else "证书"
     begin = "PRIVATE KEY" if want == "私钥" else "CERTIFICATE"
     return f"这个文件不像 PEM {want}：{path}（缺 -----BEGIN {begin}----- 行，选错文件了？）"
@@ -224,11 +267,14 @@ def validate_inputs(
         )
     if has_cert and has_key:
         # 顺序：先证书后私钥，报错时先说清是哪个框选错了。
+        # 不用 `assert path is not None`：`python -O` 会把 assert 剥掉，而且 AGENTS §7
+        # 明确要求「不对用户输入做断言式处理」——这里用 `continue` 跳过 None 即可。
         for path, what, kinds in (
             (tls_cert, "证书文件", ("cert", "both")),
             (tls_key, "私钥文件", ("key", "both")),
         ):
-            assert path is not None  # 上面已保证成对
+            if path is None:
+                continue
             err = _check_pem_file(path, what, kinds)
             if err:
                 return err

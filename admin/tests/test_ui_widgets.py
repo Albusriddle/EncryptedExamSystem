@@ -249,20 +249,23 @@ def test_sections_toggle_needs_confirmation(qapp, state_with_banks, monkeypatch)
 
 
 def test_no_bare_value_widgets_in_any_ui_module() -> None:
-    """静态兜底：整个 app/ui 都不允许出现裸的可调值控件。
+    """静态兜底：整个 app/ui 都不允许出现裸的可调值控件与勾选框。
 
-    动态控件树测试只覆盖五个 Tab；对话框（缺考、导入、欢迎）以后加控件时
+    动态控件树测试只覆盖五个 Tab；对话框（缺考、导入、欢迎、网页考试）以后加控件时
     未必有实例化测试，这里用 AST 扫描补上这一层。
 
     覆盖写法：
     - ``= QComboBox()``
     - ``addWidget(QSpinBox())``
     - ``QtWidgets.QDateTimeEdit()``
+    - ``QCheckBox()`` / ``QRadioButton()``（AGENTS §7.6：勾选框 MUST 走
+      ``make_checkbox()``；那样返回的是 ``CompactCheckBox``，不会命中这里的 ``QCheckBox(``
+      调用，所以本规则不会误伤合规写法）
     """
     import ast
 
     ui_dir = ROOT / "admin" / "app" / "ui"
-    banned = {"QComboBox", "QSpinBox", "QDateTimeEdit"}
+    banned = {"QComboBox", "QSpinBox", "QDateTimeEdit", "QCheckBox", "QRadioButton"}
     offenders: list[str] = []
 
     def _call_name(node: ast.Call) -> str | None:

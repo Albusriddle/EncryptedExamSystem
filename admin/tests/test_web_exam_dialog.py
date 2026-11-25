@@ -425,6 +425,7 @@ def test_cert_source_defaults_to_self_signed_and_hides_fields(dialog) -> None:
     assert dialog.combo_tls_source.currentData() == "auto"
     assert dialog.cert_box.isHidden(), "自签时证书三行不该占版面"
     args = dialog._command_args()
+    assert _arg(args, "--tls") == "auto", "自签模式仍要显式下发 --tls auto"
     for flag in ("--tls-cert", "--tls-key", "--tls-ca", "--tls-check"):
         assert flag not in args, f"{flag} 不该出现在自签模式的 argv 里"
 
@@ -537,3 +538,78 @@ def test_cert_area_fits_and_keeps_log_readable(dialog) -> None:
     assert dialog.minimumHeight() >= dialog.log.minimumHeight() + 200, (
         f"窗口下界没把日志区算进去：{dialog.minimumHeight()} < {dialog.log.minimumHeight()} + 200"
     )
+
+
+def test_unchecking_https_through_real_click_disables_cert_group(
+    dialog, monkeypatch, tmp_path
+) -> None:
+    """关掉 HTTPS 必须**经由真实点击**把证书组禁用（AGENTS §3：复刻真实接线）。
+
+    旧用例是「手动调 `_sync_cert_state()` 摆出终态再断言」，等于只测了那个函数；
+    真正出事的是接线——`_on_tls_clicked` 里那三行 `_sync_cert_state()` 被人删掉时，
+    界面不会变灰、参数却悄悄不生效，而旧用例仍然全绿。
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    cert, key, _ca = _make_cert_files(tmp_path)
+    _fake_file_dialog(monkeypatch, [cert, key])
+    _select_source(dialog, "custom")
+    dialog.btn_pick_cert.click()
+    dialog.btn_pick_key.click()
+    assert "--tls-cert" in dialog._command_args()
+
+    # 用户点勾选框 → 二次确认选「是」→ 接线应当自动禁用整组。
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+    dialog.chk_tls.click()
+
+    assert not dialog.chk_tls.isChecked()
+    assert not dialog.combo_tls_source.isEnabled(), "明文下「证书来源」必须随点击一起禁用"
+    assert not dialog.cert_box.isEnabled(), "明文下证书区域必须随点击一起禁用"
+    args = dialog._command_args()
+    assert _arg(args, "--tls") == "off"
+    for flag in ("--tls-cert", "--tls-key", "--tls-ca", "--tls-check"):
+        assert flag not in args, f"{flag} 不该出现在明文模式的 argv 里"
+
+
+def test_browse_cancel_keeps_fields_and_argv_clean(dialog, monkeypatch) -> None:
+    """在文件对话框里点「取消」（返回空串）不能把路径写坏，也不能进 argv。
+
+    `QFileDialog.getOpenFileName` 取消时返回 `("", "")`；如果实现里没判空，
+    会把空串写进 line edit、`Path("")` 变成当前目录，`validate_inputs` 又会报
+    「找不到证书文件：.」这种莫名其妙的错。
+    """
+    _fake_file_dialog(monkeypatch, [])  # 队列空 → 每次调用都返回 ("", "")
+    _select_source(dialog, "custom")
+
+    dialog.btn_pick_cert.click()
+    dialog.btn_pick_key.click()
+    dialog.btn_pick_ca.click()
+
+    assert dialog.edit_cert.text() == ""
+    assert dialog.edit_key.text() == ""
+    assert dialog.edit_ca.text() == ""
+    args = dialog._command_args()
+    for flag in ("--tls-cert", "--tls-key", "--tls-ca"):
+        assert flag not in args, f"取消选择后 {flag} 不该出现"
+
+
+def test_failed_start_reports_exit_code_instead_of_stopped(dialog) -> None:
+    """服务端没起来就退出（最常见：外部证书自检失败）时，状态行要说「启动失败」。
+
+    只写「已停止」会让老师以为是自己点错了按钮，而真正原因在日志里的 `✗ …` 那几行。
+    """
+    dialog._ready = False
+    # 真的拉起进程再等它退出太慢；直接把 `exitCode()` 换成固定值即可。
+    dialog.proc.exitCode = lambda: 1  # type: ignore[method-assign]
+    dialog._on_finished()
+    assert "启动失败" in dialog.lbl_url.text(), dialog.lbl_url.text()
+    assert "1" in dialog.lbl_url.text()
+
+    # 正常停掉（曾经 ready 过）仍显示「已停止」，不要误报失败。
+    dialog._ready = True
+    dialog._on_finished()
+    assert dialog.lbl_url.text() == "已停止"

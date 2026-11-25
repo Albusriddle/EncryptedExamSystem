@@ -291,6 +291,77 @@ def test_pem_kind_recognises_all_key_flavours(tmp_path: Path) -> None:
     assert pem_kind(tmp_path / "missing.pem") == "unknown"
 
 
+def test_pem_kind_ignores_the_words_private_key_outside_a_header(tmp_path: Path) -> None:
+    """纯证书里出现「PRIVATE KEY」字样（注释、CN 名字）不能判成私钥。
+
+    旧实现是 `"-----BEGIN" in text and "PRIVATE KEY" in text`，于是下面这种文件会被
+    判成 `both`，可以塞进「私钥文件」框并通过界面校验；真正拦下它的只有服务端的
+    「私钥文件里没有可用的私钥」。现在按完整的头正则判定。
+    """
+    from app.core.webexam import pem_kind
+
+    tricky = _CERT_PEM + "# 备注：这是一份 PRIVATE KEY 的说明，不是私钥\n"
+    assert pem_kind(_write(tmp_path, "tricky.pem", tricky)) == "cert"
+
+
+def test_pem_kind_flags_openssh_and_encrypted_keys(tmp_path: Path) -> None:
+    """服务端只认不带口令的 PEM；OpenSSH / 加密私钥要单独识别，好给专门的文案。"""
+    from app.core.webexam import pem_kind
+
+    openssh = _pem("OPENSSH PRIVATE KEY")
+    encrypted = _pem("ENCRYPTED PRIVATE KEY")
+    assert pem_kind(_write(tmp_path, "id_rsa", openssh)) == "openssh"
+    assert pem_kind(_write(tmp_path, "enc.key", encrypted)) == "encrypted"
+
+
+def test_pem_kind_only_sniffs_the_file_head(tmp_path: Path) -> None:
+    """只在开头 64 KiB 里找头：私钥头藏在很后面的大文件不该被当成私钥。
+
+    这条同时给「误选 200 MB 抓包文件」兜底——实现只读头部，不会把整个文件读进内存。
+    """
+    from app.core.webexam import pem_kind
+
+    big = _CERT_PEM + ("#" + "x" * 100 + "\n") * 800 + _PKCS8_KEY_PEM
+    path = _write(tmp_path, "big.pem", big)
+    assert path.stat().st_size > 64 * 1024, "用例前提：文件要比嗅探窗口大"
+    assert pem_kind(path) == "cert"
+
+
+def test_validate_inputs_rejects_openssh_and_encrypted_keys(tmp_path: Path) -> None:
+    """这两类私钥服务端 100% 不认，界面要当场拦下并说清怎么转。"""
+    pkg, kf = _pkg_key(tmp_path)
+    cert = _write(tmp_path, "srv.crt", _CERT_PEM)
+
+    ssh_err = validate_inputs(
+        pkg,
+        kf,
+        8443,
+        tls_cert=cert,
+        tls_key=_write(tmp_path, "id_rsa", _pem("OPENSSH PRIVATE KEY")),
+    )
+    assert ssh_err is not None and "OpenSSH" in ssh_err and "openssl" in ssh_err, ssh_err
+
+    enc_err = validate_inputs(
+        pkg,
+        kf,
+        8443,
+        tls_cert=cert,
+        tls_key=_write(tmp_path, "enc.key", _pem("ENCRYPTED PRIVATE KEY")),
+    )
+    assert enc_err is not None and "口令" in enc_err, enc_err
+
+
+def test_validate_inputs_points_out_a_directory(tmp_path: Path) -> None:
+    """把文件夹选进证书框时要说「这是文件夹」，不能说「文件被移动或删除」。"""
+    pkg, kf = _pkg_key(tmp_path)
+    folder = tmp_path / "某个文件夹"
+    folder.mkdir()
+    key = _write(tmp_path, "srv.key", _PKCS8_KEY_PEM)
+
+    err = validate_inputs(pkg, kf, 8443, tls_cert=folder, tls_key=key)
+    assert err is not None and "文件夹" in err, err
+
+
 def test_validate_inputs_accepts_wellformed_custom_cert(tmp_path: Path) -> None:
     pkg, kf = _pkg_key(tmp_path)
     cert = _write(tmp_path, "srv.crt", _CERT_PEM)
