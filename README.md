@@ -4,7 +4,7 @@
 >
 > 本系统的定位是**「防误操作 + 现场监考」**，不是密码学意义上的强防作弊系统。防什么、不防什么，见 [安全边界与威胁模型](docs/安全边界与威胁模型.md)；已经明确接受、且**没有**修复的风险，见 [风险接受记录](docs/风险接受记录.md)。
 
-当前版本：**1.6.0**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
+当前版本：**1.6.1**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
 
 | 组件 | 技术形态 | 职责 |
 |---|---|---|
@@ -101,7 +101,8 @@
 - 网页登录限速按**真实对端 IP** 分桶（默认 60 次/分钟，可配置）；监听地址可只绑局域网网卡；
 - 代码高亮只影响显示，不执行代码；
 - 网页考试默认 **HTTPS（自签证书）**（v1.5.0 起）：启动时自动生成证书并打印指纹，学生首次访问点「高级 → 继续前往」；明文端口只做 301 跳转，不承载任何数据。
-- 网页服务端的参数表、TLS / 证书细节与已知限制见仓库内的 `crates/server/README.md`
+- 用自己的证书（内网 CA）只能命令行启动，最小参数表在 `docs/教师使用手册.md` §7.5；
+  完整参数、TLS 实现细节与已知限制见仓库内的 `crates/server/README.md`
   （**不能用相对链接**：发布包只带 `docs/`、`示例题库/`、`tools/`，指向 `crates/` 的链接
   在包里就是死链，`make-release-zip.sh` 会直接判失败）。
 
@@ -228,14 +229,14 @@ worker/              Cloudflare Worker 时间服务（**目录为空，未实现
 
 ---
 
-## 8. 测试与验证基线（v1.6.0）
+## 8. 测试与验证基线（v1.6.1）
 
 | 项 | 基线 |
 |---|---|
-| Rust | 366 个 `#[test]` |
+| Rust | 371 个 `#[test]`（Windows）/ 369（Linux）；差异来自 `#[cfg(windows)]` / `#[cfg(not(windows))]` 门控 |
 | Python | 434 passed + 1 skipped（收集 435，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
-| 发布预检 | `scripts/preflight-release.sh` 16 项（非 `--full`） |
+| 发布预检 | `scripts/preflight-release.sh` 17 项（非 `--full`） |
 | CI | 8 个 job：`rust` / `python` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `tools-scripts` / `web-smoke` |
 
 > 数字会随提交变化，**以 CI 与脚本输出为准**。发布预检的项数看脚本最后一行
