@@ -42,6 +42,68 @@ MAX_LOGIN_RATE_LIMIT = 10_000
 #: 必须与 `crates/server/src/main.rs` 的 `println!("考试服务已启动…")` 保持一致。
 READY_MARKER = "考试服务已启动"
 
+#: 证书来源（v1.7.0）：
+#: - `auto`  = 服务端自签证书（首次启动自动生成，学生点「高级 → 继续前往」）；
+#: - `custom`= 学校自己的证书（内网 CA 签发），需要显式给 cert/key（可选 CA）。
+TLS_SOURCES = ("auto", "custom")
+
+#: 外部证书的自检严格程度，与 `crates/server/src/main.rs` 的 `--tls-check` 一致。
+#: `warn`（默认）= 过期 / SAN 缺失只告警；`strict` = 同样拒绝启动。
+TLS_CHECK_WARN = "warn"
+TLS_CHECK_STRICT = "strict"
+TLS_CHECK_MODES = (TLS_CHECK_WARN, TLS_CHECK_STRICT)
+
+#: 文件对话框的过滤器。放 core 里是为了能在无 Qt 的单测里断言文案一致，
+#: 也避免 GUI 里散落两份魔法字符串。
+CERT_FILE_FILTER = "证书 (*.crt *.pem *.cer);;所有文件 (*)"
+KEY_FILE_FILTER = "私钥 (*.key *.pem);;所有文件 (*)"
+
+
+def pem_kind(path: Path) -> str:
+    """判断一个 PEM 文件里有哪些块：`cert` / `key` / `both` / `unknown`。
+
+    为什么只嗅探、不解析 X.509：真正的强校验在服务端**启动自检**里（私钥是否配套、
+    EKU、链、有效期、SAN），失败会拒绝启动并把原因打进对话框日志。界面这一层只需要
+    挡住「明显选错文件」（把私钥选进证书框、选了一个 txt），为此引 X.509 解析依赖
+    不值得。
+
+    为什么允许 `both`：内网 CA 常把「叶子 + 中间 + 私钥」放在同一个 PEM 里，
+    此时两个框都可以选它——服务端自己能分清。
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "unknown"
+    has_cert = "-----BEGIN CERTIFICATE-----" in text
+    # RSA / EC / PKCS#8 的私钥头分别是 `RSA PRIVATE KEY` / `EC PRIVATE KEY` /
+    # `PRIVATE KEY`，都含 `PRIVATE KEY`；`ENCRYPTED PRIVATE KEY` 也覆盖（服务端不认，
+    # 但界面不该替它判死——让服务端报出更准确的错）。
+    has_key = "-----BEGIN" in text and "PRIVATE KEY" in text
+    if has_cert and has_key:
+        return "both"
+    if has_cert:
+        return "cert"
+    if has_key:
+        return "key"
+    return "unknown"
+
+
+def _check_pem_file(path: Path, what: str, kinds: tuple[str, ...]) -> str | None:
+    """文件存在性 + 非空 + PEM 类型检查；返回错误文案或 None。"""
+    if not path.is_file():
+        return f"找不到{what}：{path}（文件被移动或删除？重新选一次）"
+    try:
+        if path.stat().st_size == 0:
+            return f"{what}是空文件：{path}（是不是选错了？）"
+    except OSError as exc:
+        return f"读不到{what}：{path}（{exc}）"
+    kind = pem_kind(path)
+    if kind in kinds:
+        return None
+    want = "私钥" if what == "私钥文件" else "证书"
+    begin = "PRIVATE KEY" if want == "私钥" else "CERTIFICATE"
+    return f"这个文件不像 PEM {want}：{path}（缺 -----BEGIN {begin}----- 行，选错文件了？）"
+
 
 def web_command(
     *,
@@ -55,6 +117,10 @@ def web_command(
     login_rate_limit: int = DEFAULT_LOGIN_RATE_LIMIT,
     tls: str = DEFAULT_TLS,
     http_redirect_port: int = DEFAULT_HTTP_REDIRECT_PORT,
+    tls_cert: Path | None = None,
+    tls_key: Path | None = None,
+    tls_ca: Path | None = None,
+    tls_check: str | None = None,
 ) -> list[str]:
     """拼出 `exam-server` 的 argv。
 
@@ -63,8 +129,12 @@ def web_command(
     `--time-check` / `--login-rate-limit` 由教师在这里选（v1.4.6 起）：前者决定
     「没外网的机房照样开考」还是「时间不一致就拒绝启动」，后者决定同一 IP 每分钟
     允许多少次登录（0 = 不限，演练或学生都在同一个 NAT 后面时需要）。
+
+    四个证书参数（v1.7.0）只在 `custom`（自己的证书）下由界面传入；`auto`（自签）时
+    全部为 None，argv 与 v1.6.x 完全一致。顺序跟 `crates/server/README.md` 的参数表
+    一致：`--tls` 之后、`--http-redirect-port` 之前。
     """
-    return [
+    argv = [
         str(server),
         "--package",
         str(package),
@@ -84,11 +154,24 @@ def web_command(
         # v1.5.0：默认 HTTPS（自签证书）。`off` 只用于排障或浏览器无法绕过证书警告的场合。
         "--tls",
         tls,
+    ]
+    # 只加真正给了的：None 表示「用自签」，此时一个证书参数都不该出现——否则
+    # 老版 exam-server 会以「未知参数」退出，而界面看起来一切正常。
+    if tls_cert is not None:
+        argv += ["--tls-cert", str(tls_cert)]
+    if tls_key is not None:
+        argv += ["--tls-key", str(tls_key)]
+    if tls_ca is not None:
+        argv += ["--tls-ca", str(tls_ca)]
+    if tls_check is not None:
+        argv += ["--tls-check", str(tls_check)]
+    argv += [
         "--http-redirect-port",
         # 老师可能把 HTTPS 也配到 8080：这时跳转端口没法用，直接关掉（0），
         # 而不是拦住他——旧书签本来就该跟着换地址。
         str(0 if http_redirect_port == port else http_redirect_port),
     ]
+    return argv
 
 
 def validate_inputs(
@@ -101,6 +184,10 @@ def validate_inputs(
     login_rate_limit: int = DEFAULT_LOGIN_RATE_LIMIT,
     tls: str = DEFAULT_TLS,
     http_redirect_port: int = DEFAULT_HTTP_REDIRECT_PORT,
+    tls_cert: Path | None = None,
+    tls_key: Path | None = None,
+    tls_ca: Path | None = None,
+    tls_check: str | None = None,
 ) -> str | None:
     """返回错误文案；None 表示可以启动。
 
@@ -120,6 +207,37 @@ def validate_inputs(
         return f"时间校验必须是 {' / '.join(TIME_CHECK_MODES)} 之一（实际 {time_check!r}）"
     if tls not in ("auto", "off"):
         return f"TLS 模式必须是 auto / off 之一（实际 {tls!r}）"
+    # ---- 自己的证书（v1.7.0） ----
+    if tls_check is not None and tls_check not in TLS_CHECK_MODES:
+        return f"严格自检必须是 {' / '.join(TLS_CHECK_MODES)} 之一（实际 {tls_check!r}）"
+    has_cert = tls_cert is not None
+    has_key = tls_key is not None
+    if tls == "off" and (has_cert or has_key or tls_ca is not None):
+        return (
+            "已选「不使用 HTTPS」，就不能再指定证书（明文模式没有证书）。"
+            "要么清掉证书，要么重新勾上「使用 HTTPS」。"
+        )
+    if has_cert != has_key:
+        return (
+            "「自己的证书」需要同时选择证书文件与私钥文件——只给一个的话服务端起不来。"
+            "请把另一个也选上，或把「证书来源」切回「自签」。"
+        )
+    if has_cert and has_key:
+        # 顺序：先证书后私钥，报错时先说清是哪个框选错了。
+        for path, what, kinds in (
+            (tls_cert, "证书文件", ("cert", "both")),
+            (tls_key, "私钥文件", ("key", "both")),
+        ):
+            assert path is not None  # 上面已保证成对
+            err = _check_pem_file(path, what, kinds)
+            if err:
+                return err
+    if tls_ca is not None:
+        if not has_cert:
+            return "CA 证书只在「自己的证书」下有意义：请先选证书与私钥，或清掉 CA 证书。"
+        err = _check_pem_file(tls_ca, "CA 证书", ("cert", "both"))
+        if err:
+            return err
     if not (0 <= http_redirect_port <= 65535):
         return f"明文跳转端口必须在 0–65535 之间（0 = 关闭），实际 {http_redirect_port}"
     if not (0 <= login_rate_limit <= MAX_LOGIN_RATE_LIMIT):

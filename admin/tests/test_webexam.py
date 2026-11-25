@@ -189,3 +189,179 @@ def test_validate_inputs_rejects_bad_tls(tmp_path: Path) -> None:
     key.write_text("00" * 32, encoding="utf-8")
     bad = validate_inputs(pkg, key, 8443, tls="strict")
     assert bad is not None and "TLS" in bad
+
+
+# ---------------------------------------------------------------------------
+# v1.7.0：自己的证书（内网 CA）——argv 拼装与前置校验
+# ---------------------------------------------------------------------------
+
+_CERT_PEM = """-----BEGIN CERTIFICATE-----
+MIIBkTCB+wIJAO0example
+-----END CERTIFICATE-----
+"""
+_RSA_KEY_PEM = """-----BEGIN RSA PRIVATE KEY-----
+MIIBOgIBAAJBAKexample
+-----END RSA PRIVATE KEY-----
+"""
+_EC_KEY_PEM = """-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEexample
+-----END EC PRIVATE KEY-----
+"""
+_PKCS8_KEY_PEM = """-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49example
+-----END PRIVATE KEY-----
+"""
+
+
+def _pkg_key(tmp_path: Path) -> tuple[Path, Path]:
+    pkg = tmp_path / "pkg.exe"
+    pkg.write_bytes(b"MZ")
+    key = tmp_path / "key.txt"
+    key.write_text("00" * 32, encoding="utf-8")
+    return pkg, key
+
+
+def _write(tmp_path: Path, name: str, text: str) -> Path:
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_web_command_has_no_cert_flags_by_default(tmp_path: Path) -> None:
+    """自签（默认）时 argv 里一个证书参数都不该出现——否则老版服务端直接报未知参数。"""
+    cmd = web_command(
+        server=Path("exam-server.exe"),
+        package=tmp_path / "pkg.exe",
+        keyfile=tmp_path / "key.txt",
+        port=8443,
+        answers_dir=tmp_path / "answers",
+    )
+    for flag in ("--tls-cert", "--tls-key", "--tls-ca", "--tls-check"):
+        assert flag not in cmd, f"{flag} 不该出现在自签模式的 argv 里"
+
+
+def test_web_command_carries_custom_cert_flags(tmp_path: Path) -> None:
+    """自己的证书：四个参数都要进 argv，且顺序在 --tls 之后、--http-redirect-port 之前。"""
+    cert = tmp_path / "证书 文件.crt"
+    key = tmp_path / "私 钥.key"
+    ca = tmp_path / "内网 CA.pem"
+    cmd = web_command(
+        server=Path("exam-server.exe"),
+        package=tmp_path / "pkg.exe",
+        keyfile=tmp_path / "key.txt",
+        port=8443,
+        answers_dir=tmp_path / "answers",
+        tls_cert=cert,
+        tls_key=key,
+        tls_ca=ca,
+        tls_check="strict",
+    )
+    assert cmd[cmd.index("--tls-cert") + 1] == str(cert)
+    assert cmd[cmd.index("--tls-key") + 1] == str(key)
+    assert cmd[cmd.index("--tls-ca") + 1] == str(ca)
+    assert cmd[cmd.index("--tls-check") + 1] == "strict"
+    # 顺序：--tls → 证书四参数 → --http-redirect-port（与 README 参数表一致）
+    assert cmd.index("--tls") < cmd.index("--tls-cert") < cmd.index("--http-redirect-port")
+
+
+def test_web_command_carries_partial_cert_flags(tmp_path: Path) -> None:
+    """只给证书 + 私钥（没有 CA、没开严格）时，只出现这两个参数。"""
+    cert = tmp_path / "a.crt"
+    key = tmp_path / "a.key"
+    cmd = web_command(
+        server=Path("exam-server.exe"),
+        package=tmp_path / "pkg.exe",
+        keyfile=tmp_path / "key.txt",
+        port=8443,
+        answers_dir=tmp_path / "answers",
+        tls_cert=cert,
+        tls_key=key,
+    )
+    assert "--tls-cert" in cmd and "--tls-key" in cmd
+    assert "--tls-ca" not in cmd and "--tls-check" not in cmd
+
+
+def test_pem_kind_recognises_all_key_flavours(tmp_path: Path) -> None:
+    """RSA / EC / PKCS#8 三种私钥头都要认，否则老师换了密钥格式就选不进来。"""
+    from app.core.webexam import pem_kind
+
+    assert pem_kind(_write(tmp_path, "c.pem", _CERT_PEM)) == "cert"
+    assert pem_kind(_write(tmp_path, "rsa.key", _RSA_KEY_PEM)) == "key"
+    assert pem_kind(_write(tmp_path, "ec.key", _EC_KEY_PEM)) == "key"
+    assert pem_kind(_write(tmp_path, "pk8.key", _PKCS8_KEY_PEM)) == "key"
+    assert pem_kind(_write(tmp_path, "all.pem", _CERT_PEM + _PKCS8_KEY_PEM)) == "both"
+    assert pem_kind(_write(tmp_path, "junk.txt", "not a pem")) == "unknown"
+    assert pem_kind(tmp_path / "missing.pem") == "unknown"
+
+
+def test_validate_inputs_accepts_wellformed_custom_cert(tmp_path: Path) -> None:
+    pkg, kf = _pkg_key(tmp_path)
+    cert = _write(tmp_path, "srv.crt", _CERT_PEM)
+    key = _write(tmp_path, "srv.key", _PKCS8_KEY_PEM)
+    ca = _write(tmp_path, "ca.crt", _CERT_PEM)
+    assert validate_inputs(pkg, kf, 8443, tls_cert=cert, tls_key=key) is None
+    assert (
+        validate_inputs(pkg, kf, 8443, tls_cert=cert, tls_key=key, tls_ca=ca, tls_check="strict")
+        is None
+    )
+
+
+def test_validate_inputs_requires_cert_and_key_together(tmp_path: Path) -> None:
+    pkg, kf = _pkg_key(tmp_path)
+    cert = _write(tmp_path, "srv.crt", _CERT_PEM)
+    key = _write(tmp_path, "srv.key", _PKCS8_KEY_PEM)
+
+    only_cert = validate_inputs(pkg, kf, 8443, tls_cert=cert)
+    assert only_cert is not None and "同时" in only_cert, only_cert
+
+    only_key = validate_inputs(pkg, kf, 8443, tls_key=key)
+    assert only_key is not None and "同时" in only_key, only_key
+
+
+def test_validate_inputs_rejects_cert_in_plaintext_mode(tmp_path: Path) -> None:
+    """明文模式下指定证书是自相矛盾的配置，必须拦住而不是忽略。"""
+    pkg, kf = _pkg_key(tmp_path)
+    cert = _write(tmp_path, "srv.crt", _CERT_PEM)
+    key = _write(tmp_path, "srv.key", _PKCS8_KEY_PEM)
+    msg = validate_inputs(pkg, kf, 8443, tls="off", tls_cert=cert, tls_key=key)
+    assert msg is not None and "明文" in msg, msg
+
+
+def test_validate_inputs_rejects_missing_and_empty_files(tmp_path: Path) -> None:
+    pkg, kf = _pkg_key(tmp_path)
+    key = _write(tmp_path, "srv.key", _PKCS8_KEY_PEM)
+    msg = validate_inputs(pkg, kf, 8443, tls_cert=tmp_path / "nope.crt", tls_key=key)
+    assert msg is not None and "找不到" in msg, msg
+
+    empty = tmp_path / "empty.crt"
+    empty.write_text("", encoding="utf-8")
+    msg = validate_inputs(pkg, kf, 8443, tls_cert=empty, tls_key=key)
+    assert msg is not None and "空文件" in msg, msg
+
+
+def test_validate_inputs_rejects_non_pem(tmp_path: Path) -> None:
+    """选成 txt / 选错框（私钥放进证书框）都要给出可操作的提示。"""
+    pkg, kf = _pkg_key(tmp_path)
+    junk = _write(tmp_path, "junk.txt", "just text")
+    key = _write(tmp_path, "srv.key", _PKCS8_KEY_PEM)
+    msg = validate_inputs(pkg, kf, 8443, tls_cert=junk, tls_key=key)
+    assert msg is not None and "不像 PEM" in msg, msg
+
+    cert = _write(tmp_path, "srv.crt", _CERT_PEM)
+    swapped = validate_inputs(pkg, kf, 8443, tls_cert=cert, tls_key=cert)
+    assert swapped is not None and "私钥" in swapped, swapped
+
+
+def test_validate_inputs_rejects_ca_without_cert(tmp_path: Path) -> None:
+    pkg, kf = _pkg_key(tmp_path)
+    ca = _write(tmp_path, "ca.crt", _CERT_PEM)
+    msg = validate_inputs(pkg, kf, 8443, tls_ca=ca)
+    assert msg is not None and "CA" in msg, msg
+
+
+def test_validate_inputs_rejects_bad_tls_check(tmp_path: Path) -> None:
+    pkg, kf = _pkg_key(tmp_path)
+    cert = _write(tmp_path, "srv.crt", _CERT_PEM)
+    key = _write(tmp_path, "srv.key", _PKCS8_KEY_PEM)
+    msg = validate_inputs(pkg, kf, 8443, tls_cert=cert, tls_key=key, tls_check="paranoid")
+    assert msg is not None and "严格自检" in msg, msg

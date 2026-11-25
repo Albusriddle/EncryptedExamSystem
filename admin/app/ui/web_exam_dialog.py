@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtWidgets import (
     QDialog,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -16,16 +17,22 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from app.core.webexam import (
+    CERT_FILE_FILTER,
     DEFAULT_BIND,
     DEFAULT_HTTP_REDIRECT_PORT,
     DEFAULT_LOGIN_RATE_LIMIT,
     DEFAULT_PORT,
     DEFAULT_TIME_CHECK,
+    KEY_FILE_FILTER,
     MAX_LOGIN_RATE_LIMIT,
     TIME_CHECK_MODES,
+    TLS_CHECK_STRICT,
+    TLS_CHECK_WARN,
+    TLS_SOURCES,
     access_url,
     advertised_host,
     bind_choices,
@@ -52,7 +59,6 @@ class WebExamDialog(QDialog):
     def __init__(self, parent, package: str, keyfile: str) -> None:
         super().__init__(parent)
         self.setWindowTitle("网页考试（局域网）")
-        self.resize(680, 480)
         self.proc = QProcess(self)
         self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.proc.readyReadStandardOutput.connect(self._read_output)
@@ -94,6 +100,60 @@ class WebExamDialog(QDialog):
         self.chk_tls.clicked.connect(self._on_tls_clicked)
         self.edit_answers = QLineEdit(str(Path(package).parent / "web-answers") if package else "")
 
+        # ---- 证书来源（v1.7.0）：自签 / 学校自己的证书 ----
+        #
+        # 为什么要给这个开关：有内网 CA 的学校希望自己的证书，而不是「每次点继续」的自签；
+        # 但界面此前只有「使用 HTTPS」一个勾选框，老师只能改命令行启动。
+        self.combo_tls_source = NoWheelComboBox()
+        self.combo_tls_source.addItem("自签（服务端自动生成）", "auto")
+        self.combo_tls_source.addItem("自己的证书（内网 CA）", "custom")
+        self.combo_tls_source.setToolTip(
+            "自签（默认）：服务端首次启动自动生成证书，学生点「高级 → 继续前往」。\n"
+            "自己的证书：用学校内网 CA 签发的证书，需要选证书文件与私钥文件。\n"
+            "服务端启动时会自检（私钥配套 / EKU / 链 / 有效期 / SAN），"
+            "致命问题会拒绝启动并在日志里打印原因。"
+        )
+        self.combo_tls_source.currentIndexChanged.connect(lambda _i: self._sync_cert_state())
+
+        # 三行文件选择 + 严格自检，整体放进一个容器：选「自签」时整块隐藏，
+        # 表单不会留下三个空行。
+        self.cert_box = QWidget()
+        cert_form = QFormLayout(self.cert_box)
+        cert_form.setContentsMargins(0, 0, 0, 0)
+
+        self.edit_cert = QLineEdit()
+        self.edit_key = QLineEdit()
+        self.edit_ca = QLineEdit()
+        self.btn_pick_cert = QPushButton("浏览…")
+        self.btn_pick_key = QPushButton("浏览…")
+        self.btn_pick_ca = QPushButton("浏览…")
+        for btn in (self.btn_pick_cert, self.btn_pick_key, self.btn_pick_ca):
+            fit_button_text(btn)
+        cert_form.addRow("证书文件", self._file_row(self.edit_cert, self.btn_pick_cert))
+        cert_form.addRow("私钥文件", self._file_row(self.edit_key, self.btn_pick_key))
+        cert_form.addRow("CA 证书（可选）", self._file_row(self.edit_ca, self.btn_pick_ca))
+
+        # 严格自检：默认关（= 服务端 `--tls-check warn`）。开着意味着「过期 / SAN 缺地址
+        # 也拒绝启动」——只有真正严格的内网才该开，否则考场会因为证书快到期而开不了考。
+        self.chk_tls_strict = make_checkbox("严格自检（过期 / SAN 不完整也拒绝启动）")
+        self.chk_tls_strict.setToolTip(
+            "对应服务端 --tls-check strict。\n"
+            "关闭（默认）：私钥不配套 / 缺 serverAuth / 链不可信 → 拒绝启动；"
+            "证书过期或 SAN 缺地址只告警，学生仍可点「继续」。\n"
+            "开启：上述告警也拒绝启动。"
+        )
+        cert_form.addRow("", self.chk_tls_strict)
+
+        self.btn_pick_cert.clicked.connect(
+            lambda: self._pick_file(self.edit_cert, "选择证书文件", CERT_FILE_FILTER)
+        )
+        self.btn_pick_key.clicked.connect(
+            lambda: self._pick_file(self.edit_key, "选择私钥文件", KEY_FILE_FILTER)
+        )
+        self.btn_pick_ca.clicked.connect(
+            lambda: self._pick_file(self.edit_ca, "选择 CA 证书（可选）", CERT_FILE_FILTER)
+        )
+
         # 监听地址：默认所有网卡；多网卡教师机只绑 LAN 地址时，外网侧根本连不上。
         self.combo_bind = NoWheelComboBox()
         for value, label in bind_choices():
@@ -132,6 +192,8 @@ class WebExamDialog(QDialog):
         form.addRow("K_manifest", self.edit_keyfile)
         form.addRow("端口", self.spin_port)
         form.addRow("HTTPS", self.chk_tls)
+        form.addRow("证书来源", self.combo_tls_source)
+        form.addRow(self.cert_box)
         form.addRow("监听地址", self.combo_bind)
         form.addRow("时间校验", self.combo_time_check)
         form.addRow("同 IP 登录上限", self.spin_rate_limit)
@@ -140,7 +202,9 @@ class WebExamDialog(QDialog):
         # 会被「浏览器说不安全」的举手打断。
         form.addRow(
             "证书",
-            QLabel("由服务端自动生成到「答题卡目录/tls/」下（首次访问点「高级 → 继续前往」）"),
+            QLabel(
+                "自签：由服务端自动生成到「答题卡目录/tls/」下（首次访问点「高级 → 继续前往」）"
+            ),
         )
 
         self.lbl_url = QLabel("未启动")
@@ -178,8 +242,94 @@ class WebExamDialog(QDialog):
             QLabel(
                 "默认 HTTPS（自签证书）：学生首次访问点「高级 → 继续前往」；iPad/iPhone 用 Safari；"
                 "关闭 HTTPS 为明文（同网段可嗅探），仅建议排障时使用。"
+                "「自己的证书」需要服务端启动时通过自检（私钥配套 / EKU / 链 / 有效期 / SAN），"
+                "失败会拒绝启动并在下方日志里打印原因。"
             )
         )
+
+        # 先按默认（自签）把证书区域收起来；此后由 `_sync_cert_state()` 统一维护。
+        self._inputs_editable = True
+        self._sync_cert_state()
+        # 高度按**内容**自适应，不用固定像素：v1.7.0 多了「证书来源」+ 三行文件选择，
+        # 而固定像素在 150% DPI 的机器上会被折算成更小的逻辑高度，把日志区挤没
+        # （老师排查启动失败全靠那块日志）。这里先量一次「证书区域也可见」时的高度。
+        self.cert_box.show()
+        hint = self.sizeHint().height()
+        self._sync_cert_state()  # 自签时把它收回去
+        self.resize(720, max(640, hint))
+
+    # -- 证书区域 ---------------------------------------------------------
+
+    @staticmethod
+    def _file_row(edit: QLineEdit, button: QPushButton) -> QWidget:
+        """一行「路径输入 + 浏览按钮」：两个控件装进容器，方便整行启停。"""
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(edit, 1)
+        row.addWidget(button)
+        return box
+
+    def _pick_file(self, edit: QLineEdit, title: str, name_filter: str) -> None:
+        start = edit.text().strip() or str(Path.home())
+        path, _selected = QFileDialog.getOpenFileName(self, title, start, name_filter)
+        if path:
+            edit.setText(path)
+
+    def _tls_source(self) -> str:
+        value = str(self.combo_tls_source.currentData() or TLS_SOURCES[0])
+        return value if value in TLS_SOURCES else TLS_SOURCES[0]
+
+    def _https_enabled(self) -> bool:
+        return self.chk_tls.isChecked()
+
+    def _clear_cert_fields(self) -> None:
+        """切回自签时清空三个路径与严格勾选。
+
+        为什么必须清空：`_command_args()` 虽然有 `_tls_args()` 兜底，但只要哪天有人
+        绕过它直接拼参数，残留路径就会让服务端拿自签的 `--tls auto` 配外部证书启动——
+        那种「界面显示自签、实际用了外部证书」的错配最难查。清空是第二道闸。
+        """
+        for edit in (self.edit_cert, self.edit_key, self.edit_ca):
+            edit.clear()
+        self.chk_tls_strict.setChecked(False)
+
+    def _sync_cert_state(self) -> None:
+        """按「HTTPS 开关 / 证书来源 / 是否运行中」统一维护证书区域。"""
+        https_on = self._https_enabled()
+        custom = self._tls_source() == "custom" and https_on
+        self.cert_box.setVisible(custom)
+        if not custom:
+            self._clear_cert_fields()
+        # 明文模式下「证书来源」毫无意义：禁用，免得老师切过去以为生效了。
+        self.combo_tls_source.setEnabled(self._inputs_editable and https_on)
+        self.cert_box.setEnabled(self._inputs_editable and https_on)
+
+    def _tls_args(self) -> dict[str, object]:
+        """把界面上的证书选择映射成 `web_command()` / `validate_inputs()` 的四个参数。
+
+        `auto`（自签）或「没勾 HTTPS」时四个值全是 None —— argv 里一个证书参数都不出现，
+        与 v1.6.x 的行为完全一致。
+        """
+        empty: dict[str, object] = {
+            "tls_cert": None,
+            "tls_key": None,
+            "tls_ca": None,
+            "tls_check": None,
+        }
+        if self._tls_source() != "custom" or not self._https_enabled():
+            return empty
+        args: dict[str, object] = {}
+        for key, edit in (
+            ("tls_cert", self.edit_cert),
+            ("tls_key", self.edit_key),
+            ("tls_ca", self.edit_ca),
+        ):
+            text = edit.text().strip()
+            args[key] = Path(text) if text else None
+        # 用具名常量而不是字面量：档位改名时这里跟着变，core 的校验也能兜住。
+        args["tls_check"] = TLS_CHECK_STRICT if self.chk_tls_strict.isChecked() else TLS_CHECK_WARN
+        return args
 
     # -- 参数 -------------------------------------------------------------
 
@@ -236,12 +386,16 @@ class WebExamDialog(QDialog):
             self.edit_keyfile,
             self.spin_port,
             self.chk_tls,
+            self.combo_tls_source,
             self.combo_bind,
             self.combo_time_check,
             self.spin_rate_limit,
             self.edit_answers,
         ):
             widget.setEnabled(enabled)
+        self._inputs_editable = enabled
+        # 证书区域还受「HTTPS 是否开启」影响，交给同一个入口维护，避免两处各写一半。
+        self._sync_cert_state()
         self.lbl_locked.setText("" if enabled else "改动需重启服务生效")
 
     def _command_args(self) -> list[str]:
@@ -262,6 +416,8 @@ class WebExamDialog(QDialog):
             # TLS 模式必须显式下发：老版 exam-server 不认这个参数会立刻报错，
             # 而不是「界面显示 https、实际跑 http」这种没人能发现的静默错配。
             tls="auto" if self.chk_tls.isChecked() else "off",
+            # 自己的证书（custom）才带这四个；自签时全是 None，argv 与 v1.6.x 一致。
+            **self._tls_args(),  # type: ignore[arg-type]
         )
 
     def _server_path(self) -> Path:
@@ -293,6 +449,7 @@ class WebExamDialog(QDialog):
             time_check=self._time_check(),
             login_rate_limit=self._login_rate_limit(),
             tls="auto" if self.chk_tls.isChecked() else "off",
+            **self._tls_args(),  # type: ignore[arg-type]
         )
         if err:
             QMessageBox.warning(self, "无法启动", err)
@@ -429,6 +586,7 @@ class WebExamDialog(QDialog):
         非用户动作上。`clicked(bool)` 的参数是**点击后的状态**，所以拒绝时要把勾复原。
         """
         if checked:
+            self._sync_cert_state()
             self._refresh_url()
             return
         answer = QMessageBox.question(
@@ -441,12 +599,15 @@ class WebExamDialog(QDialog):
             QMessageBox.StandardButton.No,
         )
         if answer == QMessageBox.StandardButton.Yes:
+            # 明文模式没有证书：把证书区域整体禁用（不隐藏，让老师看到它为什么不生效）。
+            self._sync_cert_state()
             self._refresh_url()
             return
         # 用户拒绝：把勾复原。blockSignals 防「setChecked 又触发 toggled」的递归弹窗。
         self.chk_tls.blockSignals(True)
         self.chk_tls.setChecked(True)
         self.chk_tls.blockSignals(False)
+        self._sync_cert_state()
 
     def _copy_url(self) -> None:
         from PySide6.QtWidgets import QApplication

@@ -374,3 +374,158 @@ def test_tls_checkbox_is_a_compact_checkbox(dialog) -> None:
     from app.ui.widgets import CompactCheckBox
 
     assert isinstance(dialog.chk_tls, CompactCheckBox)
+
+
+# ---------------------------------------------------------------------------
+# v1.7.0：证书来源（自签 / 自己的证书）
+# ---------------------------------------------------------------------------
+
+_CERT_PEM = "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJAO0example\n-----END CERTIFICATE-----\n"
+_KEY_PEM = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49example\n-----END PRIVATE KEY-----\n"
+
+
+def _select_source(dialog, value: str) -> None:
+    combo = dialog.combo_tls_source
+    index = combo.findData(value)
+    assert index >= 0, f"证书来源里缺少 {value}"
+    combo.setCurrentIndex(index)
+
+
+def _make_cert_files(tmp_path: Path) -> tuple[Path, Path, Path]:
+    base = tmp_path / "证书 目录"
+    base.mkdir()
+    cert = base / "服务 证书.crt"
+    cert.write_text(_CERT_PEM, encoding="utf-8")
+    key = base / "服务 私钥.key"
+    key.write_text(_KEY_PEM, encoding="utf-8")
+    ca = base / "内网 CA.pem"
+    ca.write_text(_CERT_PEM, encoding="utf-8")
+    return cert, key, ca
+
+
+def _fake_file_dialog(monkeypatch, paths: list[Path]) -> None:
+    """把三个「浏览…」依次指向给定路径（不弹真对话框）。"""
+    from PySide6.QtWidgets import QFileDialog
+
+    queue = list(paths)
+
+    def _pick(*_args, **_kwargs):
+        return (str(queue.pop(0)) if queue else "", "")
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(_pick))
+
+
+def test_cert_source_defaults_to_self_signed_and_hides_fields(dialog) -> None:
+    """默认自签：证书区域收起来，argv 里没有证书参数（与 v1.6.x 完全一致）。"""
+    assert dialog.combo_tls_source.currentData() == "auto"
+    assert dialog.cert_box.isHidden(), "自签时证书三行不该占版面"
+    args = dialog._command_args()
+    for flag in ("--tls-cert", "--tls-key", "--tls-ca", "--tls-check"):
+        assert flag not in args, f"{flag} 不该出现在自签模式的 argv 里"
+
+
+def test_switching_to_custom_shows_fields(dialog) -> None:
+    _select_source(dialog, "custom")
+    assert not dialog.cert_box.isHidden(), "选「自己的证书」后三行必须显示"
+    assert dialog.combo_tls_source.isEnabled()
+
+
+def test_browse_buttons_fill_paths_and_reach_command(dialog, monkeypatch, tmp_path) -> None:
+    """点「浏览…」选好文件后，四个参数必须真的进 argv（含空格与中文路径）。"""
+    cert, key, ca = _make_cert_files(tmp_path)
+    _fake_file_dialog(monkeypatch, [cert, key, ca])
+    _select_source(dialog, "custom")
+
+    dialog.btn_pick_cert.click()
+    dialog.btn_pick_key.click()
+    dialog.btn_pick_ca.click()
+
+    assert dialog.edit_cert.text() == str(cert)
+    assert dialog.edit_key.text() == str(key)
+    assert dialog.edit_ca.text() == str(ca)
+
+    args = dialog._command_args()
+    assert _arg(args, "--tls-cert") == str(cert)
+    assert _arg(args, "--tls-key") == str(key)
+    assert _arg(args, "--tls-ca") == str(ca)
+    assert _arg(args, "--tls-check") == "warn", "默认不严格（过期 / SAN 缺失只告警）"
+
+
+def test_strict_checkbox_maps_to_strict_flag(dialog, monkeypatch, tmp_path) -> None:
+    cert, key, _ca = _make_cert_files(tmp_path)
+    _fake_file_dialog(monkeypatch, [cert, key])
+    _select_source(dialog, "custom")
+    dialog.btn_pick_cert.click()
+    dialog.btn_pick_key.click()
+
+    dialog.chk_tls_strict.setChecked(True)
+    assert _arg(dialog._command_args(), "--tls-check") == "strict"
+
+
+def test_switching_back_to_auto_clears_and_drops_flags(dialog, monkeypatch, tmp_path) -> None:
+    """切回自签必须清空路径：残留路径绝不能再进 argv。"""
+    cert, key, _ca = _make_cert_files(tmp_path)
+    _fake_file_dialog(monkeypatch, [cert, key])
+    _select_source(dialog, "custom")
+    dialog.btn_pick_cert.click()
+    dialog.btn_pick_key.click()
+    dialog.chk_tls_strict.setChecked(True)
+    assert "--tls-cert" in dialog._command_args()
+
+    _select_source(dialog, "auto")
+
+    assert dialog.cert_box.isHidden()
+    assert dialog.edit_cert.text() == "" and dialog.edit_key.text() == ""
+    assert not dialog.chk_tls_strict.isChecked(), "严格自检也要复位"
+    args = dialog._command_args()
+    for flag in ("--tls-cert", "--tls-key", "--tls-ca", "--tls-check"):
+        assert flag not in args
+
+
+def test_plaintext_disables_cert_group(dialog) -> None:
+    """明文模式下证书没有意义：整组禁用（不隐藏，让老师看到它为什么不生效）。"""
+    _select_source(dialog, "custom")
+    _force_check(dialog.chk_tls, False)
+    dialog._sync_cert_state()
+
+    assert not dialog.combo_tls_source.isEnabled(), "明文下「证书来源」必须禁用"
+    assert not dialog.cert_box.isEnabled(), "明文下证书区域必须禁用"
+    assert _arg(dialog._command_args(), "--tls") == "off"
+
+
+def test_cert_controls_disabled_while_running(dialog) -> None:
+    """运行中所有会改变进程行为的输入都禁用，新增的证书控件也不例外。"""
+    _select_source(dialog, "custom")
+    dialog._set_inputs_enabled(False)
+    assert not dialog.combo_tls_source.isEnabled()
+    assert not dialog.cert_box.isEnabled()
+    assert not dialog.edit_cert.isEnabled()
+
+    dialog._set_inputs_enabled(True)
+    assert dialog.combo_tls_source.isEnabled()
+    assert dialog.cert_box.isEnabled()
+
+
+def test_cert_area_fits_and_keeps_log_readable(dialog) -> None:
+    """证书区域必须落在对话框内，且不能把日志区挤没。
+
+    不用截图（AGENTS §4：DPI 下结论不可靠），直接问 Qt 几何：`cert_box` 的四个角
+    都在 dialog 矩形内；切到 custom 后日志区仍留有可读高度（排查启动失败全靠它）。
+    v1.7.0 加了三行文件选择，沿用 480 高度时日志只剩约 70 px。
+    """
+    _select_source(dialog, "custom")
+    dialog.show()
+    QApplication.processEvents()
+
+    assert dialog.cert_box.isVisible()
+    rect = dialog.rect()
+    top_left = dialog.cert_box.mapTo(dialog, dialog.cert_box.rect().topLeft())
+    bottom_right = dialog.cert_box.mapTo(dialog, dialog.cert_box.rect().bottomRight())
+    assert rect.contains(top_left) and rect.contains(bottom_right), (
+        f"证书区域超出对话框：{top_left}..{bottom_right} vs {rect}"
+    )
+    # 不比较绝对像素（DPI 缩放会让同一数值对应不同逻辑高度，AGENTS §4 的教训）：
+    # 断言「窗口高度不小于布局自己想要的高度」——这才是「没被挤扁」的不变式。
+    assert dialog.height() >= dialog.sizeHint().height(), (
+        f"窗口比布局需要的高度还矮：{dialog.height()} < {dialog.sizeHint().height()}"
+    )
