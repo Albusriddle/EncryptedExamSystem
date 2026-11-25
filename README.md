@@ -4,7 +4,7 @@
 >
 > 本系统的定位是**「防误操作 + 现场监考」**，不是密码学意义上的强防作弊系统。防什么、不防什么，见 [安全边界与威胁模型](docs/安全边界与威胁模型.md)；已经明确接受、且**没有**修复的风险，见 [风险接受记录](docs/风险接受记录.md)。
 
-当前版本：**1.7.1**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
+当前版本：**1.8.0**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
 
 | 组件 | 技术形态 | 职责 |
 |---|---|---|
@@ -99,6 +99,9 @@
 - 网页状态文件权限收紧：Windows 受保护 DACL（仅当前用户，切断 `Administrators` / `Users` / `Everyone` 继承）、Unix `0600`，升级前的旧文件启动时补收紧；
 - 网页作答**每次保存即加密落盘**，进程崩溃 / 断电后重登可恢复未交卷答案；
 - 网页登录限速按**真实对端 IP** 分桶（默认 60 次/分钟，可配置）；监听地址可只绑局域网网卡；
+- **监考页**（v1.8.0）：浏览器打开启动横幅里的 `/monitor?t=…` 看全场进度，可强制收卷 /
+  终止作答 / 解除 / 批量收卷；独立监考令牌（`<答题卡目录>/monitor.token`，不落 cookie）、
+  写操作全审计；明文模式默认允许写但红字警告，`--monitor-write-mode tls-only` 可关闭;
 - 代码高亮只影响显示，不执行代码；
 - 网页考试默认 **HTTPS（自签证书）**（v1.5.0 起）：启动时自动生成证书并打印指纹，学生首次访问点「高级 → 继续前往」；明文端口只做 301 跳转，不承载任何数据。
 - 也可以用学校**自己的证书**（内网 CA）：管理端「网页考试…」的「证书来源 → 自己的证书」选
@@ -231,12 +234,12 @@ worker/              Cloudflare Worker 时间服务（**目录为空，未实现
 
 ---
 
-## 8. 测试与验证基线（v1.7.1）
+## 8. 测试与验证基线（v1.8.0）
 
 | 项 | 基线 |
 |---|---|
-| Rust | 372 个 `#[test]`（Windows）/ 370（Linux）；差异来自 `#[cfg(windows)]` / `#[cfg(not(windows))]` 门控 |
-| Python | 461 passed + 1 skipped（收集 462，含参数化展开） |
+| Rust | 391 个 `#[test]`（Windows）/ 389（Linux）；差异来自 `#[cfg(windows)]` / `#[cfg(not(windows))]` 门控 |
+| Python | 464 passed + 1 skipped（收集 465，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 17 项（非 `--full`） |
 | CI | 8 个 job：`rust` / `python` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `tools-scripts` / `web-smoke` |
@@ -250,7 +253,6 @@ worker/              Cloudflare Worker 时间服务（**目录为空，未实现
 |---|---|
 | 真机 30–50 台演练 | 脚本能力在（`drill-web.sh` 无人数上限，CI 只跑 12 人）；**真机规模需要现场组织**，历来由使用方在开考前自行演练 |
 | 浏览器本地草稿（IndexedDB） | 未做：服务端是唯一权威副本，现在只靠 `keepalive` 补「关页前最后 0–600 ms」；断网期间未同步的那几题会丢 |
-| 在线监控页 | 未做：服务端没有状态查询接口（监控靠看服务端日志与答题卡目录） |
 | 静态资源 keep-alive | 未做：每个资源单独建连（一次页面加载约 6–7 次 TLS 握手）。局域网 TLS 1.3 只需 1 RTT，收益与「改连接模型」的风险不匹配；**第三方 vendored 资源（`codemirror` / `clike` / `python`）已允许缓存 1 小时**，刷新不再重下 174 KB |
 | 外部证书精确到期日 | 未做：`rustls` 不暴露 `notAfter`，自检只报「是否过期」；要打印日期得引 X.509 解析依赖，不划算 |
 
