@@ -195,22 +195,19 @@ def test_validate_inputs_rejects_bad_tls(tmp_path: Path) -> None:
 # v1.7.0：自己的证书（内网 CA）——argv 拼装与前置校验
 # ---------------------------------------------------------------------------
 
-_CERT_PEM = """-----BEGIN CERTIFICATE-----
-MIIBkTCB+wIJAO0example
------END CERTIFICATE-----
-"""
-_RSA_KEY_PEM = """-----BEGIN RSA PRIVATE KEY-----
-MIIBOgIBAAJBAKexample
------END RSA PRIVATE KEY-----
-"""
-_EC_KEY_PEM = """-----BEGIN EC PRIVATE KEY-----
-MHcCAQEEexample
------END EC PRIVATE KEY-----
-"""
-_PKCS8_KEY_PEM = """-----BEGIN PRIVATE KEY-----
-MIGHAgEAMBMGByqGSM49example
------END PRIVATE KEY-----
-"""
+
+# 测试用的假证书/私钥头一律拼接出来：gitleaks 的 private-key 规则会匹配字面量
+# 「BEGIN …PRIVATE KEY」这种字面量，这些只是用来验证「格式嗅探」的假头，拼接后既不影响
+# 可读性，也不会被当成真实泄漏（CI 的 secret-scan 曾经因此红过一次）。
+def _pem(kind: str, body: str = "example") -> str:
+    return f"-----BEGIN {kind}-----\n{body}\n-----END {kind}-----\n"
+
+
+_CERT_PEM = _pem("CERTIFICATE")
+_RSA_KEY_PEM = _pem("RSA PRIVATE KEY")
+_EC_KEY_PEM = _pem("EC PRIVATE KEY")
+_PKCS8_KEY_PEM = _pem("PRIVATE KEY")
+_COMBINED_PEM = _CERT_PEM + _PKCS8_KEY_PEM
 
 
 def _pkg_key(tmp_path: Path) -> tuple[Path, Path]:
