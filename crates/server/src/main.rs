@@ -92,6 +92,18 @@ enum TlsMode {
     Off,
 }
 
+/// 外部证书自检的严格程度。
+///
+/// 默认 `warn`：只有「学生根本连不上」的问题才拒绝启动；过期 / SAN 不覆盖某地址
+/// 这类「还能点继续」的问题只告警——考场里把服务停掉比让学生多看一眼警告更糟。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum TlsCheck {
+    /// 默认：致命项拒绝启动，警告项只提示
+    Warn,
+    /// 严格：警告项也拒绝启动（适合要求「全班看到的警告必须一致」的内网）
+    Strict,
+}
+
 #[derive(Parser)]
 #[command(name = "exam-server", version, about = "保密考试系统网页版（阶段 1）")]
 struct Cli {
@@ -119,6 +131,12 @@ struct Cli {
     /// 证书 SAN 里要包含的地址（可多次；默认=本机局域网 IP + 127.0.0.1 + localhost）
     #[arg(long = "tls-host")]
     tls_hosts: Vec<String>,
+    /// 外部证书的签发 CA（可选；只用于启动自检的链校验，**不改变**发给学生的证书链）
+    #[arg(long)]
+    tls_ca: Option<PathBuf>,
+    /// 外部证书自检严格程度：warn（默认，过期/SAN 缺失只告警）/ strict（同样拒绝启动）
+    #[arg(long, value_enum, default_value_t = TlsCheck::Warn)]
+    tls_check: TlsCheck,
     /// 明文 301 跳转端口（只回 301 到 https，便于旧书签；0 = 关闭）
     #[arg(long, default_value_t = 8080)]
     http_redirect_port: u16,
@@ -447,7 +465,48 @@ fn main() -> Result<()> {
 
     // ---- TLS：默认开；没证书就自动生成 ----
     let hosts = tls_hosts(&cli);
-    let external_cert = cli.tls_cert.is_some();
+    let external_cert = cli.tls_cert.is_some() && cli.tls_key.is_some();
+
+    // ---- 外部证书自检（只对外部证书跑：自签证书是本机生成的，没有「配置错」这回事） ----
+    let cert_check = if cli.tls == TlsMode::Auto && external_cert {
+        let cert = cli.tls_cert.as_ref().expect("上面已确认非空");
+        let key = cli.tls_key.as_ref().expect("上面已确认非空");
+        let check = tls::check_external(cert, key, cli.tls_ca.as_deref(), &hosts)?;
+        if !check.passed() {
+            for msg in &check.fatals {
+                eprintln!("✗ 外部证书自检未通过：{msg}");
+            }
+            anyhow::bail!(
+                "外部证书自检未通过（{} 项致命）。修法：检查 --tls-cert/--tls-key 是否配套；\
+                 内网 CA 签发的证书请用 --tls-ca 指定 CA 证书",
+                check.fatals.len()
+            );
+        }
+        if cli.tls_check == TlsCheck::Strict && !check.warnings.is_empty() {
+            for msg in &check.warnings {
+                eprintln!("✗ 外部证书自检（strict）：{msg}");
+            }
+            anyhow::bail!(
+                "外部证书自检有 {} 项警告，而 --tls-check strict 要求零警告",
+                check.warnings.len()
+            );
+        }
+        for msg in &check.warnings {
+            eprintln!("⚠ 外部证书自检：{msg}");
+        }
+        Some(check)
+    } else {
+        // 参数给了但当前不会自检：提示一句，避免老师以为「加了 --tls-ca 就生效了」。
+        if cli.tls_ca.is_some() || cli.tls_check != TlsCheck::Warn {
+            let why = if cli.tls == TlsMode::Off {
+                "明文（--tls off）"
+            } else {
+                "自签证书"
+            };
+            println!("⚠ --tls-ca / --tls-check 仅对外部证书生效：当前是{why}，忽略这两个参数");
+        }
+        None
+    };
     let tls_material = match cli.tls {
         TlsMode::Off => None,
         TlsMode::Auto => Some(match (&cli.tls_cert, &cli.tls_key) {
@@ -522,12 +581,17 @@ fn main() -> Result<()> {
         cli.port
     );
     if let Some(material) = &tls_material {
-        if external_cert {
-            // 外部证书不做 X.509 自检（那要额外依赖），只能提示老师自己确认。
-            println!(
-                "⚠ 外部证书未自检：请确认 SAN 含 {}、未过期、且与私钥匹配",
-                hosts.join(", ")
-            );
+        if let Some(check) = &cert_check {
+            if check.warnings.is_empty() {
+                println!(
+                    "外部证书自检通过（私钥匹配、EKU serverAuth、SAN 覆盖：{}）",
+                    check.ok_hosts.join(", ")
+                );
+            } else {
+                // 警告已经在上面逐条打过；这里补一句「对学生意味着什么」。
+                println!("外部证书自检：{} 项警告（见上）", check.warnings.len());
+                println!("⚠ 学生访问这些地址会看到更严重的证书警告（仍可点继续）");
+            }
         }
         if material.generated {
             // 权限收紧可能失败（FAT32/网络盘），横幅不能无条件写「仅当前用户可读」。

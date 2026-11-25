@@ -17,8 +17,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rustls::ServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{
+    CertificateError, ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection,
+};
 
 use crate::secure_fs;
 
@@ -133,8 +135,9 @@ pub fn load_or_generate(dir: &Path, hosts: &[String], days: i64) -> Result<TlsMa
 
 /// 加载指定路径的证书与私钥（老师用自己的 CA 签的证书时走这里）。
 ///
-/// 外部证书**不自检**（SAN/有效期/密钥匹配），因为那需要 X.509 解析；启动横幅会提示
-/// 老师自行确认，错误要等学生打开浏览器才暴露——这是明确的取舍，不是遗漏。
+/// 外部证书的**校验**不在这里做：`load()` 只负责解析与组配置，检查统一走
+/// [`check_external`]（在 `main()` 里、绑定端口之前跑），这样「拒绝启动」发生在
+/// 任何监听建立之前，也不会把两种错误混在一条消息里。
 pub fn load(cert_path: &Path, key_path: &Path) -> Result<TlsMaterial> {
     // 加载时也补一次权限收紧：生成时若因文件系统不支持而失败，后续每次启动都再试一遍，
     // 不让「私钥对其他本地用户可读」长期留着。失败只告警，绝不阻断启动。
@@ -146,17 +149,7 @@ pub fn load(cert_path: &Path, key_path: &Path) -> Result<TlsMaterial> {
         }
     };
 
-    let cert_pem =
-        std::fs::read(cert_path).with_context(|| format!("读取证书 {}", cert_path.display()))?;
-    let key_pem =
-        std::fs::read(key_path).with_context(|| format!("读取私钥 {}", key_path.display()))?;
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_pem[..])
-        .collect::<Result<Vec<_>, _>>()
-        .context("解析证书 PEM 失败")?;
-    anyhow::ensure!(!certs.is_empty(), "证书文件里没有证书");
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &key_pem[..])
-        .context("解析私钥 PEM 失败")?
-        .context("私钥文件里没有可用的私钥")?;
+    let (certs, key) = read_material(cert_path, key_path)?;
 
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
@@ -175,6 +168,301 @@ pub fn load(cert_path: &Path, key_path: &Path) -> Result<TlsMaterial> {
         not_after_unix: 0,
         key_hardened,
     })
+}
+
+/// 读取证书链与私钥（`load()` 与外部证书自检共用）。
+fn read_material(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    let cert_pem =
+        std::fs::read(cert_path).with_context(|| format!("读取证书 {}", cert_path.display()))?;
+    let key_pem =
+        std::fs::read(key_path).with_context(|| format!("读取私钥 {}", key_path.display()))?;
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_pem[..])
+        .collect::<Result<Vec<_>, _>>()
+        .context("解析证书 PEM 失败")?;
+    anyhow::ensure!(!certs.is_empty(), "证书文件里没有证书");
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &key_pem[..])
+        .context("解析私钥 PEM 失败")?
+        .context("私钥文件里没有可用的私钥")?;
+    Ok((certs, key))
+}
+
+/// 外部证书的启动自检结论。
+///
+/// 分级而不是「一有问题就不让启动」，是因为两类失败的后果完全不同：
+/// - `fatals`：学生**根本连不上**（私钥不匹配 → 连接被重置；缺 serverAuth → Chrome 报
+///   不可绕过的 `ERR_SSL_KEY_USAGE_INCOMPATIBLE`；链不可用）。这种配置晚发现一小时，
+///   就是整个考场白等一小时，所以宁可**拒绝启动**。
+/// - `warnings`：学生仍能点「继续」（过期、SAN 不覆盖某个地址）。硬拒绝反而更糟
+///   （考试开不起来），所以只告警，由老师判断——需要严格时用 `--tls-check strict`。
+#[derive(Debug, Default)]
+pub struct CertCheck {
+    pub fatals: Vec<String>,
+    pub warnings: Vec<String>,
+    /// 通过校验的地址（横幅上要列出来，让老师知道「这些地址学生不会看到名称不匹配」）。
+    pub ok_hosts: Vec<String>,
+}
+
+impl CertCheck {
+    pub fn passed(&self) -> bool {
+        self.fatals.is_empty()
+    }
+}
+
+/// 自检用的单次握手上限：正常 TLS 1.3 握手 2 轮就结束，留 8 轮足够；
+/// 字节上限防「实现写错 → 两个 Connection 互喂死循环」。
+const HANDSHAKE_MAX_ROUNDS: usize = 8;
+const HANDSHAKE_MAX_BYTES: usize = 256 * 1024;
+
+/// 一次握手失败的原因。
+///
+/// 为什么不直接用 `rustls::Error`：`rustls` 0.23 的 `Error` 里**没有 IO 变体**
+/// （`read_tls`/`write_tls` 返回 `io::Error`），而自检要把「TLS 层可分类的错误」
+/// 与「IO/构造失败」分开处理。
+enum HandshakeFailure {
+    Tls(Box<rustls::Error>),
+    Io(String),
+}
+
+/// 证书问题分类（只覆盖与「学生能不能打开页面」相关的几类）。
+enum CertIssue {
+    Expired,
+    NameMismatch,
+    MissingServerAuth,
+    KeyMismatch,
+    /// 证书链接不到信任锚（`--tls-ca` 给错、或证书其实是自签的却没给 CA）。
+    ChainUntrusted,
+    Other(String),
+}
+
+/// 为什么用「内存内握手」而不是解析 X.509：
+///
+/// 解析证书只能看到字段，**看不到浏览器的判定结果**；而我们要回答的正是
+/// 「学生打开页面会看到什么」。握手走的就是 webpki 的真实校验路径
+/// （签名、有效期、SAN、EKU、链），一次就能同时覆盖 5 类问题，且**零新依赖**——
+/// 只用已经在依赖里的 `rustls`。
+pub fn check_external(
+    cert_path: &Path,
+    key_path: &Path,
+    ca_path: Option<&Path>,
+    hosts: &[String],
+) -> Result<CertCheck> {
+    let (certs, key) = read_material(cert_path, key_path)?;
+    // rustls 组配置时就会检查「私钥与证书是否配套」（`KeyMismatch`）。这属于
+    // 「这套证书没法用」，是自检要**报告**的致命项，不是读取失败——所以这里不 `?`，
+    // 而是直接产出一条 fatal，让 main() 按统一口径拒绝启动。
+    let mut server_config = match ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs.clone(), key)
+    {
+        Ok(config) => config,
+        Err(e) => {
+            return Ok(CertCheck {
+                fatals: vec![format!(
+                    "私钥与证书不匹配或证书不可用（{e}）：学生侧会「连接被重置」而不是证书警告"
+                )],
+                ..CertCheck::default()
+            });
+        }
+    };
+    // 与本服务真实配置一致：只声明 http/1.1（ALPN 不匹配也会让某些客户端握手失败）。
+    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let server_config = Arc::new(server_config);
+
+    // 信任锚：给了 `--tls-ca` 就只信它（这样才能验出「证书不是这张 CA 签的」）；
+    // 没给就把叶子证书当锚——「自签证书 / 单张证书」场景下这是唯一能验私钥匹配的办法。
+    let mut roots = RootCertStore::empty();
+    match ca_path {
+        Some(ca) => {
+            let pem =
+                std::fs::read(ca).with_context(|| format!("读取 CA 证书 {}", ca.display()))?;
+            let ca_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &pem[..])
+                .collect::<Result<Vec<_>, _>>()
+                .context("解析 CA 证书 PEM 失败")?;
+            anyhow::ensure!(!ca_certs.is_empty(), "CA 文件里没有证书：{}", ca.display());
+            let (added, ignored) = roots.add_parsable_certificates(ca_certs);
+            anyhow::ensure!(
+                added > 0,
+                "CA 证书无法解析（忽略 {ignored} 张）：{}",
+                ca.display()
+            );
+        }
+        None => {
+            roots.add_parsable_certificates(certs.iter().cloned());
+        }
+    }
+
+    let mut check = CertCheck::default();
+    let mut expired_hosts: Vec<String> = Vec::new();
+    for host in hosts {
+        match handshake_once(Arc::clone(&server_config), &roots, host) {
+            Ok(()) => check.ok_hosts.push(host.clone()),
+            Err(HandshakeFailure::Tls(e)) => match classify(&e) {
+                CertIssue::Expired => expired_hosts.push(host.clone()),
+                CertIssue::NameMismatch => check.warnings.push(format!(
+                    "证书 SAN 不覆盖 {host}：学生用这个地址访问会看到「名称不匹配」（仍可点继续）"
+                )),
+                CertIssue::MissingServerAuth => push_unique(
+                    &mut check.fatals,
+                    "证书的 EKU 不含 serverAuth：Chrome 会报不可绕过的 \
+                     ERR_SSL_KEY_USAGE_INCOMPATIBLE，学生无法继续"
+                        .to_string(),
+                ),
+                // `BadSignature` 有两种成因：私钥与证书不配套，或「信任锚选错」导致拿着
+                // 别人的公钥去验签（两张自签证书 CN 相同、且给了错的 --tls-ca 时就会这样）。
+                // 文案必须把两种都说出来，否则老师会去查一个并不存在的问题。
+                CertIssue::KeyMismatch => push_unique(
+                    &mut check.fatals,
+                    "证书签名验证失败：私钥与证书不匹配，或信任锚不对（给了 --tls-ca 时请确认证书确由该 CA 签发）。学生侧会「连接被重置」而不是证书警告"
+                        .to_string(),
+                ),
+                CertIssue::ChainUntrusted => push_unique(
+                    &mut check.fatals,
+                    "证书链接不到信任锚：`--tls-ca` 指定的 CA 没签过这张证书（或不完整），                     学生侧会报「不是私密连接」且无法继续".to_string(),
+                ),
+                CertIssue::Other(msg) => {
+                    push_unique(&mut check.fatals, format!("证书自检失败：{msg}"))
+                }
+            },
+            Err(HandshakeFailure::Io(msg)) => {
+                push_unique(&mut check.fatals, format!("自检握手失败：{msg}"))
+            }
+        }
+    }
+    // 过期只报一条（5 个地址都过期 = 同一件事），但把受影响的地址列出来。
+    if !expired_hosts.is_empty() {
+        check.warnings.insert(
+            0,
+            format!(
+                "证书已过期（受影响地址：{}）：学生仍可点「继续」，但警告比自签更吓人",
+                expired_hosts.join(", ")
+            ),
+        );
+    }
+    Ok(check)
+}
+
+fn push_unique(list: &mut Vec<String>, msg: String) {
+    if !list.contains(&msg) {
+        list.push(msg);
+    }
+}
+
+/// 把「地址/域名」转成 `ServerName`（IP 走 IpAddress，否则走 DnsName）。
+fn server_name_of(host: &str) -> Option<ServerName<'static>> {
+    let trimmed = host.trim();
+    if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
+        return Some(ServerName::IpAddress(ip.into()));
+    }
+    ServerName::try_from(trimmed.to_ascii_lowercase()).ok()
+}
+
+/// 在内存里跑一次客户端↔服务端握手（不开端口、不走网络）。
+fn handshake_once(
+    server_config: Arc<ServerConfig>,
+    roots: &RootCertStore,
+    host: &str,
+) -> std::result::Result<(), HandshakeFailure> {
+    let Some(name) = server_name_of(host) else {
+        return Err(HandshakeFailure::Io(format!("不是合法的地址/域名：{host}")));
+    };
+    let client_config = ClientConfig::builder()
+        .with_root_certificates(roots.clone())
+        .with_no_client_auth();
+    let mut client = ClientConnection::new(Arc::new(client_config), name)
+        .map_err(|e| HandshakeFailure::Tls(Box::new(e)))?;
+    let mut server =
+        ServerConnection::new(server_config).map_err(|e| HandshakeFailure::Tls(Box::new(e)))?;
+
+    let mut c2s: Vec<u8> = Vec::new();
+    let mut s2c: Vec<u8> = Vec::new();
+    let mut total = 0usize;
+    for _ in 0..HANDSHAKE_MAX_ROUNDS {
+        // client → server
+        c2s.clear();
+        while client.wants_write() {
+            let n = client
+                .write_tls(&mut c2s)
+                .map_err(|e| HandshakeFailure::Io(format!("客户端写：{e}")))?;
+            if n == 0 {
+                break;
+            }
+        }
+        if !c2s.is_empty() {
+            total += c2s.len();
+            let mut rest: &[u8] = &c2s;
+            while !rest.is_empty() {
+                let n = server
+                    .read_tls(&mut rest)
+                    .map_err(|e| HandshakeFailure::Io(format!("服务端读：{e}")))?;
+                if n == 0 {
+                    break;
+                }
+            }
+            server
+                .process_new_packets()
+                .map_err(|e| HandshakeFailure::Tls(Box::new(e)))?;
+        }
+
+        // server → client（客户端在这一步校验证书）
+        s2c.clear();
+        while server.wants_write() {
+            let n = server
+                .write_tls(&mut s2c)
+                .map_err(|e| HandshakeFailure::Io(format!("服务端写：{e}")))?;
+            if n == 0 {
+                break;
+            }
+        }
+        if !s2c.is_empty() {
+            total += s2c.len();
+            let mut rest: &[u8] = &s2c;
+            while !rest.is_empty() {
+                let n = client
+                    .read_tls(&mut rest)
+                    .map_err(|e| HandshakeFailure::Io(format!("客户端读：{e}")))?;
+                if n == 0 {
+                    break;
+                }
+            }
+            client
+                .process_new_packets()
+                .map_err(|e| HandshakeFailure::Tls(Box::new(e)))?;
+        }
+
+        if !client.is_handshaking() && !server.is_handshaking() {
+            return Ok(());
+        }
+        if total > HANDSHAKE_MAX_BYTES {
+            return Err(HandshakeFailure::Io(
+                "自检握手数据超过 256 KiB（实现有误？）".to_string(),
+            ));
+        }
+    }
+    Err(HandshakeFailure::Io(
+        "自检握手没有在限定轮数内完成".to_string(),
+    ))
+}
+
+fn classify(err: &rustls::Error) -> CertIssue {
+    use CertificateError as C;
+    match err {
+        rustls::Error::InvalidCertificate(cert_err) => match cert_err {
+            C::Expired | C::ExpiredContext { .. } => CertIssue::Expired,
+            C::NotValidForName | C::NotValidForNameContext { .. } => CertIssue::NameMismatch,
+            // rustls 0.23 里**没有** `RequiredEkuNotFound`：webpki 的
+            // `Error::RequiredEkuNotFound` 被映射成 `InvalidPurpose`
+            // （见 rustls `src/webpki/mod.rs`），所以这里按 `InvalidPurpose` 分类。
+            C::InvalidPurpose | C::InvalidPurposeContext { .. } => CertIssue::MissingServerAuth,
+            C::BadSignature => CertIssue::KeyMismatch,
+            // 链接不到信任锚：`--tls-ca` 给错、或证书是自签的而没给 CA。
+            C::UnknownIssuer => CertIssue::ChainUntrusted,
+            other => CertIssue::Other(format!("{other:?}")),
+        },
+        other => CertIssue::Other(format!("{other}")),
+    }
 }
 
 /// 生成一张自签证书（ECDSA P-256），并写下元数据。
@@ -581,6 +869,247 @@ mod tests {
             vec![b"http/1.1".to_vec()],
             "ALPN 必须只声明 http/1.1"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    // ------------------------------------------------------------ 外部证书自检
+
+    /// 造一张证书并落盘，返回 (证书路径, 私钥路径)。
+    ///
+    /// 参数多是有意的：自检要覆盖「EKU / 有效期 / SAN / 签名者」四种差异，
+    /// 每类都单独写一遍 rcgen 样板只会让差异埋进噪音里。
+    #[allow(clippy::too_many_arguments)]
+    fn make_cert(
+        dir: &Path,
+        tag: &str,
+        hosts: &[&str],
+        eku: Vec<rcgen::ExtendedKeyUsagePurpose>,
+        not_before: time::OffsetDateTime,
+        not_after: time::OffsetDateTime,
+        signer: Option<&rcgen::Certificate>,
+    ) -> (PathBuf, PathBuf) {
+        let mut params = rcgen::CertificateParams::new(
+            hosts.iter().map(|h| (*h).to_string()).collect::<Vec<_>>(),
+        );
+        params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
+        params.is_ca = rcgen::IsCa::NoCa;
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::DigitalSignature,
+            rcgen::KeyUsagePurpose::KeyEncipherment,
+        ];
+        params.extended_key_usages = eku;
+        params.not_before = not_before;
+        params.not_after = not_after;
+        let cert = rcgen::Certificate::from_params(params).expect("签证书");
+        let cert_pem = match signer {
+            Some(ca) => cert.serialize_pem_with_signer(ca).expect("CA 签发"),
+            None => cert.serialize_pem().expect("自签"),
+        };
+        let key_pem = cert.serialize_private_key_pem();
+        std::fs::create_dir_all(dir).expect("建目录");
+        let cert_path = dir.join(format!("{tag}.crt"));
+        let key_path = dir.join(format!("{tag}.key"));
+        std::fs::write(&cert_path, cert_pem).expect("写证书");
+        std::fs::write(&key_path, key_pem).expect("写私钥");
+        (cert_path, key_path)
+    }
+
+    /// 造一张 CA（BasicConstraints CA:TRUE + keyCertSign）。
+    fn make_ca(dir: &Path, tag: &str) -> (rcgen::Certificate, PathBuf) {
+        let now = time::OffsetDateTime::now_utc();
+        let mut params = rcgen::CertificateParams::new(vec![format!("ca-{tag}")]);
+        params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        params.not_before = now - time::Duration::days(1);
+        params.not_after = now + time::Duration::days(365);
+        let cert = rcgen::Certificate::from_params(params).expect("签 CA");
+        std::fs::create_dir_all(dir).expect("建目录");
+        let path = dir.join(format!("{tag}-ca.crt"));
+        std::fs::write(&path, cert.serialize_pem().expect("CA PEM")).expect("写 CA");
+        (cert, path)
+    }
+
+    fn server_auth() -> Vec<rcgen::ExtendedKeyUsagePurpose> {
+        vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth]
+    }
+
+    /// 匹配的证书 + 私钥 + SAN 覆盖 → 通过，且记下覆盖的地址。
+    #[test]
+    fn external_cert_with_matching_key_passes() {
+        let dir = test_dir("ext-ok");
+        let now = time::OffsetDateTime::now_utc();
+        let (cert, key) = make_cert(
+            &dir,
+            "ok",
+            &["127.0.0.1", "192.168.1.10"],
+            server_auth(),
+            now - time::Duration::days(1),
+            now + time::Duration::days(30),
+            None,
+        );
+        let hosts = vec!["127.0.0.1".to_string(), "192.168.1.10".to_string()];
+        let check = check_external(&cert, &key, None, &hosts).expect("自检");
+        assert!(check.fatals.is_empty(), "不该有致命项：{:?}", check.fatals);
+        assert!(
+            check.warnings.is_empty(),
+            "不该有警告：{:?}",
+            check.warnings
+        );
+        assert_eq!(check.ok_hosts, hosts, "两个地址都该通过");
+        assert!(check.passed());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 证书与私钥不是一对 → 致命（学生侧表现为「连接被重置」，最难排查）。
+    #[test]
+    fn external_cert_key_mismatch_is_fatal() {
+        let dir = test_dir("ext-mismatch");
+        let now = time::OffsetDateTime::now_utc();
+        let (a_cert, _a_key) = make_cert(
+            &dir,
+            "a",
+            &["127.0.0.1"],
+            server_auth(),
+            now - time::Duration::days(1),
+            now + time::Duration::days(30),
+            None,
+        );
+        let (_b_cert, b_key) = make_cert(
+            &dir,
+            "b",
+            &["127.0.0.1"],
+            server_auth(),
+            now - time::Duration::days(1),
+            now + time::Duration::days(30),
+            None,
+        );
+        let check =
+            check_external(&a_cert, &b_key, None, &["127.0.0.1".to_string()]).expect("自检");
+        assert!(!check.passed(), "私钥与证书不匹配必须判致命");
+        assert!(
+            check.fatals.iter().any(|m| m.contains("不匹配")),
+            "文案要点明「不匹配」：{:?}",
+            check.fatals
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 已过期 → 只告警（浏览器仍可「继续」），且只报一条并列出受影响地址。
+    #[test]
+    fn external_cert_expired_is_warning() {
+        let dir = test_dir("ext-expired");
+        let now = time::OffsetDateTime::now_utc();
+        let (cert, key) = make_cert(
+            &dir,
+            "exp",
+            &["127.0.0.1"],
+            server_auth(),
+            now - time::Duration::days(30),
+            now - time::Duration::days(1),
+            None,
+        );
+        let check = check_external(&cert, &key, None, &["127.0.0.1".to_string()]).expect("自检");
+        assert!(check.fatals.is_empty(), "过期不该致命：{:?}", check.fatals);
+        assert!(
+            check.warnings.iter().any(|m| m.contains("过期")),
+            "文案要含「过期」：{:?}",
+            check.warnings
+        );
+        assert_eq!(
+            check.warnings.iter().filter(|m| m.contains("过期")).count(),
+            1,
+            "过期只报一条：{:?}",
+            check.warnings
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SAN 不覆盖某个地址 → 该地址一条警告（其它地址仍可通过）。
+    #[test]
+    fn external_cert_name_mismatch_is_warning() {
+        let dir = test_dir("ext-name");
+        let now = time::OffsetDateTime::now_utc();
+        let (cert, key) = make_cert(
+            &dir,
+            "name",
+            &["127.0.0.1"],
+            server_auth(),
+            now - time::Duration::days(1),
+            now + time::Duration::days(30),
+            None,
+        );
+        let check = check_external(
+            &cert,
+            &key,
+            None,
+            &["127.0.0.1".to_string(), "192.168.1.5".to_string()],
+        )
+        .expect("自检");
+        assert!(
+            check.fatals.is_empty(),
+            "SAN 不覆盖不该致命：{:?}",
+            check.fatals
+        );
+        assert_eq!(check.ok_hosts, vec!["127.0.0.1".to_string()]);
+        assert!(
+            check.warnings.iter().any(|m| m.contains("192.168.1.5")),
+            "警告要指名那个地址：{:?}",
+            check.warnings
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 缺 EKU serverAuth → 致命（Chrome 报不可绕过的 ERR_SSL_KEY_USAGE_INCOMPATIBLE）。
+    #[test]
+    fn external_cert_missing_server_auth_is_fatal() {
+        let dir = test_dir("ext-eku");
+        let now = time::OffsetDateTime::now_utc();
+        let (cert, key) = make_cert(
+            &dir,
+            "eku",
+            &["127.0.0.1"],
+            vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth],
+            now - time::Duration::days(1),
+            now + time::Duration::days(30),
+            None,
+        );
+        let check = check_external(&cert, &key, None, &["127.0.0.1".to_string()]).expect("自检");
+        assert!(!check.passed(), "缺 serverAuth 必须判致命");
+        assert!(
+            check.fatals.iter().any(|m| m.contains("serverAuth")),
+            "文案要含 serverAuth：{:?}",
+            check.fatals
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// 给了 `--tls-ca` 就用它当信任锚：正确的 CA 通过，不相关的 CA 判致命（链不可用）。
+    #[test]
+    fn external_cert_chain_is_checked_against_given_ca() {
+        let dir = test_dir("ext-ca");
+        let now = time::OffsetDateTime::now_utc();
+        let (ca, ca_path) = make_ca(&dir, "good");
+        let (_other_ca, other_ca_path) = make_ca(&dir, "bad");
+        let (cert, key) = make_cert(
+            &dir,
+            "leaf",
+            &["127.0.0.1"],
+            server_auth(),
+            now - time::Duration::days(1),
+            now + time::Duration::days(30),
+            Some(&ca),
+        );
+        let hosts = vec!["127.0.0.1".to_string()];
+
+        let ok = check_external(&cert, &key, Some(&ca_path), &hosts).expect("自检");
+        assert!(ok.fatals.is_empty(), "CA 正确时不该致命：{:?}", ok.fatals);
+        assert_eq!(ok.ok_hosts, hosts);
+
+        let wrong = check_external(&cert, &key, Some(&other_ca_path), &hosts).expect("自检");
+        assert!(!wrong.passed(), "不是这张 CA 签的必须判致命");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
