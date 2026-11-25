@@ -29,7 +29,8 @@
 
 ## 3. Rust 依赖（学生端 / 命令行工具 / `exam-server`）
 
-以下 crate 以 MIT 和/或 Apache-2.0 授权，随二进制静态链接：
+以下 crate 的许可为 MIT / Apache-2.0 / BSD-3-Clause / ISC / CC0（逐项在括号里标注），
+随二进制静态链接（`exam-server.exe` 与两个命令行工具）：
 
 `egui` / `eframe` / `epaint`（MIT OR Apache-2.0）、`image`（MIT OR Apache-2.0）、
 `base64`（MIT OR Apache-2.0）、`blake3`（CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception）、
@@ -42,6 +43,8 @@
 `ed25519-dalek`（BSD-3-Clause）、`rayon`（MIT OR Apache-2.0）、`windows-sys`（MIT OR Apache-2.0）、
 `rustls` / `rustls-pemfile`（Apache-2.0 OR ISC OR MIT）、`rustls-pki-types`（MIT OR Apache-2.0）、
 `ring`（**Apache-2.0 AND ISC**，ISC 文本见 `licenses/ISC.txt`）、`rcgen` / `time`（MIT OR Apache-2.0）。
+> `ring` 内含 `once_cell` 的派生代码（MIT OR Apache-2.0），版权归 `once_cell` 作者；
+> 该部分不影响 `ring` 自身的 Apache-2.0 AND ISC 声明。
 
 ## 3.1 网页版前端（阶段 1）
 

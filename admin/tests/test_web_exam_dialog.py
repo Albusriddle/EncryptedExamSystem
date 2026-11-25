@@ -240,8 +240,13 @@ def test_tls_off_passes_explicit_flag_and_keeps_port(dialog) -> None:
     assert _arg(args, "--port") == "8443", "关 TLS 不该顺带改端口"
 
 
-def test_url_scheme_follows_tls_checkbox(dialog, monkeypatch) -> None:
-    """地址 scheme 必须跟着勾选框：否则关掉 TLS 后还显示 https，全班连不上。"""
+def test_url_scheme_comes_from_server_banner(dialog, monkeypatch) -> None:
+    """地址 scheme 取自服务端横幅，而不是「使用 HTTPS」勾选框。
+
+    为什么：勾选框只决定**下一次启动**的 argv；运行中改它不会改变已经在跑的进程。
+    v1.5.1 复审就抓到「运行中取消勾选 → 界面地址变成 http、进程仍在跑 TLS」，
+    老师照此通知学生，全班连不上。
+    """
     from PySide6.QtWidgets import QMessageBox
 
     monkeypatch.setattr(
@@ -250,13 +255,55 @@ def test_url_scheme_follows_tls_checkbox(dialog, monkeypatch) -> None:
         staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
     )
     dialog._consume_output("考试服务已启动：https://192.168.1.5:8443/\n")
-    assert dialog.lbl_url.text().startswith("https://")
-
-    dialog.chk_tls.setChecked(False)  # 走真实 toggled → 确认「是」
-    assert dialog.lbl_url.text().startswith("http://"), dialog.lbl_url.text()
-
-    dialog.chk_tls.setChecked(True)
     assert dialog.lbl_url.text().startswith("https://"), dialog.lbl_url.text()
+
+    # 即使把勾选框改成「关闭 HTTPS」，地址也必须继续以横幅为准（不跟着变）。
+    dialog.chk_tls.setChecked(False)
+    assert dialog.lbl_url.text().startswith("https://"), (
+        f"地址不能跟着勾选框变：{dialog.lbl_url.text()}"
+    )
+
+
+def test_url_scheme_follows_a_plaintext_banner(qapp, tmp_path) -> None:
+    """横幅是 http 时地址就显示 http——哪怕勾选框还勾着（它只影响下次启动）。"""
+    dlg = _make_dialog(tmp_path)
+    try:
+        assert dlg.chk_tls.isChecked(), "默认仍勾选 HTTPS（只决定下一次启动）"
+        dlg._consume_output("考试服务已启动：http://192.168.1.5:8443/\n")
+        assert dlg.lbl_url.text().startswith("http://"), dlg.lbl_url.text()
+    finally:
+        dlg.close()
+
+
+def test_inputs_are_disabled_while_running(dialog, monkeypatch, tmp_path) -> None:
+    """服务跑起来后，会改变进程行为的输入必须禁用，并提示「改动需重启服务生效」。"""
+    from PySide6.QtWidgets import QMessageBox
+
+    import app.ui.web_exam_dialog as mod
+
+    monkeypatch.setattr(mod, "port_available", lambda _port: True)
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    server = tmp_path / "exam-server.exe"
+    server.write_bytes(b"MZ")
+    monkeypatch.setattr(dialog, "_server_path", lambda: server)
+    started: list[tuple] = []
+    monkeypatch.setattr(dialog.proc, "start", lambda *a: started.append(a))
+
+    dialog.start_server()
+    assert started, "start 应被调用"
+    for widget, name in (
+        (dialog.spin_port, "端口"),
+        (dialog.chk_tls, "HTTPS"),
+        (dialog.combo_bind, "监听地址"),
+        (dialog.edit_answers, "答题卡目录"),
+    ):
+        assert not widget.isEnabled(), f"运行中「{name}」必须禁用（改了也不生效）"
+    assert "重启" in dialog.lbl_locked.text(), dialog.lbl_locked.text()
+
+    # 停止后恢复可编辑
+    dialog._on_finished()
+    assert dialog.spin_port.isEnabled() and dialog.chk_tls.isEnabled()
+    assert dialog.lbl_locked.text() == ""
 
 
 def test_declining_tls_off_keeps_https(dialog, monkeypatch) -> None:
@@ -270,15 +317,38 @@ def test_declining_tls_off_keeps_https(dialog, monkeypatch) -> None:
         staticmethod(lambda *a, **k: asked.append("q") or QMessageBox.StandardButton.No),
     )
     dialog._consume_output("考试服务已启动：https://192.168.1.5:8443/\n")
-    dialog.chk_tls.setChecked(False)
+    # 危险确认挂在 clicked（用户动作）：用 click() 复刻真实点击，而不是 setChecked。
+    dialog.chk_tls.click()
 
     assert asked, "关闭 HTTPS 属危险方向，必须先确认"
     assert dialog.chk_tls.isChecked(), "拒绝后应保持 HTTPS"
     assert dialog.lbl_url.text().startswith("https://")
 
 
-def test_redirect_port_conflict_is_reported_not_blocking(dialog, monkeypatch) -> None:
-    """8080 被占用只提示「旧书签跳转不可用」，不拦启动（主服务仍然可用）。"""
+def test_programmatic_setchecked_never_prompts(dialog, monkeypatch) -> None:
+    """程序化 setChecked(False) 不能弹「确认关闭 HTTPS」——AGENTS §7.6。
+
+    确认必须挂在 `clicked`（用户动作）；若挂 `toggled`，初始化/恢复配置/测试都会弹窗。
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    asked: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: asked.append("q") or QMessageBox.StandardButton.No),
+    )
+    dialog.chk_tls.setChecked(False)
+    assert not asked, "程序化赋值不应触发危险确认"
+    assert not dialog.chk_tls.isChecked()
+
+
+def test_redirect_port_conflict_is_reported_not_blocking(dialog, monkeypatch, tmp_path) -> None:
+    """8080 被占用只提示「旧书签跳转不可用」，**不拦启动**（主服务仍然可用）。
+
+    旧版用例把 `_server_path` 指向不存在的文件，启动其实在「找不到服务端」就 return 了，
+    等于只验证了「日志里有提示」；这里改成真实假文件 + 记录 `start` 调用。
+    """
     from PySide6.QtWidgets import QMessageBox
 
     import app.ui.web_exam_dialog as mod
@@ -286,12 +356,17 @@ def test_redirect_port_conflict_is_reported_not_blocking(dialog, monkeypatch) ->
     main_port = dialog.spin_port.value()
     monkeypatch.setattr(mod, "port_available", lambda port: port == main_port)
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
-    monkeypatch.setattr(dialog, "_server_path", lambda: Path("不存在的-exam-server.exe"))
+    server = tmp_path / "exam-server.exe"
+    server.write_bytes(b"MZ")
+    monkeypatch.setattr(dialog, "_server_path", lambda: server)
+    started: list[tuple] = []
+    monkeypatch.setattr(dialog.proc, "start", lambda *a: started.append(a))
 
     dialog.start_server()
 
     log = dialog.log.toPlainText()
     assert "旧书签" in log and "8080" in log, log
+    assert started, "端口被占用只应提示，不能拦住启动"
 
 
 def test_tls_checkbox_is_a_compact_checkbox(dialog) -> None:

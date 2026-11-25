@@ -223,7 +223,7 @@ rm -f "$VMARK_LOG"
 # ---------------------------------------------------------------- 7. 许可证合规
 
 head_ "7. 许可证合规（Apache-2.0 分发 + PySide6 LGPL-3.0）"
-for f in LICENSE THIRD-PARTY-NOTICES.md licenses/LGPL-3.0.txt licenses/GPL-3.0.txt; do
+for f in LICENSE THIRD-PARTY-NOTICES.md licenses/LGPL-3.0.txt licenses/GPL-3.0.txt licenses/ISC.txt; do
   if [ -f "$ROOT/$f" ]; then ok "存在 $f"; else bad "缺少 $f（发布包必须带上）"; fi
 done
 

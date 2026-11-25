@@ -102,3 +102,47 @@ def test_pick_artifact_missing_is_reported(monkeypatch, capsys) -> None:
     monkeypatch.setattr(build_exe, "find_artifacts", lambda *_a, **_k: [])
     assert pick_artifact_with_version("exam-builder", "exam-builder", "1.4.8") is None
     assert "cargo build" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- 许可证复制
+
+
+def _legal_root(tmp_path: Path, *, with_isc: bool = True) -> Path:
+    """造一个最小的「仓库根」：LICENSE + 第三方声明 + licenses/ 三份许可。"""
+    root = tmp_path / "repo"
+    (root / "licenses").mkdir(parents=True)
+    (root / "LICENSE").write_text("Apache License 2.0\n", encoding="utf-8")
+    (root / "THIRD-PARTY-NOTICES.md").write_text("第三方声明\n", encoding="utf-8")
+    for name in ("LGPL-3.0.txt", "GPL-3.0.txt"):
+        (root / "licenses" / name).write_text(f"{name}\n", encoding="utf-8")
+    if with_isc:
+        (root / "licenses" / "ISC.txt").write_text(
+            "Copyright 2015-2025 Brian Smith.\n", encoding="utf-8"
+        )
+    return root
+
+
+def test_copy_legal_files_includes_isc(tmp_path: Path) -> None:
+    """`ring` 是 Apache-2.0 AND ISC：发布目录必须带上 `licenses/ISC.txt`。"""
+    from buildtools.build_exe import copy_legal_files
+
+    root = _legal_root(tmp_path)
+    dest = tmp_path / "dist" / "ExamAdmin"
+    dest.mkdir(parents=True)
+
+    copied = copy_legal_files(dest, root=root)
+
+    assert (dest / "licenses" / "ISC.txt").is_file(), "缺 ISC.txt 等于发布包缺许可"
+    assert "licenses/" in copied
+
+
+def test_copy_legal_files_rejects_missing_isc(tmp_path: Path) -> None:
+    """缺 ISC.txt 时必须**构建失败**，而不是「有就拷、没有就跳过」。"""
+    from buildtools.build_exe import copy_legal_files
+
+    root = _legal_root(tmp_path, with_isc=False)
+    dest = tmp_path / "dist" / "ExamAdmin"
+    dest.mkdir(parents=True)
+
+    with pytest.raises(FileNotFoundError, match="ISC.txt"):
+        copy_legal_files(dest, root=root)

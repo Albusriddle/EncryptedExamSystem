@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QTimer
@@ -62,6 +63,12 @@ class WebExamDialog(QDialog):
         # 就绪状态：只有看到服务端打印「考试服务已启动」才显示访问地址。
         self._output_buffer = ""
         self._ready = False
+        # 服务端横幅里的真实 scheme（`https` / `http`）。
+        #
+        # 为什么地址不能看勾选框：勾选框只决定「下一次启动」的 argv；运行中改它不会
+        # 影响已经在跑的进程。v1.5.1 复审就抓到这个误导——运行中取消勾选，界面地址
+        # 立刻变成 http://，而进程仍在同一端口跑 TLS，老师照此通知学生，全班连不上。
+        self._banner_scheme: str | None = None
         self._ready_timer = QTimer(self)
         self._ready_timer.setSingleShot(True)
         self._ready_timer.timeout.connect(self._on_ready_timeout)
@@ -84,7 +91,7 @@ class WebExamDialog(QDialog):
             "教师屏会显示证书指纹，学生可在浏览器证书详情里核对（防中间人）。\n"
             "关闭后走明文 HTTP——同网段可嗅探答案，仅建议排障时使用。"
         )
-        self.chk_tls.toggled.connect(self._on_tls_toggled)
+        self.chk_tls.clicked.connect(self._on_tls_clicked)
         self.edit_answers = QLineEdit(str(Path(package).parent / "web-answers") if package else "")
 
         # 监听地址：默认所有网卡；多网卡教师机只绑 LAN 地址时，外网侧根本连不上。
@@ -138,6 +145,9 @@ class WebExamDialog(QDialog):
 
         self.lbl_url = QLabel("未启动")
         self.lbl_url.setTextInteractionFlags(self.lbl_url.textInteractionFlags())
+        # 运行中所有「会影响进程行为」的输入都被禁用；这行文字说明原因。
+        self.lbl_locked = QLabel("")
+        self.lbl_locked.setStyleSheet("color:#b03030;")
         self.btn_start = QPushButton("启动服务")
         self.btn_stop = QPushButton("停止")
         self.btn_stop.setEnabled(False)
@@ -161,6 +171,7 @@ class WebExamDialog(QDialog):
         lay.addLayout(form)
         lay.addWidget(QLabel("学生访问地址（服务就绪后显示）："))
         lay.addWidget(self.lbl_url)
+        lay.addWidget(self.lbl_locked)
         lay.addLayout(row)
         lay.addWidget(self.log, 1)
         lay.addWidget(
@@ -212,6 +223,26 @@ class WebExamDialog(QDialog):
             return Path(raw)
         package = Path(self.edit_package.text().strip())
         return package.parent / "web-answers"
+
+    def _set_inputs_enabled(self, enabled: bool) -> None:
+        """服务运行期间禁用会改变进程行为的输入。
+
+        为什么：这些值只在点「启动」那一刻被读进 argv；运行中改了不会生效，但老师
+        会以为立刻生效（v1.5.1 复审就抓到「运行中切 HTTPS：界面地址变了、进程还在
+        跑 TLS」）。真要改就「停止 → 再启动」，界面用一行红字说明。
+        """
+        for widget in (
+            self.edit_package,
+            self.edit_keyfile,
+            self.spin_port,
+            self.chk_tls,
+            self.combo_bind,
+            self.combo_time_check,
+            self.spin_rate_limit,
+            self.edit_answers,
+        ):
+            widget.setEnabled(enabled)
+        self.lbl_locked.setText("" if enabled else "改动需重启服务生效")
 
     def _command_args(self) -> list[str]:
         """按当前界面值拼出 argv（不含程序路径以外的改动，便于测试）。
@@ -297,8 +328,11 @@ class WebExamDialog(QDialog):
         answers.mkdir(parents=True, exist_ok=True)
 
         self._output_buffer = ""
+        self._banner_scheme = None
         self._ready = False
         self.proc.start(str(server), self._command_args()[1:])
+        # 运行中禁掉所有会影响进程行为的输入：改了不生效，还会误导（见 _set_inputs_enabled）。
+        self._set_inputs_enabled(False)
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.lbl_url.setText("正在启动…（等服务就绪）")
@@ -320,12 +354,14 @@ class WebExamDialog(QDialog):
     def _on_error(self, _err) -> None:
         self._ready_timer.stop()
         self.lbl_url.setText("启动失败，见下方日志")
+        self._set_inputs_enabled(True)
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
 
     def _on_finished(self) -> None:
         self._ready_timer.stop()
         self._ready = False
+        self._set_inputs_enabled(True)
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.lbl_url.setText("已停止")
@@ -354,33 +390,43 @@ class WebExamDialog(QDialog):
             return
         self.log.appendPlainText(text.rstrip())
         self._output_buffer += text
+        # 记下服务端**实际**用的 scheme：地址必须以它为准，而不是看勾选框
+        # （勾选框只影响下一次启动，运行中改它不会改变已在跑的进程）。
+        scheme = re.search(r"(https?)://", text)
+        if scheme:
+            self._banner_scheme = scheme.group(1)
         if not self._ready and is_ready(self._output_buffer):
             self._ready = True
             self._ready_timer.stop()
             self._refresh_url()
 
     def _refresh_url(self) -> None:
-        """按当前勾选框与端口刷新地址；未就绪时不显示（端口还没绑）。
+        """按**服务端横幅里的 scheme** 与端口刷新地址；未就绪时不显示（端口还没绑）。
 
-        地址的 scheme 必须跟着「使用 HTTPS」走：否则关掉 TLS 后界面仍显示 https，
-        老师照着发给学生，全班连不上。
+        为什么不再看「使用 HTTPS」勾选框：勾选框只决定下一次启动的 argv。运行中切换它
+        不会改变已经在跑的进程，界面地址却会跟着变——老师照此通知学生就全班连不上
+        （v1.5.1 复审发现的误导）。横幅里没有 scheme 时才回退到勾选框（测试/异常日志）。
         """
         if not self._ready:
             return
+        if self._banner_scheme is None:
+            tls = self.chk_tls.isChecked()
+        else:
+            tls = self._banner_scheme != "http"
         self.lbl_url.setText(
             access_url(
                 self.spin_port.value(),
                 advertised_host(self._bind()),
-                tls=self.chk_tls.isChecked(),
+                tls=tls,
             )
         )
 
-    def _on_tls_toggled(self, checked: bool) -> None:
+    def _on_tls_clicked(self, checked: bool) -> None:
         """关闭 HTTPS 是危险方向：明文下同网段可抓到答案、PIN 与 cookie。
 
-        确认放在 `toggled`（由用户的点击/键盘触发）而不是 `clicked`，是因为
-        `CompactCheckBox` 的点击区会延伸到说明文字上，`toggled` 更稳；程序化赋值
-        （测试/初始化）前会 `blockSignals`，不会误弹窗。
+        确认挂在 `clicked`（用户动作）而不是 `toggled`：AGENTS §7.6 明确要求这一点——
+        `toggled` 在程序化 `setChecked(...)` 时也会触发，等于把「危险确认」绑到了
+        非用户动作上。`clicked(bool)` 的参数是**点击后的状态**，所以拒绝时要把勾复原。
         """
         if checked:
             self._refresh_url()
