@@ -6,11 +6,61 @@
 - 命令行：`exam-builder`（打包、校验、导出 PIN、考后看原卷、校验答题卡）
 - 学生端：`exam-client`（单 exe，双击运行，按场次与网络时间解锁）
 
-> 当前版本 **1.6.1**。Release 正文由 `scripts/release_body.py` 从本文件提取
+> 当前版本 **1.7.0**。Release 正文由 `scripts/release_body.py` 从本文件提取
 > **当前版本那一节**，因此 `## 更新摘要（vX.Y.Z）` 小节必须存在且唯一。
 >
-> **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 65 个版本，最新在前）；
+> **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 66 个版本，最新在前）；
 > 更早版本（v0.13.2 及以前）未逐条整理，需要时查 `git tag` 与 `git log`。
+
+## 更新摘要（v1.7.0）
+
+本版两件事：**管理端可以直接用自己的证书**（此前只能命令行），**`tls` 模块拆分**（零行为变化）。
+不新增依赖。
+
+### 用自己的证书：管理端「证书来源」
+
+「网页考试…」对话框在「使用 HTTPS」下面新增一行 **「证书来源」**：
+
+- **自签（服务端自动生成）**：与以前完全一致，界面不带任何证书参数；
+- **自己的证书（内网 CA）**：展开三行文件选择（证书 / 私钥 / CA 可选）+「严格自检
+  （`--tls-check strict`）」勾选，直接透传 `--tls-cert` / `--tls-key` / `--tls-ca` / `--tls-check`。
+
+分工是明确的：**界面只做形式校验**（文件存在、非空、是 PEM、证书与私钥必须成对、
+「不使用 HTTPS」时不允许带证书），**强校验仍在服务端启动自检**（私钥配套 / EKU `serverAuth` /
+链 / 有效期 / SAN；致命项拒绝启动并把 `✗ … 修法` 打进对话框日志）。这样界面不需要引入
+X.509 解析，也不会把「看起来对」的证书当成「能用」。
+
+几个细节：
+
+- 切回「自签」时清空三个路径并复位严格勾选（双保险：`_tls_args()` 在自签/明文时**无条件**返回空，
+  即使将来有人绕过它拼参数也不会带出残留值）；
+- 取消「使用 HTTPS」时证书组**禁用**（不是隐藏）——老师能看到它为什么不生效；
+- 运行中一律禁用（改动需重启服务生效，与其它参数一致）；
+- 对话框高度改为按内容量 `sizeHint()` 自适应（不写死像素：150% DPI 下同一像素值对应的
+  逻辑高度更小，会把日志区压到看不见）。
+
+### `tls` 模块拆分（零行为变化）
+
+`crates/server/src/tls.rs`（1296 行）拆成目录：
+
+| 文件 | 内容 |
+|---|---|
+| `tls/mod.rs` | 模块文档（为什么自签、重签策略）、`TlsMaterial`、`pub use` 重导出 |
+| `tls/material.rs` | 加载 / 生成 / 元数据 / 备份 / 指纹 / SAN 规范化 + 12 条用例 |
+| `tls/check.rs` | 启动自检（内存握手 / 分类 / 文案）+ 9 条用例 |
+| `tls/testutil.rs`（`#[cfg(test)]`） | `TestDir`（Drop 清理）、`make_cert` / `make_ca` / `server_auth` |
+
+只做「移动 + 最小可见性调整」：`crate::tls::{generate, load, load_or_generate, check_external,
+normalize_host, CertCheck, TlsMaterial}` 路径全部不变，**`main.rs` 与 `server_tests.rs` 一行未动**，
+`cargo test -p server` 仍是 **97 passed**。
+
+### 验证
+
+- Rust **371**（server 97，与拆分前一致）；pytest **453 passed + 1 skipped**（收集 454，新增 19 条）；
+- `scripts/preflight-release.sh` **17 项**、`verify-embed` 17 项、`smoke-web`（HTTPS）、
+  `smoke-tls-cert`（6 条）、`drill --students 6` 全过；CI 8/8；
+- 管理端端到端接线实测：`证书来源=自己的证书 + 严格自检` → `QProcess.start` 收到
+  `--tls-cert/--tls-key/--tls-check strict`；只填证书不填私钥 → 弹警告且**不启动**。
 
 ## 更新摘要（v1.6.1）
 
