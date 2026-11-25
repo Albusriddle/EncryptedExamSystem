@@ -76,3 +76,7 @@ pytest-win.xml
 
 # ---- 会话/实验残留 ----
 admin/tmp*
+# 复审/调查代理的临时产物目录（形如 admin/rev6-2oqemjar/）。
+# 规矩：临时产物只许写 target/ 或 .tmp-sess，不许落在仓库里——掉一个 20 MB 的
+# 测试夹具目录进来，`git add -A` 就会把它带进发布提交。
+admin/rev*-*/

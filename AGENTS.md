@@ -160,7 +160,7 @@ bash scripts/preflight-release.sh          # 全过
      `bash scripts/bump-version.sh <版本>`——它同步 **5 个版本文件**（`VERSION` / `Cargo.toml` /
      `admin/pyproject.toml` / `admin/uv.lock` / `Cargo.lock`）与 **15 个文件里的标记位**
      （各文档「适用版本 / 当前版本 / 基线小节」），历史叙述不会被改；
-     一致性由发布预检 6c 步的 `bump_version --check` 把关
+     一致性由发布预检第 7 步的 `bump_version --check` 把关
   2. 全量验证全绿，并**推送 commit 后等 CI 全绿**（尤其是 Windows 的 admin-package job）
   3. `git tag v<版本>` 并推送 tag
   4. 等 `release` 工作流完成，**核对资产齐全**（zip + 两个 exe）

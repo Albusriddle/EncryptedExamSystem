@@ -92,7 +92,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - name: 安装 Qt 运行库
-        # 预检第 8 步会真的跑管理端 pytest；装了 PySide6 却没有这些库时，
+        # 预检第 9 步会真的跑管理端 pytest；装了 PySide6 却没有这些库时，
         # UI 用例在无头环境里起不来（与 python job 同一套依赖）。
         run: |
           sudo apt-get update

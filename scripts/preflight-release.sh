@@ -175,9 +175,9 @@ else
   echo "  （跳过：加 --full 启用，需要 PySide6）"
 fi
 
-# ---------------------------------------------------------------- 6. Release 说明
+# ---------------------------------------------------------------- 5. Release 说明
 
-head_ "6. Release 说明只包含当前版本"
+head_ "5. Release 说明只包含当前版本"
 if [ -f "$ROOT/VERSION" ] && [ -f "$ROOT/docs/release-notes.md" ]; then
   BODY="$(PYTHONIOENCODING=utf-8 python "$ROOT/scripts/release_body.py" 2>/dev/null || true)"
   VER="$(tr -d '[:space:]' < "$ROOT/VERSION")"
@@ -194,9 +194,9 @@ else
   bad "缺少 VERSION 或 release-notes.md"
 fi
 
-# ---------------------------------------------------------------- 6b. 版本三处一致
+# ---------------------------------------------------------------- 6. 版本三处一致
 
-head_ "6b. VERSION / Cargo.toml / pyproject.toml 版本一致"
+head_ "6. 版本文件一致（VERSION / Cargo.toml / pyproject.toml）"
 V=$(tr -d '[:space:]' < "$ROOT/VERSION" 2>/dev/null || true)
 CV=$(grep -m1 '^version = ' "$ROOT/Cargo.toml" 2>/dev/null | cut -d'"' -f2 || true)
 PV=$(grep -m1 '^version = ' "$ROOT/admin/pyproject.toml" 2>/dev/null | cut -d'"' -f2 || true)
@@ -206,9 +206,9 @@ else
   bad "版本不一致：VERSION=$V Cargo=$CV pyproject=$PV"
 fi
 
-# ---------------------------------------------------------------- 6c. 版本标记只落在标记位
+# ---------------------------------------------------------------- 7. 版本标记只落在标记位
 
-head_ "6c. 版本标记一致（bump_version --check）"
+head_ "7. 版本标记一致（bump_version --check）"
 # 发版时「全库替换版本号」会误改文档里的历史叙述（`vX.Y.Z 起`、历史发版小节、
 # 审阅轮次标题）。这里机械检查所有**标记位**是否都等于 VERSION，漏改一处就红。
 mkdir -p "$ROOT/target"
@@ -220,16 +220,16 @@ else
 fi
 rm -f "$VMARK_LOG"
 
-# ---------------------------------------------------------------- 7. 许可证合规
+# ---------------------------------------------------------------- 8. 许可证合规
 
-head_ "7. 许可证合规（Apache-2.0 分发 + PySide6 LGPL-3.0）"
+head_ "8. 许可证合规（Apache-2.0 分发 + PySide6 LGPL-3.0）"
 for f in LICENSE THIRD-PARTY-NOTICES.md licenses/LGPL-3.0.txt licenses/GPL-3.0.txt licenses/ISC.txt; do
   if [ -f "$ROOT/$f" ]; then ok "存在 $f"; else bad "缺少 $f（发布包必须带上）"; fi
 done
 
-# ---------------------------------------------------------------- 8. 管理端测试
+# ---------------------------------------------------------------- 9. 管理端测试
 
-head_ "8. 管理端测试"
+head_ "9. 管理端测试"
 if command -v uv >/dev/null 2>&1 && [ -d "$ROOT/admin" ]; then
   # 不用 /tmp：Windows 的 MSYS 环境可能没有 /tmp（实测会直接 no such file），
   # 写到仓库 target/ 下更稳，也不会污染系统临时目录。
@@ -245,11 +245,11 @@ else
   echo "  （跳过：没有 uv/admin）"
 fi
 
-# ---------------------------------------------------------------- 9. 外部证书自检冒烟
+# ---------------------------------------------------------------- 10. 外部证书自检冒烟
 
 # 自检逻辑的单测在 Rust 里直接调 `check_external()`，覆盖不到「CLI → 分级 → 退出码 → 文案」
 # 这层；v1.6.0 就是靠手工验证的，这里固化成门禁（17 项）。
-head_ "9. 外部证书自检"
+head_ "10. 外部证书自检"
 TLSCERT_LOG="$ROOT/target/preflight-tls-cert.log"
 # 二进制由脚本自己定位（本地 target/release、CI 的 target/<triple>/release 都认）
 if bash "$ROOT/scripts/smoke-tls-cert.sh" >"$TLSCERT_LOG" 2>&1; then
