@@ -12,7 +12,28 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::secure_fs;
 
-use super::TlsMaterial;
+/// 已就绪的 TLS 材料。
+///
+/// 放在本模块（而不是 `mod.rs`）：只有「加载/生成」会产生它，`check.rs` 完全用不到；
+/// `mod.rs` 只负责 `pub use` 出去，保持对外路径 `crate::tls::TlsMaterial` 不变。
+pub struct TlsMaterial {
+    pub config: Arc<ServerConfig>,
+    /// 证书 SHA-256 指纹（大写十六进制、冒号分隔）。
+    pub fingerprint: String,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    /// 是不是本次启动新生成（或被重签）的。
+    pub generated: bool,
+    /// 证书覆盖的地址；外部证书（`--tls-cert`）未知时为空。
+    pub hosts: Vec<String>,
+    /// 证书到期时间（Unix 秒）；外部证书未知时为 0。
+    pub not_after_unix: u64,
+    /// 私钥权限是否真的收紧成功。
+    ///
+    /// 收紧失败不再中断启动（FAT32/网络盘上 ACL 接口本来就会失败），但**横幅不能
+    /// 无条件写「仅当前用户可读」**——那会与事实相反，老师也不会注意 stderr。
+    pub key_hardened: bool,
+}
 
 const CERT_FILE: &str = "server.crt";
 const KEY_FILE: &str = "server.key";
@@ -106,8 +127,10 @@ pub fn load_or_generate(dir: &Path, hosts: &[String], days: i64) -> Result<TlsMa
 /// 加载指定路径的证书与私钥（老师用自己的 CA 签的证书时走这里）。
 ///
 /// 外部证书的**校验**不在这里做：`load()` 只负责解析与组配置，检查统一走
-/// [`check_external`]（在 `main()` 里、绑定端口之前跑），这样「拒绝启动」发生在
+/// `crate::tls::check_external`（在 `main()` 里、绑定端口之前跑），这样「拒绝启动」发生在
 /// 任何监听建立之前，也不会把两种错误混在一条消息里。
+/// （这里用反引号而不是 intra-doc link：拆分后它属于 `check.rs`，本模块作用域里没有该名字，
+/// `[`check_external`]` 会让 `cargo doc` 报 unresolved link。）
 pub fn load(cert_path: &Path, key_path: &Path) -> Result<TlsMaterial> {
     // 加载时也补一次权限收紧：生成时若因文件系统不支持而失败，后续每次启动都再试一遍，
     // 不让「私钥对其他本地用户可读」长期留着。失败只告警，绝不阻断启动。
@@ -314,7 +337,11 @@ pub(super) fn unix_now() -> u64 {
 }
 
 /// 证书指纹：SHA-256，大写十六进制、冒号分隔（与浏览器「证书详情」里一致）。
-pub fn fingerprint_hex(der: &[u8]) -> String {
+/// 证书 DER 的 SHA-256，格式化成大写十六进制、冒号分隔。
+///
+/// 只在 tls 模块内用（`load`/`load_or_generate` 组装 `TlsMaterial` 时算一次），
+/// 因此保持私有——`mod.rs` 不再把它 `pub use` 出去（拆分后它没有对外调用点）。
+fn fingerprint_hex(der: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(der);
     digest
@@ -353,7 +380,8 @@ mod tests {
         );
         assert_eq!(material.hosts, hosts(), "元数据里应记下 SAN 列表");
         assert!(material.not_after_unix > unix_now(), "到期时间应在未来");
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 证书到期前 30 天内必须重签（文档承诺「到期会自动重签」，就得真的做到）。
@@ -373,7 +401,8 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".bak."))
             .collect();
         assert!(!backups.is_empty(), "重签前应备份旧文件");
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 本机地址变了（SAN 不含新地址）也必须重签。
@@ -386,7 +415,8 @@ mod tests {
         let material = load_or_generate(&dir, &next, 30).expect("重签并加载");
         assert!(material.generated, "出现新地址时必须重签");
         assert!(material.hosts.contains(&"10.0.0.7".to_string()));
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 老版本目录（只有证书/私钥、没有 server.json）→ 视为未知，重签。
@@ -398,7 +428,8 @@ mod tests {
         let material = load_or_generate(&dir, &hosts(), 30).expect("重签并加载");
         assert!(material.generated, "缺少元数据时必须重签");
         assert!(dir.join(META_FILE).is_file(), "重签后应重新写下元数据");
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 证书文件损坏时自愈（备份 + 重签），而不是让服务端起不来。
@@ -416,7 +447,8 @@ mod tests {
                 .all(|c| c.is_ascii_hexdigit() || c == ':'),
             "重签后指纹应正常"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 私钥文件必须只有当前用户可读（Unix 0600；Windows 受保护 DACL）。
@@ -446,7 +478,8 @@ mod tests {
             !dir.join(format!("{KEY_FILE}.tmp")).exists(),
             "私钥临时文件不应残留"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 每个文件只保留最近 3 份备份：DHCP 换网段/反复重启会不断重签，
@@ -471,7 +504,8 @@ mod tests {
             .collect();
         left.sort_unstable();
         assert_eq!(left, vec![3, 4, 5], "必须只留最新的三份");
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// SAN 比对要规范化：域名大小写、IPv6 的不同写法都不该触发重签
@@ -508,7 +542,8 @@ mod tests {
         std::fs::write(dir.join(META_FILE), text).expect("写元数据");
         let material = load_or_generate(&dir, &hosts(), 30).expect("重签并加载");
         assert!(material.generated, "版本不认识时必须重签");
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 老格式（没有 `version` 字段）也必须重签：默认值 0 ≠ 当前版本。
@@ -524,7 +559,8 @@ mod tests {
         std::fs::write(dir.join(META_FILE), text).expect("写旧格式元数据");
         let material = load_or_generate(&dir, &hosts(), 30).expect("重签并加载");
         assert!(material.generated, "缺 version 的旧元数据必须重签");
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 证书里必须有 IP SAN（否则 Chrome 报「名称不匹配」，体验更差）。
@@ -543,7 +579,8 @@ mod tests {
             der.windows(needle.len()).any(|w| w == needle),
             "证书里应包含 192.168.1.10 的 IP SAN"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 只声明 http/1.1：不声明的话浏览器会带 h2 候选，虽然会回退，但语义不明确。
@@ -556,6 +593,7 @@ mod tests {
             vec![b"http/1.1".to_vec()],
             "ALPN 必须只声明 http/1.1"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 }

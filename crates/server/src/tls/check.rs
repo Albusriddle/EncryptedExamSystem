@@ -412,7 +412,8 @@ mod tests {
         );
         assert_eq!(check.ok_hosts, hosts, "两个地址都该通过");
         assert!(check.passed());
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 证书与私钥不是一对 → 致命（学生侧表现为「连接被重置」，最难排查）。
@@ -446,7 +447,8 @@ mod tests {
             "文案要点明「不匹配」：{:?}",
             check.fatals
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 已过期 → 只告警（浏览器仍可「继续」），且只报一条并列出受影响地址。
@@ -476,7 +478,8 @@ mod tests {
             "过期只报一条：{:?}",
             check.warnings
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// SAN 不覆盖某个地址 → 该地址一条警告（其它地址仍可通过）。
@@ -511,7 +514,8 @@ mod tests {
             "警告要指名那个地址：{:?}",
             check.warnings
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
 
     /// 缺 EKU serverAuth → 致命（Chrome 报不可绕过的 ERR_SSL_KEY_USAGE_INCOMPATIBLE）。
@@ -535,7 +539,8 @@ mod tests {
             "文案要含 serverAuth：{:?}",
             check.fatals
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        // 临时目录由 `TestDir` 的 Drop 回收（失败也会回收）；这里不再显式删除，
+        // 免得同一件事有两套写法。
     }
     /// 给了 `--tls-ca` 就用它当信任锚：正确的 CA 通过，不相关的 CA 判致命（链不可用）。
     #[test]

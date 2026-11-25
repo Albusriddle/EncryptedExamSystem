@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 /// 以前是「每条用例末尾 `remove_dir_all`」——断言一失败就漏清理，
 /// `target/server-tests/tls-*` 会越积越多。`Deref<Target = Path>` 让既有写法
 /// （`&dir`、`dir.join(...)`）不用改。
+///
+/// 注意：v1.7.0 之前留下的 `target/server-tests/tls-*`（以及 `sweep-lock-*`）
+/// 不会被这个守卫回收——它只管本次运行创建的那一个。想清就手工删 `target/server-tests/`。
 pub(crate) struct TestDir(PathBuf);
 
 impl std::ops::Deref for TestDir {

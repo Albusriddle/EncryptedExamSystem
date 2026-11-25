@@ -12,42 +12,17 @@
 //! 到期前 30 天、或本机地址变了（SAN 不含新地址）、或元数据缺失（旧版本目录），都重签。
 //! 这解决了两类现场事故：① 第 366 天起全班看到「证书已过期」；② 教师机换网段后
 //! 学生看到「名称不匹配」——而老师根本不会想到要去删 `tls/` 目录。
-
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use rustls::ServerConfig;
+//!
+//! 外部证书（`--tls-cert` / `--tls-key`）的**启动自检**在 `check.rs`（`check_external`）：
+//! 在内存里跑一次真实握手，覆盖私钥配套 / EKU / 链 / 有效期 / SAN 覆盖；致命项由
+//! `main()` 在**绑定端口之前**拒绝启动，警告项只提示（`--tls-check strict` 可让警告也拒绝）。
 
 mod check;
 mod material;
 #[cfg(test)]
 pub(crate) mod testutil;
 
-pub use check::check_external;
-pub use material::{generate, load, load_or_generate};
-// 拆分前 `crate::tls::` 下就有的两个名字：`CertCheck` 只作为 `check_external` 的返回类型
-// 被用到（没人写全名），`fingerprint_hex` 只有 tls 内部用——保留在公开路径上是为了
-// 拆分前后对外可见面一致；bin crate 里它们没有外部调用点，故按需静音。
-pub use check::CertCheck;
+pub use check::{CertCheck, check_external};
+pub use material::{TlsMaterial, generate, load, load_or_generate};
 // `main.rs` 用它做 tls_hosts 去重，保持 `pub(crate)`（拆分前就是 `pub(crate)`）。
 pub(crate) use material::normalize_host;
-
-/// 已就绪的 TLS 材料。
-pub struct TlsMaterial {
-    pub config: Arc<ServerConfig>,
-    /// 证书 SHA-256 指纹（大写十六进制、冒号分隔）。
-    pub fingerprint: String,
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
-    /// 是不是本次启动新生成（或被重签）的。
-    pub generated: bool,
-    /// 证书覆盖的地址；外部证书（`--tls-cert`）未知时为空。
-    pub hosts: Vec<String>,
-    /// 证书到期时间（Unix 秒）；外部证书未知时为 0。
-    pub not_after_unix: u64,
-    /// 私钥权限是否真的收紧成功。
-    ///
-    /// 收紧失败不再中断启动（FAT32/网络盘上 ACL 接口本来就会失败），但**横幅不能
-    /// 无条件写「仅当前用户可读」**——那会与事实相反，老师也不会注意 stderr。
-    pub key_hardened: bool,
-}
