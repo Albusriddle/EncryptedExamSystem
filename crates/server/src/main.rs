@@ -128,10 +128,11 @@ struct Cli {
     /// 已有私钥
     #[arg(long)]
     tls_key: Option<PathBuf>,
-    /// 证书 SAN 里要包含的地址（可多次；默认=本机局域网 IP + 127.0.0.1 + localhost）
+    /// 证书 SAN 里要包含的地址（可多次；默认=本机局域网 IP + 127.0.0.1 + localhost；
+    /// `--bind` 指定具体地址时该地址也会并入 SAN）
     #[arg(long = "tls-host")]
     tls_hosts: Vec<String>,
-    /// 外部证书的签发 CA（可选；只用于启动自检的链校验，**不改变**发给学生的证书链）
+    /// 外部证书的签发 CA（可选；只用于启动自检的链校验，不改变发给学生的证书链）
     #[arg(long)]
     tls_ca: Option<PathBuf>,
     /// 外部证书自检严格程度：warn（默认，过期/SAN 缺失只告警）/ strict（同样拒绝启动）
@@ -380,6 +381,11 @@ fn main() -> Result<()> {
 
     // --gen-cert：只生成证书，不需要考试包。
     if cli.gen_cert {
+        if cli.tls_ca.is_some() || cli.tls_check != TlsCheck::Warn {
+            println!(
+                "⚠ --tls-ca / --tls-check 只用于外部证书自检；--gen-cert 生成的是自签证书，忽略这两个参数"
+            );
+        }
         let hosts = tls_hosts(&cli);
         let dir = cli.answers_dir.join("tls");
         tls::generate(&dir, &hosts, 365)?;
@@ -465,47 +471,67 @@ fn main() -> Result<()> {
 
     // ---- TLS：默认开；没证书就自动生成 ----
     let hosts = tls_hosts(&cli);
-    let external_cert = cli.tls_cert.is_some() && cli.tls_key.is_some();
+    // 先把「cert/key 必须成对」判掉，再谈自检：否则只给 --tls-cert 时，
+    // 会先打印「当前是自签证书，忽略这两个参数」，然后再报「必须同时给出」——顺序与文案都错。
+    let cert_pair = match (&cli.tls_cert, &cli.tls_key) {
+        (Some(cert), Some(key)) => Some((cert, key)),
+        (None, None) => None,
+        _ => anyhow::bail!("--tls-cert 与 --tls-key 必须同时给出（只给了其中一个）"),
+    };
 
     // ---- 外部证书自检（只对外部证书跑：自签证书是本机生成的，没有「配置错」这回事） ----
-    let cert_check = if cli.tls == TlsMode::Auto && external_cert {
-        let cert = cli.tls_cert.as_ref().expect("上面已确认非空");
-        let key = cli.tls_key.as_ref().expect("上面已确认非空");
-        let check = tls::check_external(cert, key, cli.tls_ca.as_deref(), &hosts)?;
-        if !check.passed() {
-            for msg in &check.fatals {
-                eprintln!("✗ 外部证书自检未通过：{msg}");
+    let cert_check = match (&cli.tls, cert_pair) {
+        (TlsMode::Auto, Some((cert, key))) => {
+            let check = tls::check_external(cert, key, cli.tls_ca.as_deref(), &hosts)?;
+            // 致命项存在时**也把警告打出来**：否则老师修完致命项重启，才发现还有两条警告，
+            // 白折腾一轮。
+            if !check.passed() {
+                for msg in &check.fatals {
+                    eprintln!("✗ 外部证书自检未通过：{msg}");
+                }
+                if check.warnings.is_empty() {
+                    anyhow::bail!(
+                        "外部证书自检未通过（{} 项致命），每条的修法见上",
+                        check.fatals.len()
+                    );
+                }
+                for msg in &check.warnings {
+                    eprintln!("⚠ 外部证书自检（另有警告）：{msg}");
+                }
+                anyhow::bail!(
+                    "外部证书自检未通过（{} 项致命、{} 项警告），每条的修法见上",
+                    check.fatals.len(),
+                    check.warnings.len()
+                );
             }
-            anyhow::bail!(
-                "外部证书自检未通过（{} 项致命）。修法：检查 --tls-cert/--tls-key 是否配套；\
-                 内网 CA 签发的证书请用 --tls-ca 指定 CA 证书",
-                check.fatals.len()
-            );
-        }
-        if cli.tls_check == TlsCheck::Strict && !check.warnings.is_empty() {
+            if cli.tls_check == TlsCheck::Strict && !check.warnings.is_empty() {
+                for msg in &check.warnings {
+                    eprintln!("✗ 外部证书自检（strict）：{msg}");
+                }
+                anyhow::bail!(
+                    "外部证书自检有 {} 项警告，而 --tls-check strict 要求零警告",
+                    check.warnings.len()
+                );
+            }
             for msg in &check.warnings {
-                eprintln!("✗ 外部证书自检（strict）：{msg}");
+                eprintln!("⚠ 外部证书自检：{msg}");
             }
-            anyhow::bail!(
-                "外部证书自检有 {} 项警告，而 --tls-check strict 要求零警告",
-                check.warnings.len()
-            );
+            Some(check)
         }
-        for msg in &check.warnings {
-            eprintln!("⚠ 外部证书自检：{msg}");
+        (why, _) => {
+            // 参数给了但当前不会自检：提示一句，避免老师以为「加了 --tls-ca 就生效了」。
+            if cli.tls_ca.is_some() || cli.tls_check != TlsCheck::Warn {
+                let why_text = if *why == TlsMode::Off {
+                    "明文（--tls off）"
+                } else {
+                    "自签证书（没给 --tls-cert/--tls-key）"
+                };
+                println!(
+                    "⚠ --tls-ca / --tls-check 仅对外部证书生效：当前是{why_text}，忽略这两个参数"
+                );
+            }
+            None
         }
-        Some(check)
-    } else {
-        // 参数给了但当前不会自检：提示一句，避免老师以为「加了 --tls-ca 就生效了」。
-        if cli.tls_ca.is_some() || cli.tls_check != TlsCheck::Warn {
-            let why = if cli.tls == TlsMode::Off {
-                "明文（--tls off）"
-            } else {
-                "自签证书"
-            };
-            println!("⚠ --tls-ca / --tls-check 仅对外部证书生效：当前是{why}，忽略这两个参数");
-        }
-        None
     };
     let tls_material = match cli.tls {
         TlsMode::Off => None,
@@ -701,6 +727,10 @@ fn tls_hosts(cli: &Cli) -> Vec<String> {
             hosts.push(bound);
         }
     }
+    // 重复的 `--tls-host` 会产生重复告警（同一个地址报两次），按规范化形式去重：
+    // `LOCALHOST` 与 `localhost`、`0:0:0:0:0:0:0:1` 与 `::1` 视为同一个地址。
+    let mut seen = std::collections::HashSet::new();
+    hosts.retain(|h| seen.insert(tls::normalize_host(h)));
     hosts
 }
 
@@ -1486,8 +1516,10 @@ fn submit(app: &App, req: &Request) -> Response {
                 st.exported = None;
                 st.submitted = false;
             } else {
-                return Response::json(200, json!({"ok": true, "already": true, "file": null}))
-                    .with_cookie(post_submit_cookie(app, &token));
+                // `submitted=true` 但还没有 `exported`：后台 sweep 正在封存（它先置位、
+                // 再写盘）。这时返回 200 会让前端显示「已交卷」，而那一刻卡还没落盘；
+                // 若 sweep 随后失败还会回滚状态。返回 503 让前端提示「正在封存，请稍候」并重试。
+                return Response::error(503, "正在封存答题卡，请稍候");
             }
         }
         // 抢占：先把 submitted 置位，避免与自动收卷同时冻结（会写出两份同名校验一致的

@@ -2357,3 +2357,50 @@ fn code_editor_is_initialised_only_after_the_textarea_is_in_the_dom() {
         "必须先 appendChild(ta) 再 initCodeEditor(ta, item)"
     );
 }
+
+/// 重复的 `--tls-host` 要去重：否则同一个地址会报两条一模一样的自检警告。
+#[test]
+fn tls_hosts_are_deduplicated_after_normalisation() {
+    let cli = Cli::parse_from([
+        "exam-server",
+        "--tls-host",
+        "LOCALHOST",
+        "--tls-host",
+        "localhost",
+    ]);
+    let hosts = tls_hosts(&cli);
+    let count = hosts
+        .iter()
+        .filter(|h| h.eq_ignore_ascii_case("localhost"))
+        .count();
+    assert_eq!(count, 1, "重复地址只该出现一次：{hosts:?}");
+}
+
+/// 后台 sweep 的抢占窗口（`submitted=true` 但 `exported` 还没有）里交卷必须回 503。
+///
+/// 以前这里返回 `200 {"already":true,"file":null}`：前端会显示「已交卷」，而那一刻
+/// 答题卡还没落盘；若 sweep 随后失败还会回滚状态，监考看到的和学生对不上。
+#[test]
+fn submit_during_sweep_returns_503() {
+    let fx = Fixture::new("sweep-503");
+    let token = fx.login_ok(2021001);
+    {
+        let mut state = fx.app.lock_state();
+        let st = state.students.get_mut(&token).expect("学生状态应存在");
+        st.submitted = true;
+        st.exported = None;
+    }
+    let resp = fx.route(
+        &post_json("/api/submit", json!({}), peer(1))
+            .token(&token)
+            .csrf(),
+    );
+    assert_status(&resp, 503, "sweep 窗口内交卷应返回 503");
+    assert!(
+        body_json(&resp)["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("封存"),
+        "文案要说明正在封存"
+    );
+}

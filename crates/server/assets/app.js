@@ -109,6 +109,7 @@ function showDone(studentId) {
   lockAll();
   if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  clearResubmit(); // 已交卷后不该再冒出一个迟到的 /api/submit
   paper = null;
   answers = Object.create(null);
   choices = new Map();
@@ -373,7 +374,9 @@ function updateClock() {
         }
         // 只有「没有待保存的题」时才清横幅：否则会把「保存失败，正在重试」的提示
         // 在 15 秒后悄悄抹掉，学生以为已经存上了。
-        if (!dirty.size) setNet('');
+        // 有 503 退避在跑时别清横幅：那条「答题卡正在封存，请不要关闭页面」正是
+        // 学生此刻最需要看到的提示，被 15 s 轮询抹掉会让人以为已经交上了。
+        if (!dirty.size && !resubmitTimer) setNet('');
       } catch (e) {
         // 轮询失败不回退本地计时：断线时学生更需要看到剩余时间。
         if (e && e.status === 401) { needRelogin(); return; }
@@ -393,9 +396,23 @@ function lockAll() {
 
 // ---------------------------------------------------------------- 交卷
 let submitting = false;
-async function submit(auto = false) {
+// 服务端在「已收卷但答题卡还没写盘」的那几毫秒~几十毫秒窗口里会回 503
+// （到点 sweep 与手动交卷撞在一起）。这时**不能**当成交卷成功：卡可能随后回滚，
+// 学生却已经看到「已交卷」；也不能当成交卷失败：什么都没坏，只是要等一下。
+// 所以单独一条退避重试路径，成功前不置 submitted、不切页、不弹「交卷失败」。
+let resubmitTimer = null;   // 待触发的重试（同一时刻只允许一个）
+let resubmitAt = 0;         // 下一次允许重试的时刻：挡住退避期内的重复点击与每秒轮询
+let resubmitDelay = 2000;   // 2 s → 20 s 指数退避
+let resubmitAuto = false;   // 记住这次是「到点自动」还是「手动」：重试时别弹 confirm
+async function submit(auto = false, skipConfirm = false) {
   if (submitted || submitting) return;
-  if (!auto && !confirm('交卷后不可再修改，确定交卷吗？')) return;
+  // 退避期内：学生再点、或 updateClock 每秒调一次，都直接返回（避免并发提交）。
+  // `resubmitTimer` 是唯一真相：存在就代表「已排好一次重试」，不再接受新的交卷请求；
+  // 用时间戳比较会出现「定时器已到点但回调还没跑」与「回调里再次 503」互相踩的情况。
+  if (resubmitTimer) return;
+  // `skipConfirm` 只给 503 退避后的重试用：学生已经在第一次点交卷时确认过了，
+  // 每 2–20 秒再弹一次「确定交卷吗」会让人以为页面出问题。
+  if (!auto && !skipConfirm && !confirm('交卷后不可再修改，确定交卷吗？')) return;
   submitting = true;
   try {
     // 先把在途/未发的作答落地。保存失败时**不能默默拦死**：到点自动收卷仍会
@@ -410,9 +427,14 @@ async function submit(auto = false) {
     }
     await api('/api/submit', { method: 'POST', body: '{}' });
     // 交卷 API 一旦返回成功，状态就钉死：后面任何复查失败都不代表「交卷失败」。
+    // 也要顺手清掉 503 退避状态（上一次 503 的定时器可能还挂着）。
+    clearResubmit();
     submitted = true;
     toast('已交卷');
     showDone(me);
+    // 503 退避期间挂着的「正在封存…」横幅必须收掉：否则「已交卷」页上还写着
+    // 「请不要关闭页面，稍后会自动重试」，学生会以为没交上。
+    setNet('');
     // 尽力而为：允许回看时用服务端卷面替换「已交卷」页（默认策略下这里会 401，属正常）。
     try {
       apply(await api('/api/paper'));
@@ -420,8 +442,40 @@ async function submit(auto = false) {
       console.warn('交卷后复查卷面失败（不影响已交卷）', e);
     }
   } catch (e) {
-    if (e.status === 401) { needRelogin(); } else { toast('交卷失败：' + e.message); }
+    if (e.status === 401) { needRelogin(); }
+    else if (e.status === 503) {
+      // 正在封存：既不是成功也不是失败。置 submitted / showDone 都是错的（卡还没写盘）。
+      scheduleResubmit(auto);
+    } else { toast('交卷失败：' + e.message); }
   } finally { submitting = false; }
+}
+
+/// 收到 503（正在封存）后安排一次退避重试。
+///
+/// 手动与到点自动共用这条路径；`auto` 要原样带过去，否则重试会弹出
+/// 「确定交卷吗？」——到点自动交卷不该问学生任何问题。
+function scheduleResubmit(auto) {
+  resubmitAuto = auto;
+  // 横幅一直显示到成功为止：学生这时最需要知道「还没交上，但别关页面」。
+  setNet('答题卡正在封存：请不要关闭页面，网络恢复后会自动重试交卷。');
+  if (resubmitTimer) return; // 已经排好一次，别叠加
+  const wait = resubmitDelay; // 用**本次**的退避值当等待时长，再翻倍给下一次
+  resubmitDelay = Math.min(resubmitDelay * 2, 20000);
+  resubmitAt = Date.now() + wait;
+  toast('正在封存答题卡，请稍候…');
+  resubmitTimer = setTimeout(() => {
+    resubmitTimer = null;
+    resubmitAt = 0;
+    if (submitted) return;
+    submit(resubmitAuto, true); // 已确认过，重试不再弹确认框
+  }, wait);
+}
+
+/// 成功（或用户已进入别的终态）时清掉退避状态，避免留下一个迟到的重试。
+function clearResubmit() {
+  if (resubmitTimer) { clearTimeout(resubmitTimer); resubmitTimer = null; }
+  resubmitAt = 0;
+  resubmitDelay = 2000;
 }
 
 // 刷新/断线重连：带着会话 cookie 直接恢复，不必重新输学号。

@@ -1,6 +1,6 @@
 # exam-server（网页考试）
 
-- 适用版本：**v1.6.0**
+- 适用版本：**v1.6.1**
 
 网页版学生端：教师在隔离局域网里启动它（管理端「网页考试…」入口），
 学生用浏览器打开 `https://<教师机 IP>:8443/`（首次需点「高级 → 继续前往」），
@@ -66,8 +66,10 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `--login-rate-limit` | 同一 IP 每分钟登录尝试上限，默认 `60`；`0` = 不限制（演练/同 NAT 时用） |
 
 启动时会先做一次三源网络时间校验并打印结论（本地时间 / 网络时间 / 偏差 / 生效偏移）。
-管理端「网页考试…」对话框可以直接设置 `--bind` / `--time-check` / `--login-rate-limit`，
-并在服务打印出「考试服务已启动」之后才显示访问地址。
+管理端「网页考试…」对话框可以设置 `--port` / `--bind` / `--answers-dir` / `--time-check` /
+`--login-rate-limit` / `--tls auto|off`，并在服务打印出「考试服务已启动」之后才显示访问地址。
+**自己的证书只能用命令行启动**：`--tls-cert` / `--tls-key` / `--tls-ca` / `--tls-check`
+在界面上没有对应控件（界面只提供自签证书）。
 启动横幅里的地址跟随 `--bind`：绑 `0.0.0.0` 时显示本机局域网 IP，绑具体地址时原样显示
 （绑 `127.0.0.1` 调试时不会再打印一个学生连不上的地址）。
 默认 `warn`：没有外网的隔离局域网会打印「取时失败，仅告警」后继续启动；
@@ -88,7 +90,7 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `POST` | `/api/logout` | 主动退出：清 cookie 并从内存删 token（旧 cookie 立刻 401） |
 | `GET` | `/api/time` | 服务器时间与剩余秒数；附带 `time_mode` / `clock_offset_secs` 便于排障 |
 
-## TLS（v1.5.0）
+## TLS
 
 - 默认 HTTPS：启动时若 `<answers-dir>/tls/` 里没有证书，会自动生成一张 **ECDSA P-256 自签证书**
   （SAN 含本机局域网 IP、`127.0.0.1`、`localhost`；EKU 为 `serverAuth`——缺它浏览器会报
@@ -107,8 +109,10 @@ exam-server --package StudentClient.exe --keyfile key.txt \
   结论分两级（横幅会打印「自检通过」或「N 项警告」）：
   - **致命**（拒绝启动）：私钥与证书不匹配、EKU 缺 `serverAuth`、链不可用——这些情况下学生
     根本连不上，早失败好过开考后炸；
-  - **警告**（继续启动）：已过期、SAN 不覆盖某个地址——浏览器仍可点「继续」，
-    把服务停掉反而更糟；`--tls-check strict` 可让警告也拒绝启动。
+  - **警告**（继续启动）：已过期、**尚未生效**（教师机时钟慢了）、SAN 不覆盖某个地址——
+    浏览器仍可点「继续」，把服务停掉反而更糟；`--tls-check strict` 可让警告也拒绝启动。
+  证书文件请按「**叶子 → 中间 CA**」的顺序把中间证书一并放进去：只放叶子、且没给
+  `--tls-ca` 时会被判成「链不可信」（那其实是缺中间证书，不是 CA 配错）。
   自检**不打印精确到期日**（`rustls` 不暴露 `notAfter`），只回答「是否过期」；
 - 明文端口只做 301：`--http-redirect-port` 起一个**只回跳转**的监听器，不返回页面、不碰状态，
   旧书签 `http://<IP>:8080/...` 会自动跳到 HTTPS；
@@ -147,8 +151,10 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 ## 已知限制
 
 - 自签证书不是公共 CA：能挡住同网段的**被动嗅探**，但**不防中间人**（除非学生核对指纹）；
-- 外部证书自检只回答「能不能用」：不打印精确到期日、不校验 `keyUsage`/`BasicConstraints`
-  这类更细的字段（`rustls` 不暴露它们）；需要逐字段审计请用 `openssl x509 -text`；
+- 外部证书自检只回答「能不能用」：它走的是 webpki 的 TLS 服务端校验（EKU / 有效期 /
+  名称 / 链 / 签名 / `basicConstraints`），**不做逐字段审计**——叶子证书 `keyUsage` 的位组合、
+  `policyConstraints` 这类字段不会单独报；需要逐字段核对请用 `openssl x509 -text`。
+  也不打印精确到期日（`rustls` 不暴露 `notAfter`），只回答「是否过期」；
 - `--tls off` 时仍是明文 HTTP（仅建议排障）；
 - 状态文件是加密 JSON（不是 SQLite）；没有管理端监控页；
 - 多标签页只靠单会话 token 顶掉旧页面，没有强制关闭；

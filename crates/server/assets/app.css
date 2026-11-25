@@ -20,6 +20,11 @@
   .ok { color:#1f8a4c; } .warn { color:#b03030; }
   button.plain { background:transparent; color:#777; border-color:transparent; font-size:13px; padding:6px 8px; }
   button.plain:hover { color:#b03030; }
+  /* 横幅里的按钮**不要复用 `.plain`**：.net 的底色是深红 #b03030，而 `.plain` 是灰字 #777
+     （对比度约 1.9:1，几乎看不见），`:hover` 还会把字也变成 #b03030 —— 与底色同色，直接消失。
+     会话失效正是学生最需要点这个按钮的时刻，所以单独给一套白底红字。 */
+  button.on-banner { background:#fff; color:#b03030; border:1px solid #fff; font-size:14px; padding:6px 12px; margin-left:12px; }
+  button.on-banner:hover { background:#ffe8e8; color:#b03030; border-color:#ffd0d0; }
   .toast { position:fixed; right:16px; bottom:16px; background:#222; color:#fff; padding:10px 14px; border-radius:6px; opacity:0; transition:opacity .2s; }
   .toast.show { opacity:.92; }
   #login { max-width: 420px; margin: 12vh auto; }
