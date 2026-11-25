@@ -613,3 +613,31 @@ def test_failed_start_reports_exit_code_instead_of_stopped(dialog) -> None:
     dialog._ready = True
     dialog._on_finished()
     assert dialog.lbl_url.text() == "已停止"
+
+
+def test_roster_file_is_written_and_passed(qapp, tmp_path) -> None:
+    """项目学号要写成 `--roster` 能读的格式（去重 + 升序），并出现在 argv 里。"""
+    dlg = _make_dialog(tmp_path)
+    try:
+        dlg._roster_ids = [2021003, 2021001, 2021001]
+        path = dlg._write_roster()
+        assert path is not None
+        lines = [
+            ln for ln in path.read_text(encoding="utf-8").splitlines() if not ln.startswith("#")
+        ]
+        assert lines == ["2021001", "2021003"], lines
+        args = dlg._command_args()
+        assert _arg(args, "--roster") == str(path)
+    finally:
+        dlg.close()
+
+
+def test_no_roster_means_no_flag(qapp, tmp_path) -> None:
+    """没有学号时不能传 `--roster`（否则服务端会去读一个不存在的文件）。"""
+    dlg = _make_dialog(tmp_path)
+    try:
+        dlg._roster_ids = []
+        assert dlg._write_roster() is None
+        assert "--roster" not in dlg._command_args()
+    finally:
+        dlg.close()

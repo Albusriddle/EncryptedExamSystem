@@ -164,6 +164,7 @@ def web_command(
     tls_key: Path | None = None,
     tls_ca: Path | None = None,
     tls_check: str | None = None,
+    roster: Path | None = None,
 ) -> list[str]:
     """拼出 `exam-server` 的 argv。
 
@@ -208,6 +209,11 @@ def web_command(
         argv += ["--tls-ca", str(tls_ca)]
     if tls_check is not None:
         argv += ["--tls-check", str(tls_check)]
+    # 名单：服务端从包里拿不到「谁在这个班」（session header 是匿名的，只有 tag + 密文），
+    # 所以由管理端把项目学号写成文件传过去。没有它，监考页只能显示「谁已经登录」，
+    # 看不到「谁还没进来」——那正是监考最关心的一件事。
+    if roster is not None:
+        argv += ["--roster", str(roster)]
     argv += [
         "--http-redirect-port",
         # 老师可能把 HTTPS 也配到 8080：这时跳转端口没法用，直接关掉（0），

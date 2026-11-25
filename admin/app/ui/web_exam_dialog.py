@@ -56,9 +56,12 @@ _TIME_CHECK_LABELS = {
 class WebExamDialog(QDialog):
     """非模态对话框：考试期间可一直开着，关闭时自动停服务。"""
 
-    def __init__(self, parent, package: str, keyfile: str) -> None:
+    def __init__(self, parent, package: str, keyfile: str, roster: list[int] | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("网页考试（局域网）")
+        # 监考页要显示「名单里谁还没登录」，而服务端从包里读不到名单，这里先记下学号，
+        # 启动前写成 `<答题卡目录>/roster.txt` 再传给 `--roster`。
+        self._roster_ids = sorted({int(i) for i in (roster or [])})
         self.proc = QProcess(self)
         self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.proc.readyReadStandardOutput.connect(self._read_output)
@@ -415,6 +418,23 @@ class WebExamDialog(QDialog):
         self._sync_cert_state()
         self.lbl_locked.setText("" if enabled else "改动需重启服务生效")
 
+    def _write_roster(self) -> Path | None:
+        """把项目学号写成 `--roster` 要的格式（每行一个学号，# 开头为注释）。
+
+        为什么由管理端写：服务端从考试包里读不到「谁在这个班」——session header 是匿名的
+        （只有 tag + 密文），运行时只能数出信封个数。没有名单，监考页就显示不了
+        「谁还没进来」，而那正是监考最关心的一件事。
+        """
+        ids = sorted({int(i) for i in self._roster_ids})
+        if not ids:
+            return None
+        path = self._answers_dir() / "roster.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["# 监考名单（每行一个学号；由管理端在启动时生成）"]
+        lines += [str(i) for i in ids]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
     def _command_args(self) -> list[str]:
         """按当前界面值拼出 argv（不含程序路径以外的改动，便于测试）。
 
@@ -423,6 +443,7 @@ class WebExamDialog(QDialog):
         """
         return web_command(
             server=self._server_path(),
+            roster=self._write_roster(),
             package=Path(self.edit_package.text().strip()),
             keyfile=Path(self.edit_keyfile.text().strip()),
             port=self.spin_port.value(),

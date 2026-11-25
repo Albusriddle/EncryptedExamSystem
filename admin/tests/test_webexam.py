@@ -433,3 +433,22 @@ def test_validate_inputs_rejects_bad_tls_check(tmp_path: Path) -> None:
     key = _write(tmp_path, "srv.key", _PKCS8_KEY_PEM)
     msg = validate_inputs(pkg, kf, 8443, tls_cert=cert, tls_key=key, tls_check="paranoid")
     assert msg is not None and "严格自检" in msg, msg
+
+
+def test_web_command_carries_roster_only_when_given(tmp_path: Path) -> None:
+    """名单文件只在给了的时候才进 argv。
+
+    服务端拿不到「谁在这个班」（session header 匿名），所以监考页的「谁还没进来」
+    完全依赖这个文件；反过来，没给时不能凭空塞一个路径进去。
+    """
+    base = dict(
+        server=Path("exam-server.exe"),
+        package=tmp_path / "pkg.exe",
+        keyfile=tmp_path / "key.txt",
+        port=8443,
+        answers_dir=tmp_path / "answers",
+    )
+    assert "--roster" not in web_command(**base)
+    roster = tmp_path / "roster.txt"
+    cmd = web_command(**base, roster=roster)
+    assert cmd[cmd.index("--roster") + 1] == str(roster)

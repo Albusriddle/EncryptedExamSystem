@@ -637,7 +637,7 @@ class BuildTab(QWidget):
 
         pkg = self.edit_out.text().strip()
         key = self.edit_keyfile.text().strip()
-        dlg = WebExamDialog(self, pkg, key)
+        dlg = WebExamDialog(self, pkg, key, roster=list(self.state.students))
         dlg.setModal(False)
         dlg.show()
         self._web_dialog = dlg
