@@ -59,6 +59,11 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 48px; }
 }
 
 .banner.alert { background: #b03030; color: #fff; }
+.banner.warn {
+  background: #fff8e6;
+  color: #7a5200;
+  border-bottom: 1px solid #f0dcae;
+}
 .banner.danger {
   background: #fff2f2;
   color: #a02020;
@@ -67,6 +72,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 48px; }
 
 @media (prefers-color-scheme: dark) {
   .banner.danger { background: #3a1f1f; color: #ffb4b4; border-bottom-color: #5a2a2a; }
+  .banner.warn { background: #33290f; color: #ffd98a; border-bottom-color: #5a4a22; }
 }
 
 /* ---------------------------------------------------------------- 计数 */
@@ -117,6 +123,29 @@ button.secondary { background: transparent; color: #2f6fed; }
 button.danger { background: #b03030; border-color: #b03030; }
 button.primary { background: #2f6fed; border-color: #2f6fed; }
 button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* 「看起来禁用但仍可点」：未登录行的按钮用 aria-disabled，点击时给原因。
+   用 disabled 的话部分浏览器不显示 title，老师看不到「为什么点不了」。 */
+button.is-disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+/* 键盘焦点：只用 :focus-visible，鼠标点击不画框（否则整页都是框）。
+   默认 outline 在深色背景下几乎看不见，这里统一成 2px 高对比描边。 */
+button:focus-visible,
+dialog input:focus-visible,
+code:focus-visible {
+  outline: 2px solid #2f6fed;
+  outline-offset: 2px;
+}
+
+@media (prefers-color-scheme: dark) {
+  button:focus-visible,
+  dialog input:focus-visible {
+    outline-color: #9db8ff;
+  }
+}
 
 /* 表格里的小按钮：不抢视线，但危险动作仍是红的 */
 td button {

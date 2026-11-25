@@ -2,7 +2,8 @@
 //
 // 设计要点（为什么这么写）：
 // 1. **令牌只走请求头**。URL 里的 `?t=` 会被浏览器历史、截图、Referer 带走；
-//    首屏读到后立刻 `history.replaceState` 抹掉，之后只用 `X-Monitor-Token`。
+//    首屏读到后立刻 `history.replaceState` 抹掉（只删 `t`，别的参数与 hash 原样保留），
+//    之后只用 `X-Monitor-Token`。
 // 2. **不用 window.confirm**：原生弹窗在长时间监考里容易被学生看到、也无法显示
 //    「已答 5/8 题」这类关键信息；统一走页面里的 `<dialog>`。
 // 3. **不拼 HTML 字符串**：学号、终止原因来自服务端，一律 `textContent`（CSP 只挡脚本，
@@ -10,12 +11,17 @@
 // 4. **写操作幂等且可恢复**：终止 = 服务端封存 → 吊销 → 封禁，界面提供「解除」。
 // 5. **明文告警常驻**：`plaintext_warning` 为真时顶部红条；`write_mode=tls-only` 时
 //    写按钮直接禁用并给 tooltip，而不是点了才报错。
+// 6. **增量更新表格**（v1.8.1）：每 15 s 全量重建 `<tbody>` 会把老师正停在某行按钮上的
+//    键盘焦点与 hover tooltip 打断；改成按 `data-id` 复用行对象、只改变化的单元格，
+//    并在更新前后保存/恢复焦点。
+// 7. **轮询有并发闸**：慢响应 + `visibilitychange` 同时触发时，没有闸会堆出多个并发请求。
 
 (function () {
   'use strict';
 
   const TOKEN_KEY = 'ees_monitor_token';
   const POLL_MS = 15000;
+  const FETCH_TIMEOUT_MS = 5000;
   const CONFIRM_WORD = '收卷';
 
   const $ = (id) => document.getElementById(id);
@@ -24,10 +30,16 @@
   let lastStats = null;
   let busy = false;
   let stopped = false;
+  let refreshing = false;
   let pollTimer = null;
   let clockTimer = null;
   let clockOffsetMs = 0;
   let toastTimer = null;
+  // 上一次写进断线横幅的文本：`role="alert"` 每次赋值都会被读屏播报，同样的话不能每 15 s 说一遍。
+  let netShown = '';
+
+  // 行对象缓存：学号 → { tr, badge, answered, seen, login, opsCell, opsKey }
+  const rowsById = new Map();
 
   // ---------------------------------------------------------------- 纯函数（可单测）
   // 这一段的函数不碰 DOM，便于用 node 直接跑（见交接说明里的自测命令）。
@@ -65,6 +77,19 @@
     return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
 
+  // 状态徽章的 hover 说明。
+  // 原来「终止原因」先写进 title、紧接着又被「交卷时间」覆盖 → 被终止的学生永远看不到原因；
+  // 现在拼成多行，且**终止原因优先**（监考最想知道的就是「为什么这个人被终止了」）。
+  function badgeTitle(st) {
+    const lines = [];
+    if (st.blocked_reason) {
+      const when = st.submitted_at ? '（' + fmtClock(st.submitted_at) + '）' : '';
+      lines.push('终止原因：' + st.blocked_reason + when);
+    }
+    if (st.submitted_at) lines.push('已交卷：' + fmtClock(st.submitted_at));
+    return lines.join('\n');
+  }
+
   // 「未交卷人数」= 已登录 − 已封存（服务端契约就是这么算，界面与按钮文案保持一致）。
   function pendingCount(counts) {
     if (!counts) return 0;
@@ -86,6 +111,42 @@
     return h > 0 ? '剩余 ' + h + ':' + p(m) + ':' + p(s) : '剩余 ' + m + ':' + p(s);
   }
 
+  // 计数区的七格。没给 `--roster` 时服务端只知道「包里有几个人」，不知道「是谁」，
+  // 表格只能列出已登录的人——这时把「名单 / 未登录」两格标成「未提供」，别让监考
+  // 把「名单 30 / 未登录 27」当成「27 人没来」。
+  function countItems(counts) {
+    const c = counts || {};
+    if (c.roster_known === false) {
+      return [
+        ['名单未提供', '—', ''],
+        ['已登录', c.logged_in, 'emphasis'],
+        ['在线', c.online, 'good'],
+        ['已交卷', c.submitted, 'good'],
+        ['封存中', c.sealing, 'warn'],
+        ['只列已登录', '—', 'bad'],
+        ['已终止', c.blocked, 'bad'],
+      ];
+    }
+    return [
+      ['名单', c.roster, ''],
+      ['已登录', c.logged_in, 'emphasis'],
+      ['在线', c.online, 'good'],
+      ['已交卷', c.submitted, 'good'],
+      ['封存中', c.sealing, 'warn'],
+      ['未登录', c.not_logged_in, 'bad'],
+      ['已终止', c.blocked, 'bad'],
+    ];
+  }
+
+  // 把底层网络错误翻成老师能看懂的一句话（浏览器的 `Failed to fetch` 对现场毫无帮助）。
+  function netErrText(err) {
+    const msg = String((err && err.message) || '');
+    if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) return '请求超时';
+    if (!navigator.onLine) return '网络不可用';
+    if (/Failed to fetch|NetworkError|Load failed|network/i.test(msg)) return '网络不可用';
+    return msg || '未知错误';
+  }
+
   // ---------------------------------------------------------------- 令牌
   function readToken() {
     const params = new URLSearchParams(location.search);
@@ -97,7 +158,10 @@
         /* 隐私模式下 sessionStorage 可能不可用；那就只用这一次 */
       }
       // 立刻把令牌从地址栏抹掉：别让它进历史、截图或 Referer。
-      history.replaceState({}, '', location.pathname);
+      // 只删 `t`，其余 query 与 hash 原样保留（否则以后加一个参数会被静默吃掉）。
+      const url = new URL(location.href);
+      url.searchParams.delete('t');
+      history.replaceState({}, '', url.pathname + url.search + url.hash);
       return fromUrl;
     }
     try {
@@ -105,6 +169,19 @@
     } catch (_) {
       return '';
     }
+  }
+
+  // 5 秒超时：断网时 fetch 可能挂几十秒，界面会一直显示「上一次的数据」而没有任何反馈。
+  // 老浏览器没有 `AbortSignal.timeout` 就不带 signal（退回原来的行为，不报错）。
+  function timeoutSignal(ms) {
+    try {
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        return AbortSignal.timeout(ms);
+      }
+    } catch (_) {
+      /* 忽略：不支持就不带超时 */
+    }
+    return undefined;
   }
 
   // ---------------------------------------------------------------- 请求
@@ -119,6 +196,7 @@
       },
     };
     if (opts && opts.body !== undefined) init.body = JSON.stringify(opts.body);
+    if (opts && opts.signal) init.signal = opts.signal;
     const res = await fetch(path, init);
     let data = {};
     try {
@@ -146,8 +224,12 @@
   }
 
   function setNet(text) {
-    $('netText').textContent = text || '';
-    $('net').classList.toggle('hidden', !text);
+    const next = text || '';
+    // 同样的话不重复写：`role="alert"` 每次赋值都会被读屏播报一遍。
+    if (next === netShown) return;
+    netShown = next;
+    $('netText').textContent = next;
+    $('net').classList.toggle('hidden', !next);
   }
 
   function setActionMsg(text) {
@@ -158,8 +240,11 @@
   // 用 `<dialog>` 而不是 window.confirm：确认框里要显示「已答 5/8 题」、批量收卷要
   // 求输入确认词，原生弹窗做不到。
   function confirmAction(opts) {
+    const dlg = $('confirmDlg');
+    // 已经开着就别再 `showModal()`：规范规定对 open 的 dialog 再调会抛 InvalidStateError，
+    // 表现是「快速点两行的按钮，第二次没反应」。
+    if (dlg.open) return Promise.resolve(false);
     return new Promise((resolve) => {
-      const dlg = $('confirmDlg');
       $('confirmTitle').textContent = opts.title;
       $('confirmBody').textContent = opts.body;
       const extra = $('confirmExtra');
@@ -211,16 +296,7 @@
   function renderCounts(counts) {
     const box = $('counts');
     while (box.firstChild) box.removeChild(box.firstChild);
-    const items = [
-      ['名单', counts.roster, ''],
-      ['已登录', counts.logged_in, 'emphasis'],
-      ['在线', counts.online, 'good'],
-      ['已交卷', counts.submitted, 'good'],
-      ['封存中', counts.sealing, 'warn'],
-      ['未登录', counts.not_logged_in, 'bad'],
-      ['已终止', counts.blocked, 'bad'],
-    ];
-    for (const [label, num, cls] of items) {
+    for (const [label, num, cls] of countItems(counts)) {
       const cell = document.createElement('div');
       cell.className = 'cell' + (cls ? ' ' + cls : '');
       const n = document.createElement('div');
@@ -235,19 +311,79 @@
     }
   }
 
-  function opButton(label, cls, title, disabled, onClick) {
+  // 按钮工厂。
+  // `soft` 的意思是「看起来禁用、但点击要给原因」：`disabled` 的按钮在部分浏览器上不显示
+  // `title`，老师看不到「为什么点不了」；这类情况改用 `aria-disabled` + 点击 toast。
+  function opButton(label, cls, title, disabled, onClick, soft) {
     const b = document.createElement('button');
     b.textContent = label;
     b.className = cls;
     b.title = title;
-    b.disabled = Boolean(disabled);
-    b.addEventListener('click', onClick);
+    if (disabled && soft) {
+      b.setAttribute('aria-disabled', 'true');
+      b.classList.add('is-disabled');
+      b.addEventListener('click', () => toast(title, 'err'));
+    } else {
+      b.disabled = Boolean(disabled);
+      if (!disabled) b.addEventListener('click', onClick);
+    }
     return b;
+  }
+
+  function rebuildOps(cell, st, tlsOnly) {
+    while (cell.firstChild) cell.removeChild(cell.firstChild);
+    const writeBlocked = tlsOnly
+      ? '当前为明文，写操作已被服务端禁用（--monitor-write-mode）'
+      : '';
+
+    if (st.state === 'blocked') {
+      cell.appendChild(
+        opButton('解除', 'unblock', '恢复该生的登录资格（已封存的答题卡不变）', tlsOnly || busy, () => {
+          unblockOne(st);
+        }),
+      );
+    } else if (st.state === 'not_logged_in') {
+      // 未登录的人没有卡可封：按钮保持「不可点」，但点击时告诉老师原因（而不是静默）。
+      cell.appendChild(
+        opButton('收卷', 'secondary', '该生还没登录，没有可封存的内容', true, () => {}, true),
+      );
+      cell.appendChild(
+        opButton('终止', 'danger', '该生还没登录，无需终止', true, () => {}, true),
+      );
+    } else {
+      const canCollect = st.state !== 'submitted';
+      cell.appendChild(
+        opButton(
+          '收卷',
+          'secondary',
+          tlsOnly
+            ? writeBlocked
+            : canCollect
+              ? '立即封存该生的答题卡（只含已保存的作答）'
+              : '该生已交卷，无需重复收卷',
+          tlsOnly || busy || !canCollect,
+          () => {
+            collectOne(st);
+          },
+        ),
+      );
+      cell.appendChild(
+        opButton(
+          '终止',
+          'danger',
+          tlsOnly ? writeBlocked : '封存并禁止该生重新登录（可在之后解除；封存不可撤销）',
+          tlsOnly || busy,
+          () => {
+            blockOne(st);
+          },
+        ),
+      );
+    }
   }
 
   function buildRow(st, tlsOnly) {
     const tr = document.createElement('tr');
-    tr.className = 'row-' + st.state;
+    tr.dataset.id = String(st.id);
 
     const idCell = document.createElement('th');
     idCell.scope = 'row';
@@ -256,83 +392,102 @@
 
     const stateCell = document.createElement('td');
     const badge = document.createElement('span');
-    badge.className = 'state state-' + st.state;
-    badge.textContent = stateText(st.state);
-    if (st.blocked_reason) badge.title = '终止原因：' + st.blocked_reason;
-    if (st.submitted_at) badge.title = '交卷时间：' + fmtClock(st.submitted_at);
     stateCell.appendChild(badge);
     tr.appendChild(stateCell);
 
     const answered = document.createElement('td');
-    answered.textContent = st.state === 'not_logged_in' ? '—' : st.answered + '/' + st.total;
     tr.appendChild(answered);
-
     const seen = document.createElement('td');
-    seen.textContent = st.state === 'not_logged_in' ? '—' : fmtAgo(st.last_seen);
     tr.appendChild(seen);
-
     const login = document.createElement('td');
-    login.textContent = st.state === 'not_logged_in' ? '—' : fmtClock(st.logged_in_at);
     tr.appendChild(login);
 
-    const ops = document.createElement('td');
-    const writeBlocked = tlsOnly
-      ? '当前为明文，写操作已被服务端禁用（--monitor-write-mode）'
-      : '';
+    const opsCell = document.createElement('td');
+    tr.appendChild(opsCell);
 
-    if (st.state === 'blocked') {
-      ops.appendChild(
-        opButton('解除', 'unblock', '恢复该生的登录资格（已封存的答题卡不变）', tlsOnly || busy, () => {
-          unblockOne(st);
-        }),
-      );
-    } else if (st.state === 'not_logged_in') {
-      ops.appendChild(
-        opButton('收卷', 'secondary', '该生还没登录，没有可封存的内容', true, () => {}),
-      );
-      ops.appendChild(
-        opButton('终止', 'danger', '该生还没登录，无需终止', true, () => {}),
-      );
-    } else {
-      const canCollect = st.state !== 'submitted';
-      ops.appendChild(
-        opButton(
-          '收卷',
-          'secondary',
-          tlsOnly
-            ? writeBlocked
-            : canCollect
-              ? '立即封存该生的答题卡'
-              : '该生已交卷，无需重复收卷',
-          tlsOnly || busy || !canCollect,
-          () => {
-            collectOne(st);
-          },
-        ),
-      );
-      ops.appendChild(
-        opButton(
-          '终止',
-          'danger',
-          tlsOnly ? writeBlocked : '封存并禁止该生重新登录（可在之后解除）',
-          tlsOnly || busy,
-          () => {
-            blockOne(st);
-          },
-        ),
-      );
+    const row = { tr, badge, stateCell, answered, seen, login, opsCell, opsKey: null };
+    updateRow(row, st, tlsOnly);
+    return row;
+  }
+
+  function updateRow(row, st, tlsOnly) {
+    row.tr.className = 'row-' + st.state;
+    row.badge.className = 'state state-' + st.state;
+    row.badge.textContent = stateText(st.state);
+    row.badge.title = badgeTitle(st);
+    const notLogged = st.state === 'not_logged_in';
+    row.answered.textContent = notLogged ? '—' : st.answered + '/' + st.total;
+    row.seen.textContent = notLogged ? '—' : fmtAgo(st.last_seen);
+    row.login.textContent = notLogged ? '—' : fmtClock(st.logged_in_at);
+    // 操作列只在「会影响按钮可用性」的东西变化时重建：否则每 15 s 重建一批按钮，
+    // 会把正在按 Tab 切换焦点的老师打断。
+    const opsKey = st.state + '|' + (tlsOnly ? 1 : 0) + '|' + (busy ? 1 : 0);
+    if (row.opsKey !== opsKey) {
+      rebuildOps(row.opsCell, st, tlsOnly);
+      row.opsKey = opsKey;
     }
-    tr.appendChild(ops);
-    return tr;
+  }
+
+  // 记下当前焦点落在哪一行的哪个按钮上，更新完再还回去。
+  // 不还原的话，老师按 Tab 走到「终止」按钮、刚好赶上 15 s 刷新，焦点就会跳回页面顶部。
+  function captureFocus() {
+    const el = document.activeElement;
+    if (!el || el === document.body || !el.closest) return null;
+    if (el.closest('dialog')) return null; // 对话框里的焦点别抢
+    const tr = el.closest('tr');
+    if (!tr || !tr.dataset || !tr.dataset.id) return null;
+    return { id: tr.dataset.id, cls: el.className, text: el.textContent };
+  }
+
+  function restoreFocus(info) {
+    if (!info) return;
+    const tr = $('rows').querySelector('tr[data-id="' + info.id + '"]');
+    if (!tr) return;
+    for (const btn of tr.querySelectorAll('button')) {
+      if (btn.className === info.cls && btn.textContent === info.text) {
+        try {
+          btn.focus();
+        } catch (_) {
+          /* 元素可能刚被禁用，忽略 */
+        }
+        return;
+      }
+    }
   }
 
   function renderRows(stats) {
     const tbody = $('rows');
-    while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
     const list = (stats.students || []).slice().sort((a, b) => a.id - b.id);
     $('empty').classList.toggle('hidden', list.length > 0);
     const tlsOnly = stats.write_mode === 'tls-only';
-    for (const st of list) tbody.appendChild(buildRow(st, tlsOnly));
+    const focus = captureFocus();
+
+    const alive = new Set();
+    // 按顺序推进游标：行已存在就原地更新并保证顺序，不存在就插到游标位置。
+    let cursor = tbody.firstChild;
+    for (const st of list) {
+      alive.add(st.id);
+      let row = rowsById.get(st.id);
+      if (!row) {
+        row = buildRow(st, tlsOnly);
+        rowsById.set(st.id, row);
+      } else {
+        updateRow(row, st, tlsOnly);
+      }
+      if (cursor === row.tr) {
+        cursor = cursor.nextSibling;
+      } else {
+        tbody.insertBefore(row.tr, cursor);
+      }
+    }
+    // 名单里已经不存在的人（换了场次、被删了）要清掉，否则会留下幽灵行。
+    for (const [id, row] of rowsById) {
+      if (!alive.has(id)) {
+        row.tr.remove();
+        rowsById.delete(id);
+      }
+    }
+    restoreFocus(focus);
   }
 
   function updateClock() {
@@ -345,19 +500,23 @@
 
   function render(stats) {
     $('session').textContent = stats.session_now ? '场次 #' + stats.session_now : '';
-    renderCounts(stats.counts || {});
+    const counts = stats.counts || {};
+    renderCounts(counts);
+    // 没给 --roster：表格只能列出已登录的人，顶上给一句解释（否则「名单 30 / 未登录 27」
+    // 与表格 3 行对不上，监考会以为 27 人没来）。
+    $('rosterHint').classList.toggle('hidden', counts.roster_known !== false);
     renderRows(stats);
 
     const tlsOnly = stats.write_mode === 'tls-only';
-    const pending = pendingCount(stats.counts);
+    const pending = pendingCount(counts);
     const btn = $('collectAllBtn');
-    btn.textContent = batchBtnText(stats.counts);
+    btn.textContent = batchBtnText(counts);
     btn.disabled = busy || pending === 0 || tlsOnly;
     btn.title = tlsOnly
       ? '当前为明文，写操作已被服务端禁用（--monitor-write-mode）'
       : pending === 0
         ? '没有未交卷的学生'
-        : '把尚未交卷的学生立刻封存';
+        : '把尚未交卷的学生立刻封存（只含已保存的作答）';
 
     $('plaintextWarn').classList.toggle('hidden', !stats.plaintext_warning);
     updateClock();
@@ -379,20 +538,35 @@
     stopTimers();
     pollTimer = setInterval(() => {
       // 后台标签页不轮询：50 人考场里老师可能开着好几个页面。
-      if (document.visibilityState !== 'hidden') refresh();
+      if (document.visibilityState !== 'hidden') refresh(false);
     }, POLL_MS);
     clockTimer = setInterval(updateClock, 1000);
   }
 
-  async function refresh() {
-    if (stopped) return;
+  async function refresh(manual) {
+    if (stopped) {
+      // 令牌失效后轮询已停，但「立即刷新」按钮还留在页面上：点了必须给反馈，
+      // 否则老师会以为页面卡死（原来是静默 return）。
+      if (manual) toast('监考令牌无效或已过期：请从启动横幅重新复制完整地址（含 ?t=…）', 'err');
+      return;
+    }
+    // 并发闸：慢响应 + 切回前台都会触发 refresh，没有闸会堆出多个并发请求。
+    if (refreshing) {
+      if (manual) toast('正在刷新，请稍候', '');
+      return;
+    }
+    refreshing = true;
     try {
-      const stats = await api('/api/monitor/stats');
+      const stats = await api('/api/monitor/stats', { signal: timeoutSignal(FETCH_TIMEOUT_MS) });
       lastStats = stats;
       clockOffsetMs = (stats.server_time || 0) * 1000 - Date.now();
       render(stats);
       setNet('');
     } catch (err) {
+      if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+        setNet('请求超时（5 秒）：正在重试（显示的是最后一次数据）');
+        return;
+      }
       if (err.status === 401) {
         // 令牌错/被换掉了：继续轮询只会刷屏，停下来并告诉老师从哪拿新地址。
         stopped = true;
@@ -401,7 +575,9 @@
         return;
       }
       // 其余错误保留最后一次表格：断线时「最后一次数据」比空白有用。
-      setNet('已断开：' + err.message + '，正在重试（显示的是最后一次数据）');
+      setNet('已断开：' + netErrText(err) + '，正在重试（显示的是最后一次数据）');
+    } finally {
+      refreshing = false;
     }
   }
 
@@ -415,8 +591,10 @@
     try {
       return await api(path, { method: 'POST', body });
     } catch (err) {
+      // 429 是「操作太频繁」（服务端有 1 s 冷却），不是失败：服务端文案本身已经是
+      // 完整的一句话，不要再套「操作失败：」或重复前缀。
       toast(err.message, 'err');
-      setNet('操作失败：' + err.message);
+      setNet(err.status === 429 ? err.message : '操作失败：' + err.message);
       return null;
     }
   }
@@ -427,7 +605,7 @@
       title: '强制收卷',
       body:
         '学号 ' + st.id + ' · 已答 ' + st.answered + '/' + st.total + ' 题。\n' +
-        '该生将立即被封存，之后不能再作答（已保存的答案会保留）。',
+        '该生将立即被封存，之后不能再作答（只包含已保存的作答；正在输入、尚未保存的内容不会进卡）。',
       okText: '强制收卷',
       danger: true,
     });
@@ -438,7 +616,7 @@
     if (!data) return;
     toast(data.already ? '已封存，无需重复收卷' : '已收卷：' + (data.file || ''), 'ok');
     setNet('');
-    await refresh();
+    await refresh(false);
   }
 
   async function blockOne(st) {
@@ -447,7 +625,7 @@
       title: '终止作答',
       body:
         '学号 ' + st.id + ' · 已答 ' + st.answered + '/' + st.total + ' 题。\n' +
-        '该生会被立即封存并禁止重新登录；可在表格里点「解除」恢复。',
+        '该生会被立即封存并禁止重新登录；可在表格里点「解除」恢复登录（封存不可撤销）。',
       okText: '终止作答',
       danger: true,
     });
@@ -458,14 +636,16 @@
     if (!data) return;
     toast('已终止', 'ok');
     setNet('');
-    await refresh();
+    await refresh(false);
   }
 
   async function unblockOne(st) {
     if (busy) return;
     const ok = await confirmAction({
       title: '解除终止',
-      body: '学号 ' + st.id + ' 将恢复登录资格（已封存的答题卡不会变）。',
+      body:
+        '学号 ' + st.id + ' 将恢复登录资格（已封存的答题卡不会变；' +
+        '如果卡已封存，学生登录后看到的是「已交卷」页）。',
       okText: '解除',
       danger: false,
     });
@@ -476,11 +656,15 @@
     if (!data) return;
     toast('已解除', 'ok');
     setNet('');
-    await refresh();
+    await refresh(false);
   }
 
   async function collectAll() {
-    if (busy || !lastStats) return;
+    if (busy) return;
+    // 先刷新再算人数：按钮与确认框原来都用 15 s 前的快照，老师确认的集合可能比
+    // 服务端实际要收的少一个人（刚登录的）——破坏性操作的确认必须基于「此刻」。
+    await refresh(true);
+    if (!lastStats) return;
     const counts = lastStats.counts || {};
     const pending = pendingCount(counts);
     if (pending <= 0) return;
@@ -502,7 +686,11 @@
     const ok = await confirmAction({
       title: '批量收卷',
       body:
-        '将立即封存以下 ' + ids.length + ' 名未交卷学生：\n' + shown + more + divergence,
+        '将立即封存以下 ' + ids.length + ' 名未交卷学生：\n' +
+        shown +
+        more +
+        divergence +
+        '\n（刚登录、还没出现在上表里的学生也可能包含在内；只封存已保存的作答）',
       okText: '批量收卷',
       danger: true,
       buildExtra: buildBatchExtra,
@@ -531,7 +719,7 @@
     }
     setActionMsg(parts.join('；') || '没有需要收卷的学生。');
     toast(failed.length ? '批量收卷部分失败，见上方摘要' : '批量收卷完成', failed.length ? 'err' : 'ok');
-    await refresh();
+    await refresh(false);
   }
 
   // ---------------------------------------------------------------- 启动
@@ -545,16 +733,31 @@
       return;
     }
 
-    $('refreshBtn').addEventListener('click', () => refresh());
+    $('refreshBtn').addEventListener('click', () => refresh(true));
     $('collectAllBtn').addEventListener('click', () => collectAll());
     document.addEventListener('visibilitychange', () => {
       // 切回前台立刻刷一次：老师最需要的是「现在」而不是 15 秒前的数据。
-      if (document.visibilityState === 'visible') refresh();
+      if (document.visibilityState === 'visible') refresh(false);
     });
 
     startTimers();
-    refresh();
+    refresh(false);
   }
 
-  init();
+  // 便于用 node 跑纯函数自测（浏览器里 `module` 不存在，这段不会执行）。
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+      stateText,
+      fmtAgo,
+      fmtClock,
+      badgeTitle,
+      pendingCount,
+      batchBtnText,
+      remainText,
+      countItems,
+      netErrText,
+    };
+  }
+
+  if (typeof document !== 'undefined') init();
 })();
