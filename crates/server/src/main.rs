@@ -367,6 +367,18 @@ fn main() -> Result<()> {
         tls::generate(&dir, &hosts, 365)?;
         println!("已生成自签证书：{}", dir.display());
         println!("SAN：{}", hosts.join(", "));
+        // 绑了具体地址就用它：`--bind ::1` 时学生该访问 `https://[::1]:8443/`，
+        // 而不是 hosts[0] 里那个局域网 IP。
+        let display_host = if matches!(cli.bind.as_str(), "0.0.0.0" | "::" | "[::]") {
+            hosts[0].clone()
+        } else {
+            bind_host(&cli.bind)
+        };
+        println!(
+            "学生访问：https://{}:{}/",
+            url_host(&display_host),
+            cli.port
+        );
         return Ok(());
     }
     let (Some(package), Some(keyfile)) = (cli.package.as_ref(), cli.keyfile.as_ref()) else {
@@ -506,7 +518,7 @@ fn main() -> Result<()> {
     // 否则绑了回环还会打印一个学生根本连不上的局域网 URL。
     println!(
         "考试服务已启动：{scheme}://{}:{}/",
-        bind_host(&cli.bind),
+        url_host(&bind_host(&cli.bind)),
         cli.port
     );
     if let Some(material) = &tls_material {
@@ -518,8 +530,14 @@ fn main() -> Result<()> {
             );
         }
         if material.generated {
+            // 权限收紧可能失败（FAT32/网络盘），横幅不能无条件写「仅当前用户可读」。
+            let key_hint = if material.key_hardened {
+                "仅当前用户可读"
+            } else {
+                "⚠ 未能收紧权限（见上方告警）"
+            };
             println!(
-                "已自动生成自签证书（365 天）：{}（私钥 {}，仅当前用户可读）",
+                "已自动生成自签证书（365 天）：{}（私钥 {}，{key_hint}）",
                 material.cert_path.display(),
                 material.key_path.display()
             );
@@ -543,7 +561,7 @@ fn main() -> Result<()> {
         } else if redirect_listener.is_some() {
             println!(
                 "旧书签 http://{}:{} 会自动跳到 HTTPS",
-                bind_host(&cli.bind),
+                url_host(&bind_host(&cli.bind)),
                 cli.http_redirect_port
             );
         }
@@ -605,10 +623,33 @@ fn main() -> Result<()> {
 ///
 /// 少一个就会让浏览器报「名称不匹配」——比自签本身更吓人，所以宁可多列几个。
 fn tls_hosts(cli: &Cli) -> Vec<String> {
-    if !cli.tls_hosts.is_empty() {
-        return cli.tls_hosts.clone();
+    let mut hosts = if cli.tls_hosts.is_empty() {
+        vec![local_ip(), "127.0.0.1".to_string(), "localhost".to_string()]
+    } else {
+        cli.tls_hosts.clone()
+    };
+    // 只绑具体地址（多网卡教师机只绑机房侧网卡，v1.4.7 起的推荐用法）时，
+    // 该地址必须进 SAN —— 否则横幅打印 `https://<那个地址>:8443/`，
+    // 学生看到的却是「证书名称不匹配」，比自签本身更吓人。
+    if !matches!(cli.bind.as_str(), "0.0.0.0" | "::" | "[::]") {
+        let bound = bind_host(&cli.bind);
+        if !hosts.iter().any(|h| h == &bound) {
+            hosts.push(bound);
+        }
     }
-    vec![local_ip(), "127.0.0.1".to_string(), "localhost".to_string()]
+    hosts
+}
+
+/// URL 里的主机部分：IPv6 字面量必须加方括号（`https://[::1]:8443/`）。
+///
+/// 裸写 `https://::1:8443/` 不是合法 URL（浏览器会解析失败），而 `--bind ::1`
+/// 是这个程序**允许**的用法（教师本机调试/纯 IPv6 局域网），所以必须统一处理。
+fn url_host(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
 }
 
 /// 明文跳转端口最多同时处理多少连接。
@@ -661,9 +702,11 @@ fn handle_redirect_stream(stream: &mut TcpStream, host: &str, https_port: u16) {
         .and_then(|text| text.lines().next().map(str::to_string))
         .and_then(|line| line.split_whitespace().nth(1).map(str::to_string))
         .unwrap_or_else(|| "/".to_string());
-    let location = format!("https://{host}:{https_port}{path}");
+    let location = format!("https://{}:{https_port}{path}", url_host(host));
+    // 只加 nosniff：301 没有 body，CSP/frame-ancestors 对它没有意义
+    // （这里也没走 `write_response`，因为那是给「有内容」的响应准备的）。
     let resp = format!(
-        "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nX-Content-Type-Options: nosniff\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
     let _ = stream.write_all(resp.as_bytes());
     let _ = stream.flush();
@@ -784,6 +827,9 @@ fn handle(app: Arc<App>, mut stream: TcpStream) -> Result<()> {
     }
     let _guard = Guard(&app.conns);
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    // 写也要有超时：对端不读、发送缓冲又满时，`close_notify` 的 flush 会无限阻塞，
+    // 线程就一直挂在这个连接上（读超时管不到写）。
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     // 超时要设在**裸 TCP** 上：TLS 握手与后续读取都受它约束（StreamOwned 不暴露 set_read_timeout）。
     //
     // 再克隆一个句柄留给 `drain_briefly` 临时把超时降到 200 ms：克隆的是同一个 socket，
@@ -821,13 +867,19 @@ fn serve(
             // 客户端可能只看到「连接被重置」而不是 413。
             let resp = Response::error(413, format!("请求体超过 {limit} 字节"));
             let _ = write_response(stream, resp);
-            with_short_read_timeout(ctl, || drain_briefly(stream));
+            // 拿不到控制句柄（try_clone 失败）就干脆不 drain：宁可让客户端看到 RST，
+            // 也不要把线程押在 10 秒的读超时上（那正是 drain 想避免的占用）。
+            if ctl.is_some() {
+                with_short_read_timeout(ctl, || drain_briefly(stream));
+            }
             Ok(())
         }
         ReadOutcome::Chunked => {
             let resp = Response::error(411, "不支持分块传输（请带上 Content-Length）");
             let _ = write_response(stream, resp);
-            with_short_read_timeout(ctl, || drain_briefly(stream));
+            if ctl.is_some() {
+                with_short_read_timeout(ctl, || drain_briefly(stream));
+            }
             Ok(())
         }
         ReadOutcome::Request(req) => write_response(stream, route(app, &req)),
@@ -2007,9 +2059,12 @@ fn write_response(stream: &mut impl Write, resp: Response) -> Result<()> {
 fn status_text(code: u16) -> &'static str {
     match code {
         200 => "OK",
+        302 => "Found",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        405 => "Method Not Allowed",
         409 => "Conflict",
         411 => "Length Required",
         413 => "Payload Too Large",

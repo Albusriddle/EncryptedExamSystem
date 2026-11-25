@@ -9,8 +9,12 @@
 <script src="/assets/clike.js"></script>
 <script src="/assets/python.js"></script>
 <link rel="stylesheet" href="/assets/app.css">
+<link rel="icon" href="data:,">
 </head>
 <body>
+<!-- 断线/登录失效横幅放在最外层：`#exam` 在登录页和「已交卷」页是隐藏的，
+     挂在里面的话「重新登录」按钮会跟它一起消失（学生失去恢复入口）。 -->
+<div id="net" class="net" role="alert"><span id="netText"></span><button id="reloginBtn" class="plain hidden">重新登录</button></div>
 <div class="wrap">
   <!--TLS_HINT-->
   <section id="login" class="card">
@@ -18,12 +22,11 @@
     <p class="muted">请输入学号与 PIN（未启用 PIN 时留空）。</p>
     <div class="row"><input id="sid" type="text" inputmode="numeric" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="学号"></div>
     <div class="row mt-10"><input id="pin" type="password" inputmode="numeric" autocomplete="new-password" autocapitalize="off" spellcheck="false" placeholder="6 位 PIN（可留空）"></div>
-    <div class="row mt-14"><button id="loginBtn">登录</button><span id="loginMsg" class="warn"></span></div>
+    <div class="row mt-14"><button id="loginBtn">登录</button><span id="loginMsg" class="warn" role="alert"></span></div>
     <p class="muted mt-14">本页面只用于隔离局域网内的现场考试；请勿关闭标签页。</p>
   </section>
 
   <section id="exam" class="hidden">
-    <div id="net" class="net" role="alert"></div>
     <div class="bar"><strong id="title">考试</strong><span id="clock" class="muted"></span><span id="saveState" class="muted"></span><button id="submitBtn" class="secondary ml-auto">交卷</button><button id="logoutBtn" class="plain">退出</button></div>
     <div id="note" class="note hidden"></div>
     <div id="questions"></div>

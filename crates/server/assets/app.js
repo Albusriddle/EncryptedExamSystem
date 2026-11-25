@@ -10,6 +10,9 @@ let editable = true;
 let serverOffset = 0;    // 服务端时间 - 本机时间（秒）
 let endUnix = 0;
 let editors = new Map(); // qid -> CodeMirror 实例
+// 多选的已选项：qid -> Set(key)。不能拿答案字符串做子串匹配——选项 key 来自题库，
+// 可能是多字符（`"AA"` 会被 `"AAB".includes` 误判成已选）。
+let choices = new Map();
 let reloginNeeded = false;
 let me = null;            // 本次登录的学号（「已交卷」页要显示它）
 
@@ -28,8 +31,11 @@ async function api(path, opts = {}) {
 // ---------------------------------------------------------------- 断线感知
 function setNet(text) {
   const bar = $('net');
-  if (!text) { bar.classList.remove('show'); bar.textContent = ''; return; }
-  bar.textContent = text; bar.classList.add('show');
+  // 只改文本节点：直接写 bar.textContent 会把常驻的「重新登录」按钮一起抹掉，
+  // 学生就失去了恢复入口（网络抖动一次就触发）。
+  $('netText').textContent = text || '';
+  bar.classList.toggle('show', !!text);
+  if (!text) $('reloginBtn').classList.add('hidden');
 }
 window.addEventListener('online', () => { setNet(''); toast('网络已恢复'); retrySaveSoon(); });
 window.addEventListener('offline', () => setNet('网络已断开：作答暂存在本页，恢复后会自动保存。请不要关闭页面。'));
@@ -43,18 +49,11 @@ function needRelogin() {
   // 文案不能含糊成「答案都不会丢」。
   const lost = dirty.size;
   dirty.clear();
-  const bar = $('net');
-  bar.classList.add('show');
-  bar.textContent = lost
+  $('net').classList.add('show');
+  $('netText').textContent = lost
     ? `登录已失效（教师机重启或会话过期）：已保存的答案不会丢；有 ${lost} 题还没同步，需要重新作答。`
     : '登录已失效（教师机重启或会话过期）：已保存的答案不会丢，请重新登录。';
-  const btn = document.createElement('button');
-  btn.textContent = '重新登录';
-  btn.style.marginLeft = '12px';
-  btn.style.background = '#fff';
-  btn.style.color = '#b03030';
-  btn.addEventListener('click', () => { paper = null; location.reload(); });
-  bar.appendChild(btn);
+  $('reloginBtn').classList.remove('hidden');
 }
 
 // ---------------------------------------------------------------- 登录
@@ -66,13 +65,13 @@ async function login() {
     const pin = $('pin').value.trim();
     await api('/api/login', { method: 'POST', body: JSON.stringify({ student_id, pin: pin || null }) });
     apply(await api('/api/paper'));
-    $('login').style.display = 'none';
+    $('login').classList.add('hidden');
   } catch (e) { $('loginMsg').textContent = e.message; }
 }
 
 // 把 /api/paper 的结果落到界面上（登录、刷新、刚交卷都走这里）。
 function apply(data) {
-  $('login').style.display = 'none';
+  $('login').classList.add('hidden');
   me = data.student_id;
   submitted = !!data.submitted;
   endUnix = data.end_unix || 0;
@@ -85,15 +84,16 @@ function apply(data) {
   }
   paper = data.paper;
   answers = Object.assign(Object.create(null), data.answer_text || data.answers || {});
-  $('done').style.display = 'none';
-  $('exam').style.display = 'block';
+  choices = new Map();
+  $('done').classList.add('hidden');
+  $('exam').classList.remove('hidden');
   // 已交卷但允许回看：只读展示，并说明处于回看模式。
   editable = !submitted;
-  render(data);
+  render();
   if (submitted) {
     lockAll();
     const note = $('note');
-    note.style.display = 'block';
+    note.classList.remove('hidden');
     note.textContent = '已交卷，当前为只读回看（到结束时间后自动收起）。';
   }
   updateClock();
@@ -102,11 +102,19 @@ function apply(data) {
 /// 切到「已交卷」页。提交后会话 cookie 会立即失效（默认策略），
 /// 此时再取 /api/paper 会 401 —— 所以这个页面必须能本地渲染。
 function showDone(studentId) {
+  // 状态与 UI 一起收敛，不靠调用方记得先置 submitted——漏一个就会出现
+  // 「页面显示已交卷，但 beforeunload 还在拦、自动保存还在发」。
+  submitted = true;
+  editable = false;
+  lockAll();
+  if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   paper = null;
   answers = Object.create(null);
+  choices = new Map();
   dirty.clear();
-  $('exam').style.display = 'none';
-  $('done').style.display = 'block';
+  $('exam').classList.add('hidden');
+  $('done').classList.remove('hidden');
   $('doneMsg').textContent = studentId ? `学号 ${studentId} 的答题卡已封存。` : '答题卡已封存。';
 }
 
@@ -146,7 +154,7 @@ function optionsOf(item) {
   return [];
 }
 
-function render(data) {
+function render() {
   // 旧实例必须还原成 textarea 再扔掉：否则每换一次卷（apply）都会攒下一批脱离 DOM 的
   // CodeMirror 实例，长场次里会一直吃内存。
   editors.forEach(cm => { try { cm.toTextArea(); } catch (_) { /* 已经不在 DOM 里就算了 */ } });
@@ -176,7 +184,12 @@ function render(data) {
         } else if (item.options && item.options.length) {
           const ol = document.createElement('pre'); ol.className = 'stem'; ol.textContent = item.options.map((o, i) => `${String.fromCharCode(65+i)}. ${o}`).join('\n'); q.appendChild(ol);
         }
-        q.appendChild(renderText(item));
+        // 必须先入 DOM 再初始化 CodeMirror：`CodeMirror.fromTextArea` 内部要用
+        // `textarea.parentNode.insertBefore`，textarea 还没挂载时会抛 TypeError，
+        // 导致整页渲染中断（v1.4.11–v1.5.1 的代码题空白就是这么来的）。
+        const ta = renderText(item);
+        q.appendChild(ta);
+        if (item.qtype === 'code') initCodeEditor(ta, item);
       }
       box.appendChild(q);
     }
@@ -188,6 +201,7 @@ function renderChoices(item, opts) {
   const wrap = document.createElement('div'); wrap.className = 'choice';
   const multi = item.qtype === 'multiple';
   const current = String(answers[item.id] || '').toUpperCase();
+  const picked = pickedSet(item, opts);
   // 把 input 按 options 下标存下来：选项 key 来自题库，可能含引号/方括号，
   // 拼进 querySelector 会抛异常（那题就静默没法多选了）。
   const inputs = [];
@@ -197,12 +211,14 @@ function renderChoices(item, opts) {
     input.type = multi ? 'checkbox' : 'radio';
     input.name = 'q-' + item.id;
     input.value = o.key;
-    input.checked = multi ? current.includes(o.key) : current === o.key;
+    input.checked = multi ? picked.has(o.key) : current === o.key;
     input.disabled = !editable;
     input.addEventListener('change', () => {
       if (multi) {
-        const keys = opts.filter((_, i) => inputs[i].checked).map(x => x.key);
-        setAnswer(item.id, keys.sort().join(''));
+        const keys = opts.filter((_, i) => inputs[i].checked).map(x => x.key).sort();
+        picked.clear();
+        keys.forEach(k => picked.add(k));
+        setAnswer(item.id, keys.join(''));
       } else {
         setAnswer(item.id, o.key);
       }
@@ -215,6 +231,24 @@ function renderChoices(item, opts) {
   return wrap;
 }
 
+/// 某题已选中的选项 key 集合（多选回显用）。
+///
+/// 优先用内存里的集合（本次作答期间的权威状态）；首次渲染时从服务端答案回显：
+/// 单字符 key 直接按字符拆，多字符 key 退化为「包含」匹配（只用于显示）。
+function pickedSet(item, opts) {
+  if (choices.has(item.id)) return choices.get(item.id);
+  const raw = String(answers[item.id] || '').toUpperCase();
+  const set = new Set();
+  const allSingle = opts.every(o => o.key.length === 1);
+  if (allSingle) {
+    for (const ch of raw) if (opts.some(o => o.key === ch)) set.add(ch);
+  } else {
+    for (const o of opts) if (raw.includes(o.key.toUpperCase())) set.add(o.key);
+  }
+  choices.set(item.id, set);
+  return set;
+}
+
 function renderText(item) {
   const ta = document.createElement('textarea');
   ta.dataset.qid = item.id;
@@ -225,15 +259,18 @@ function renderText(item) {
     : item.qtype === 'fix' ? '每行一条：行号 改正后的代码（例如 3 return x*x;）；自动保存'
     : '在此作答（自动保存）';
   ta.addEventListener('input', () => setAnswer(item.id, ta.value));
-  if (item.qtype === 'code' && window.CodeMirror) {
-    const lang = (item.code_languages && item.code_languages[0]) || '';
-    const mode = lang === 'python' ? 'python' : ['c','cpp','java','javascript','typescript','go','rust'].includes(lang) ? 'text/x-csrc' : null;
-    const cm = CodeMirror.fromTextArea(ta, { lineNumbers: true, mode, indentUnit: 4, tabSize: 4, lineWrapping: false, readOnly: !editable });
-    cm.setSize('100%', '260px');
-    cm.on('change', () => { if (editable) setAnswer(item.id, cm.getValue()); });
-    editors.set(item.id, cm);
-  }
   return ta;
+}
+
+/// 在 textarea **已经挂到 DOM 之后**初始化 CodeMirror。
+function initCodeEditor(ta, item) {
+  if (!window.CodeMirror) return;
+  const lang = (item.code_languages && item.code_languages[0]) || '';
+  const mode = lang === 'python' ? 'python' : ['c','cpp','java','javascript','typescript','go','rust'].includes(lang) ? 'text/x-csrc' : null;
+  const cm = CodeMirror.fromTextArea(ta, { lineNumbers: true, mode, indentUnit: 4, tabSize: 4, lineWrapping: false, readOnly: !editable });
+  cm.setSize('100%', '260px');
+  cm.on('change', () => { if (editable) setAnswer(item.id, cm.getValue()); });
+  editors.set(item.id, cm);
 }
 
 function setAnswer(qid, value) {
@@ -280,6 +317,12 @@ async function doSaveDirty() {
       setNet('');
       showDone(me);
       toast('已到结束时间，答题卡已自动封存');
+      return false;
+    }
+    // 4xx（除 401/409）是确定性错误（413 单题超限、400 格式、403 无权限）：
+    // 重试永远不会成功，只会刷屏并让学生以为「在重试、马上就好」。
+    if (e.status && e.status >= 400 && e.status < 500) {
+      setNet(`这一题保存不了（${e.message}）：请报告监考，或把答案改短后重试。`);
       return false;
     }
     // 服务端挂了与断网对学生的观感一样：必须显式告诉他「答案还在，正在重试」。
@@ -355,10 +398,16 @@ async function submit(auto = false) {
   if (!auto && !confirm('交卷后不可再修改，确定交卷吗？')) return;
   submitting = true;
   try {
-    // 先把在途/未发的作答落地；失败就不交卷（否则封存的卡里会少这几题）。
+    // 先把在途/未发的作答落地。保存失败时**不能默默拦死**：到点自动收卷仍会
+    // 封存已保存的部分，学生如果坚持要交（比如断网且时间快到了），要给他一条路，
+    // 但必须明确告知「这几题不会进卡」。
     const saved = await saveDirty();
-    // 自动交卷（到点）失败时不弹 toast：断网横幅已经在提示，且退避后还会再试。
-    if (!saved) { if (!submitted && !auto) toast('还有作答没保存成功，请稍后重试'); return; }
+    if (!saved && !submitted) {
+      if (auto) return; // 到点自动交卷：断网横幅已在提示，等退避后再试
+      const pending = dirty.size;
+      const go = confirm(`还有 ${pending} 题没有保存成功，交卷后这些答案不会进答题卡。仍要交卷吗？`);
+      if (!go) return;
+    }
     await api('/api/submit', { method: 'POST', body: '{}' });
     // 交卷 API 一旦返回成功，状态就钉死：后面任何复查失败都不代表「交卷失败」。
     submitted = true;
@@ -392,8 +441,8 @@ $('sid').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 // 不做本地存储：服务端才是权威副本，这里只补「最后 0–600 ms」的缺口。
 function flushBeacon() {
   if (submitted || !dirty.size) return;
-  // 有在途的那批就等它，别对同一题并发发两遍。
-  if (saving) { saving.finally(() => flushBeacon()); return; }
+  // 不等在途的那批：页面卸载时微任务不保证执行，`finally` 基本跑不到；
+  // 同一题重复 PUT 是幂等的，宁可多发一次也不要丢。
   for (const qid of [...dirty]) {
     const body = JSON.stringify({ qid, value: answers[qid] || '' });
     const opts = {
@@ -406,7 +455,12 @@ function flushBeacon() {
     // 大会答案（代码题粘贴）退回普通请求，至少有机会在页面卸载前发出去。
     if (body.length <= 64 * 1024) opts.keepalive = true;
     fetch('/api/answer', opts)
-      .then(() => { dirty.delete(qid); })
+      .then(res => {
+        // fetch 对 4xx/5xx 也会 resolve：不判 ok 就会把「没存上」当成「存上了」，
+        // 该题从 dirty 里被删掉、再也不会重发，封存的卡里就少了这一题。
+        if (res.ok) { dirty.delete(qid); return; }
+        if (res.status === 409) { submitted = true; lockAll(); showDone(me); }
+      })
       .catch(() => { /* 页面正在关闭，失败也没法再提示；dirty 保留，下次还能再试 */ });
   }
 }
@@ -416,11 +470,15 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // 主动退出：先冲尾，再让服务端删 token 并清 cookie，最后回登录页。
+let loggingOut = false;
 async function logout() {
+  if (loggingOut) return;
   if (!confirm('退出后需要重新输入学号；已保存的答案不会丢。')) return;
+  loggingOut = true;
   const saved = await saveDirty();
   if (!saved) {
     setNet('还有作答没保存成功：请等网络恢复后再退出。');
+    loggingOut = false;
     return;
   }
   try {
@@ -428,12 +486,15 @@ async function logout() {
   } catch (e) {
     // 退出失败不能假装成功：此时 reload 会带着仍然有效的 cookie 自动回到原卷。
     setNet('网络不可用，未能退出：请关闭浏览器或稍后重试。');
+    loggingOut = false;
     return;
   }
   paper = null;
   dirty.clear();
   location.reload();
 }
+
+$('reloginBtn').addEventListener('click', () => { paper = null; location.reload(); });
 
 $('submitBtn').addEventListener('click', () => submit(false));
 $('logoutBtn').addEventListener('click', logout);

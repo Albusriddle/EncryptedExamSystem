@@ -242,15 +242,6 @@ impl Fixture {
             .collect()
     }
 
-    /// 把场次窗口改成「已经结束」，模拟时间走过收卷时刻。
-    ///
-    /// 为什么不 `sleep`：场次时间是**整秒**，`end = 现在 + 1` 再 `sleep(1.2s)` 能否跨过
-    /// 边界取决于构造 fixture 时的小数部分（实测会在 0–0.8 秒之间抖），这种用例迟早
-    /// 变成 CI 里的偶发红灯。直接换一份 `end` 已过去的 payload 是确定性的，也快。
-    ///
-    /// 只替换 `App::payload`：已登录学生的内存试卷不受影响，场次窗口（`session_window`）
-    /// 每次调用都从 payload 重新解析，所以下一次判定就会看到「已结束」。
-    /// 把场次窗口设成任意区间（重打包 payload 并刷新窗口缓存）。
     /// 给 fixture 装上 TLS 配置（`handle()` 会据此握手）；同时打开 Secure cookie。
     fn set_tls(&mut self, config: Arc<rustls::ServerConfig>) {
         let app = Arc::get_mut(&mut self.app).expect("装 TLS 时不应有其它 Arc 持有者");
@@ -270,6 +261,7 @@ impl Fixture {
         app.review = policy;
     }
 
+    /// 把场次窗口设成任意区间（重打包 payload + **同步刷新窗口缓存**）。
     fn set_window(&mut self, start: u64, end: u64) {
         let payload = build_payload(&self.banks, &self.pins, start, end);
         let app = Arc::get_mut(&mut self.app).expect("换 payload 时不应有其它 Arc 持有者");
@@ -279,6 +271,14 @@ impl Fixture {
         app.windows = session_windows_from(&header).expect("测试 payload 的场次时间必须带时区");
     }
 
+    /// 把场次窗口改成「已经结束」，模拟时间走过收卷时刻。
+    ///
+    /// 为什么不 `sleep`：场次时间是**整秒**，`end = 现在 + 1` 再 `sleep(1.2s)` 能否跨过
+    /// 边界取决于构造 fixture 时的小数部分（实测会在 0–0.8 秒之间抖），这种用例迟早
+    /// 变成 CI 里的偶发红灯。直接换一份 `end` 已过去的 payload 是确定性的，也快。
+    ///
+    /// 只替换 `App::payload` + `App::windows`：已登录学生的内存试卷不受影响，
+    /// 但窗口自 v1.4.9 起是**启动时缓存**的，不同步刷新缓存「过期」不会生效。
     fn expire_session(&mut self) {
         let now = unix_now();
         let payload = build_payload(
@@ -289,7 +289,6 @@ impl Fixture {
         );
         let app = Arc::get_mut(&mut self.app).expect("换 payload 时不应有其它 Arc 持有者");
         app.payload = payload;
-        // 窗口现在启动时缓存：换 payload 必须同步换缓存，否则「过期」不会生效。
         let (header, _) = container::parse_header(&app.payload, &app.k_manifest)
             .expect("解析新 payload 的 header");
         app.windows = session_windows_from(&header).expect("测试 payload 的场次时间必须带时区");
@@ -2055,26 +2054,41 @@ fn redirect_port_only_redirects() {
 // ---------------------------------------------------------------------------
 
 /// 生成一张测试用证书并返回配置（放 target/ 下，和 Fixture 的目录不同名）。
-fn test_tls_config(tag: &str) -> Arc<rustls::ServerConfig> {
+/// 测试用 TLS 材料：`Drop` 时清掉临时目录（以前每次跑测试都留一套证书）。
+struct TestTls {
+    config: Arc<rustls::ServerConfig>,
+    cert_path: std::path::PathBuf,
+    dir: std::path::PathBuf,
+}
+
+impl Drop for TestTls {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn test_tls(tag: &str) -> TestTls {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/server-tests")
         .join(format!("tls-cfg-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let material = tls::load_or_generate(&dir, &["127.0.0.1".to_string()], 30).expect("生成证书");
-    Arc::clone(&material.config)
+    TestTls {
+        config: Arc::clone(&material.config),
+        cert_path: material.cert_path,
+        dir,
+    }
 }
 
 /// 只信这张自签证书的客户端配置（真校验证书，不是跳过）。
-fn trusting_client_config(config: &rustls::ServerConfig, tag: &str) -> rustls::ClientConfig {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/server-tests")
-        .join(format!("tls-cfg-{tag}-{}", std::process::id()));
-    let pem = std::fs::read(dir.join("server.crt")).expect("读测试证书");
+///
+/// 直接接收证书路径：以前按 `tag` 重新拼目录，改名/改目录就会静默读到不存在的文件。
+fn trusting_client_config(cert_path: &std::path::Path) -> rustls::ClientConfig {
+    let pem = std::fs::read(cert_path).expect("读测试证书");
     let mut roots = rustls::RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut &pem[..]) {
         roots.add(cert.expect("证书可解析")).expect("加入根证书");
     }
-    let _ = config;
     rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth()
@@ -2125,7 +2139,8 @@ fn tls_handle_serves_page_with_security_headers() {
     use rustls::pki_types::ServerName;
 
     let mut f = Fixture::new("tls-handle");
-    f.set_tls(test_tls_config("handle"));
+    let tls_fixture = test_tls("handle");
+    f.set_tls(Arc::clone(&tls_fixture.config));
     let app = Arc::clone(&f.app);
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("绑定");
@@ -2135,7 +2150,7 @@ fn tls_handle_serves_page_with_security_headers() {
         handle(app, stream)
     });
 
-    let client_config = trusting_client_config(&f.app.tls.clone().expect("有 TLS 配置"), "handle");
+    let client_config = trusting_client_config(&tls_fixture.cert_path);
     let server_name = ServerName::try_from("127.0.0.1").expect("服务器名");
     let conn = rustls::ClientConnection::new(Arc::new(client_config), server_name)
         .expect("客户端 TLS 会话");
@@ -2179,7 +2194,8 @@ fn plaintext_on_tls_port_is_rejected_without_panic() {
     use std::net::{TcpListener, TcpStream};
 
     let mut f = Fixture::new("tls-plain");
-    f.set_tls(test_tls_config("plain"));
+    let tls_fixture = test_tls("plain");
+    f.set_tls(Arc::clone(&tls_fixture.config));
     let app = Arc::clone(&f.app);
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("绑定");
@@ -2229,11 +2245,115 @@ fn index_hint_matches_tls_mode() {
         index_html(&f.app).contains("明文 HTTP"),
         "明文模式必须有醒目提示"
     );
-    f.set_tls(test_tls_config("hint"));
+    let tls_fixture = test_tls("hint");
+    f.set_tls(Arc::clone(&tls_fixture.config));
     let html = index_html(&f.app);
     assert!(
         html.contains("自签证书"),
         "TLS 模式应提示自签与「继续前往」"
     );
     assert!(!html.contains("明文 HTTP"), "TLS 模式不应再说明文");
+}
+
+// ---------------------------------------------------------------------------
+// 14. v1.5.2：SAN 跟随 --bind、IPv6 URL、状态短语
+// ---------------------------------------------------------------------------
+
+/// `--bind` 指向具体地址时，该地址必须进 SAN。
+///
+/// 多网卡教师机「只绑机房侧网卡」是 v1.4.7 起的推荐用法；SAN 里没有它，
+/// 学生就会看到「名称不匹配」——比自签本身更吓人。
+#[test]
+fn tls_hosts_include_the_bound_address() {
+    let cli = Cli::parse_from(["exam-server", "--bind", "192.168.1.5"]);
+    let hosts = tls_hosts(&cli);
+    assert!(
+        hosts.iter().any(|h| h == "192.168.1.5"),
+        "绑定的地址必须进 SAN：{hosts:?}"
+    );
+
+    // 绑 0.0.0.0（默认）时不把通配地址写进 SAN——那不是学生访问的地址。
+    let cli = Cli::parse_from(["exam-server"]);
+    let hosts = tls_hosts(&cli);
+    assert!(!hosts.iter().any(|h| h == "0.0.0.0"), "实际：{hosts:?}");
+    assert!(hosts.iter().any(|h| h == "127.0.0.1"));
+}
+
+/// IPv6 字面量在 URL 里必须加方括号，否则不是合法 URL。
+#[test]
+fn url_host_brackets_ipv6_literals() {
+    assert_eq!(url_host("::1"), "[::1]");
+    assert_eq!(url_host("0:0:0:0:0:0:0:1"), "[0:0:0:0:0:0:0:1]");
+    assert_eq!(url_host("192.168.1.5"), "192.168.1.5");
+    assert_eq!(url_host("localhost"), "localhost");
+    assert_eq!(url_host("[::1]"), "[::1]", "已经带方括号就不要重复加");
+}
+
+/// 403/405 必须写对理由短语（曾落到 `_ => "OK"`，日志里是 `403 OK`）。
+#[test]
+fn status_text_covers_403_and_405() {
+    assert_eq!(status_text(403), "Forbidden");
+    assert_eq!(status_text(405), "Method Not Allowed");
+    assert_eq!(status_text(302), "Found");
+}
+
+/// 301 也要带 nosniff（其余安全头对无 body 的跳转没有意义）。
+#[test]
+fn redirect_301_carries_nosniff() {
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定");
+    let port = listener.local_addr().expect("地址").port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        handle_redirect_stream(&mut stream, "::1", 8443);
+    });
+
+    let mut client = TcpStream::connect(("127.0.0.1", port)).expect("连接");
+    client
+        .write_all(b"GET /x?y=1 HTTP/1.1\r\nHost: t\r\n\r\n")
+        .expect("写请求");
+    let mut buf = [0u8; 512];
+    let n = client.read(&mut buf).expect("读响应");
+    server.join().expect("线程");
+    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+    assert!(text.starts_with("HTTP/1.1 301"), "{text}");
+    assert!(text.contains("X-Content-Type-Options: nosniff"), "{text}");
+    assert!(
+        text.contains("Location: https://[::1]:8443/x?y=1"),
+        "IPv6 必须加方括号且保留路径：{text}"
+    );
+}
+
+/// 网页端代码题的编辑器必须在 textarea 挂到 DOM **之后**初始化。
+///
+/// v1.4.11 把 `CodeMirror.fromTextArea` 挪进了 `renderText()`（那时 textarea 还没挂载），
+/// CodeMirror 内部要 `parentNode.insertBefore`，直接抛 TypeError → 含代码题的整页渲染中断。
+/// demo 题库没有代码题、冒烟与演练也不覆盖，这个 bug 活了四个版本（v1.4.11–v1.5.1）。
+/// 这里用源码顺序断言守住它，避免同类别再犯（前端没有跑单测的运行时）。
+#[test]
+fn code_editor_is_initialised_only_after_the_textarea_is_in_the_dom() {
+    let js = include_str!("../assets/app.js");
+    let render_text = js
+        .split("function renderText")
+        .nth(1)
+        .expect("app.js 里应有 renderText")
+        .split("\nfunction ")
+        .next()
+        .expect("截取 renderText 函数体");
+    assert!(
+        !render_text.contains("CodeMirror.fromTextArea"),
+        "renderText 里不能直接初始化 CodeMirror：那时 textarea 还不一定在 DOM 里"
+    );
+    let append = js
+        .find("q.appendChild(ta)")
+        .expect("render() 必须先把 textarea 挂到 DOM");
+    let init = js
+        .find("initCodeEditor(ta, item)")
+        .expect("render() 必须在挂载后初始化编辑器");
+    assert!(
+        append < init,
+        "必须先 appendChild(ta) 再 initCodeEditor(ta, item)"
+    );
 }
