@@ -482,7 +482,8 @@ fn main() -> Result<()> {
     // ---- 外部证书自检（只对外部证书跑：自签证书是本机生成的，没有「配置错」这回事） ----
     let cert_check = match (&cli.tls, cert_pair) {
         (TlsMode::Auto, Some((cert, key))) => {
-            let check = tls::check_external(cert, key, cli.tls_ca.as_deref(), &hosts)?;
+            let check: tls::CertCheck =
+                tls::check_external(cert, key, cli.tls_ca.as_deref(), &hosts)?;
             // 致命项存在时**也把警告打出来**：否则老师修完致命项重启，才发现还有两条警告，
             // 白折腾一轮。
             if !check.passed() {
