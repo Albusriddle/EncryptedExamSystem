@@ -245,6 +245,23 @@ else
   echo "  （跳过：没有 uv/admin）"
 fi
 
+# ---------------------------------------------------------------- 9. 外部证书自检冒烟
+
+# 自检逻辑的单测在 Rust 里直接调 `check_external()`，覆盖不到「CLI → 分级 → 退出码 → 文案」
+# 这层；v1.6.0 就是靠手工验证的，这里固化成门禁（17 项）。
+head_ "9. 外部证书自检"
+TLSCERT_LOG="$ROOT/target/preflight-tls-cert.log"
+if [ -x "$ROOT/target/release/exam-server$([ -f "$ROOT/target/release/exam-server.exe" ] && echo .exe)" ]; then
+  if bash "$ROOT/scripts/smoke-tls-cert.sh" >"$TLSCERT_LOG" 2>&1; then
+    ok "外部证书自检冒烟通过（配套/不配套/strict/IPv6）"
+  else
+    bad "外部证书自检冒烟失败：$(tail -3 "$TLSCERT_LOG" | tr '\n' ' ')"
+  fi
+  rm -f "$TLSCERT_LOG"
+else
+  bad "缺少 target/release/exam-server（先 cargo build --release）"
+fi
+
 # ---------------------------------------------------------------- 汇总
 
 echo
