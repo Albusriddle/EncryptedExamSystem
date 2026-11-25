@@ -259,6 +259,20 @@ else
 fi
 rm -f "$TLSCERT_LOG"
 
+# ---------------------------------------------------------------- 11. 监考页冒烟
+
+# 监考页是唯一带**写操作**的页面（收卷/终止/批量），而 v1.8.0 的门禁里一个字都没提它：
+# 路由写错、`include_str!` 路径打错、响应头丢 `no-store`、令牌鉴权被绕过，CI 都会全绿。
+# 这里用纯 curl 把它钉住（18 项）。
+head_ "11. 监考页"
+MONLOG="$ROOT/target/preflight-monitor.log"
+if bash "$ROOT/scripts/smoke-monitor.sh" >"$MONLOG" 2>&1; then
+  ok "监考页冒烟通过（页面/令牌/收卷/tls-only/弱令牌）"
+else
+  bad "监考页冒烟失败：$(tail -3 "$MONLOG" | tr '\n' ' ')"
+fi
+rm -f "$MONLOG"
+
 # ---------------------------------------------------------------- 汇总
 
 echo
