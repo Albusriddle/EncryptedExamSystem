@@ -62,6 +62,9 @@ class WebExamDialog(QDialog):
         # 监考页要显示「名单里谁还没登录」，而服务端从包里读不到名单，这里先记下学号，
         # 启动前写成 `<答题卡目录>/roster.txt` 再传给 `--roster`。
         self._roster_ids = sorted({int(i) for i in (roster or [])})
+        # 名单文件的路径：由 `_write_roster()` 在**启动时**填好，`_command_args()` 只读。
+        # 分这两步是因为 `_command_args()` 会被测试/预览反复调用，而写盘属于副作用。
+        self._roster_path: Path | None = None
         self.proc = QProcess(self)
         self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.proc.readyReadStandardOutput.connect(self._read_output)
@@ -424,15 +427,30 @@ class WebExamDialog(QDialog):
         为什么由管理端写：服务端从考试包里读不到「谁在这个班」——session header 是匿名的
         （只有 tag + 密文），运行时只能数出信封个数。没有名单，监考页就显示不了
         「谁还没进来」，而那正是监考最关心的一件事。
+
+        Returns:
+            写好的文件路径；没有学号、或目录不可写（只读盘 / 权限）时返回 None——
+            后者只在日志里告警，**不阻断启动**（服务本身还能用，只是监考页只显示已登录的人）。
         """
         ids = sorted({int(i) for i in self._roster_ids})
         if not ids:
+            self._roster_path = None
             return None
         path = self._answers_dir() / "roster.txt"
-        path.parent.mkdir(parents=True, exist_ok=True)
         lines = ["# 监考名单（每行一个学号；由管理端在启动时生成）"]
         lines += [str(i) for i in ids]
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError as exc:
+            # 名单写不进去（只读盘 / 权限 / 路径是文件）不能拦住启动：服务本身还能用，
+            # 只是监考页看不到「谁还没进来」。静默失败会更糟——老师会以为名单生效了。
+            self.log.appendPlainText(
+                f"⚠ 监考名单写入失败：{path}（{exc}）→ 监考页只显示已登录的学生"
+            )
+            self._roster_path = None
+            return None
+        self._roster_path = path
         return path
 
     def _command_args(self) -> list[str]:
@@ -443,7 +461,7 @@ class WebExamDialog(QDialog):
         """
         return web_command(
             server=self._server_path(),
-            roster=self._write_roster(),
+            roster=self._roster_path,
             package=Path(self.edit_package.text().strip()),
             keyfile=Path(self.edit_keyfile.text().strip()),
             port=self.spin_port.value(),
@@ -521,6 +539,8 @@ class WebExamDialog(QDialog):
         # 服务端却因为空参数起不来（见 `_answers_dir`）。
         answers = self._answers_dir()
         answers.mkdir(parents=True, exist_ok=True)
+        # 名单文件在这里写（而不是在 `_command_args()` 里）：拼参数是纯函数，写盘是副作用。
+        self._write_roster()
 
         self._output_buffer = ""
         self._banner_scheme = None

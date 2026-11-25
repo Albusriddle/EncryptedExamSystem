@@ -175,8 +175,13 @@ def web_command(
     允许多少次登录（0 = 不限，演练或学生都在同一个 NAT 后面时需要）。
 
     四个证书参数（v1.7.0）只在 `custom`（自己的证书）下由界面传入；`auto`（自签）时
-    全部为 None，argv 与 v1.6.x 完全一致。顺序跟 `crates/server/README.md` 的参数表
-    一致：`--tls` 之后、`--http-redirect-port` 之前。
+    全部为 None，argv 与 v1.6.x 完全一致。
+
+    `roster`（v1.8.0）指向「每行一个学号」的名单文件，供监考页显示「谁还没进来」；
+    不给时监考页只显示已经登录的人（服务端从考试包里读不到名单——session header 是匿名的）。
+
+    顺序跟 `crates/server/README.md` 的参数表一致：`--tls` 及其四个证书参数之后、
+    `--http-redirect-port` 之前。
     """
     argv = [
         str(server),

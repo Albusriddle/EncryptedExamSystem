@@ -641,3 +641,73 @@ def test_no_roster_means_no_flag(qapp, tmp_path) -> None:
         assert "--roster" not in dlg._command_args()
     finally:
         dlg.close()
+
+
+def test_command_args_has_no_side_effects(qapp, tmp_path) -> None:
+    """`_command_args()` 只拼参数、不写盘。
+
+    以前这里的 `roster=self._write_roster()` 会让「预览参数」也去写文件；更糟的是
+    答题卡目录只读时异常会从 `start_server` 抛出，表现成「点启动没反应」。
+    现在写盘只在 `start_server()` 里做一次，拼参数读缓存。
+    """
+    dlg = _make_dialog(tmp_path)
+    try:
+        dlg._roster_ids = [2021002]
+        args = dlg._command_args()
+        assert "--roster" not in args, "拼参数阶段不该带名单（还没写文件）"
+        assert not (dlg._answers_dir() / "roster.txt").exists(), "拼参数不该写盘"
+    finally:
+        dlg.close()
+
+
+def test_roster_write_failure_does_not_block_startup(qapp, tmp_path) -> None:
+    """名单写不进去（只读盘 / 权限）时只告警，不抛异常、不传 --roster。"""
+    dlg = _make_dialog(tmp_path)
+    try:
+        dlg._roster_ids = [2021002]
+        # 把「答题卡目录」指到一个**已存在的文件**上：mkdir 会抛 FileExistsError/NotADirectoryError
+        bogus = tmp_path / "not-a-dir"
+        bogus.write_text("x", encoding="utf-8")
+        dlg.edit_answers.setText(str(bogus))
+        assert dlg._write_roster() is None, "写失败应返回 None 而不是抛异常"
+        assert "--roster" not in dlg._command_args()
+        assert "名单写入失败" in dlg.log.toPlainText(), "必须在日志里说明，否则老师以为名单生效了"
+    finally:
+        dlg.close()
+
+
+def test_tab_build_passes_project_students_as_roster(qapp, monkeypatch) -> None:
+    """接线：`tab_build.open_web_exam()` 必须把项目学号传给对话框。
+
+    没有这条用例时，把 `WebExamDialog(self, pkg, key, roster=...)` 改回三参构造，
+    所有测试仍然全绿，而监考页会静默退化成「只显示已登录的人」。
+    """
+    from app.core.state import ProjectState
+    from app.ui.tab_build import BuildTab
+
+    recorded: dict[str, object] = {}
+
+    class _Recorder:
+        def __init__(self, parent, package, keyfile, roster=None):
+            recorded["package"] = package
+            recorded["roster"] = roster
+
+        def setModal(self, _flag):  # noqa: N802 - 模拟 Qt 接口
+            pass
+
+        def show(self):
+            pass
+
+    monkeypatch.setattr("app.ui.web_exam_dialog.WebExamDialog", _Recorder)
+
+    state = ProjectState()
+    state.students = [2021003, 2021001]
+    tab = BuildTab(state)
+    try:
+        tab.open_web_exam()
+    finally:
+        tab.deleteLater()
+
+    # 顺序由对话框自己归一化（`_roster_ids = sorted(set(...))`，见
+    # `test_roster_file_is_written_and_passed`），这里只验「项目学号确实传过去了」。
+    assert sorted(recorded["roster"]) == [2021001, 2021003], recorded
