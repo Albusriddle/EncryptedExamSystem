@@ -8,6 +8,13 @@
 <link rel="icon" href="data:,">
 </head>
 <body>
+<!-- JS 被禁用时至少告诉老师怎么办：否则整页空白，看起来像服务端挂了。 -->
+<noscript>
+  <div class="banner danger" role="alert">
+    监考页需要 JavaScript：请用支持并开启 JS 的浏览器打开；或在教师机上查看
+    <code>&lt;答题卡目录&gt;/answers-*.eea</code> 与 <code>events.jsonl</code>。
+  </div>
+</noscript>
 <!-- 断线/令牌失效横幅：常驻最外层，任何状态下都看得见 -->
 <div id="net" class="banner alert hidden" role="alert"><span id="netText"></span></div>
 <!-- 明文告警：由服务端 stats.plaintext_warning 决定显隐（默认藏） -->
@@ -24,6 +31,13 @@
 </header>
 
 <main>
+  <!-- 没给 --roster 时表格只能列出已登录的人：显式说明，别让监考把「未登录 27」当真 -->
+  <p id="rosterHint" class="banner warn hidden" role="status">
+    未提供名单：监考页只显示已登录的学生，看不到「谁还没进来」。
+    命令行启动时用 <code>--roster &lt;名单文件&gt;</code> 指定（每行一个学号）；
+    管理端「网页考试…」会自动生成。
+  </p>
+
   <section id="counts" class="counts" aria-label="总体进度"></section>
 
   <section id="actions" class="actions">
@@ -60,7 +74,8 @@
 
 <div id="toast" class="toast" role="status"></div>
 
-<dialog id="confirmDlg">
+<!-- aria-labelledby/describedby：读屏打开对话框时先念标题与正文，否则只会念「对话框」 -->
+<dialog id="confirmDlg" aria-labelledby="confirmTitle" aria-describedby="confirmBody">
   <form method="dialog">
     <h2 id="confirmTitle"></h2>
     <p id="confirmBody"></p>

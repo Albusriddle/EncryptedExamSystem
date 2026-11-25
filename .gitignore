@@ -80,3 +80,15 @@ admin/tmp*
 # 规矩：临时产物只许写 target/ 或 .tmp-sess，不许落在仓库里——掉一个 20 MB 的
 # 测试夹具目录进来，`git add -A` 就会把它带进发布提交。
 admin/rev*-*/
+
+# ---- 网页服务的运行产物（含凭据与答题卡，绝不能提交）----
+# 这些是 `exam-server` 在默认 `--answers-dir answers` 下生成的：监考令牌可被复用
+# （拿到就能替学生收卷），`.eea` 是学生答题卡，`roster.txt` 是名册。
+answers/
+web-answers/
+*.eea
+events.jsonl
+monitor.token
+blocked.json
+roster.txt
+state/

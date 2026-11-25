@@ -177,6 +177,12 @@ struct Cli {
     /// 监考页写操作开关：allow（默认，明文也允许收卷/终止）/ tls-only（明文下禁用写操作）
     #[arg(long, value_enum, default_value_t = monitor::MonitorWriteMode::Allow)]
     monitor_write_mode: monitor::MonitorWriteMode,
+    /// 允许使用弱监考令牌（非 64 位 hex）
+    ///
+    /// 默认拒绝：令牌等于「替全班收卷/终止」的权限，`abc` 这种一秒内就能猜中。
+    /// 只在纯排障、且机器完全隔离时用。
+    #[arg(long)]
+    monitor_allow_weak_token: bool,
     /// 学生名单文件（每行一个学号，`#` 开头为注释）
     ///
     /// 为什么监考页需要它：考试包里的信封是**匿名**的（按学号派生入场密钥定位），运行时
@@ -241,6 +247,17 @@ struct App {
     monitor_write_mode: monitor::MonitorWriteMode,
     /// 名单里的学号（`--roster`；拿不到时为空的集合）。
     roster: HashSet<u64>,
+    /// 名单是否真的拿到了（`--roster` 给了且解析成功）。
+    ///
+    /// 没拿到时 `roster_len` 是「包里有几个信封」，而表格只有已登录的人——两者对不上
+    /// 会让监考以为「一堆人没来」。页面据此显示「名单未提供」。
+    roster_known: bool,
+    /// 是否用了弱令牌（`--monitor-allow-weak-token`）：横幅要红字警告。
+    monitor_weak_token: bool,
+    /// 上次监考写操作的时刻（Unix 秒），用于 1 s 冷却。
+    monitor_last_write: Mutex<Option<u64>>,
+    /// 写操作冷却秒数（生产 1；测试 fixture 设 0，否则连续写操作会互相 429）。
+    monitor_write_cooldown_secs: u64,
     /// 名单人数：给了 `--roster` 就是文件行数，否则取当前场次的信封数
     /// （信封匿名，只能知道「有多少人」，不知道「是谁」）。
     roster_len: usize,
@@ -254,7 +271,8 @@ struct State {
     attempts: HashMap<IpAddr, (u32, u64)>,
     attempts_student: HashMap<u64, (u32, u64)>,
     /// 被监考终止的学生（学号 → 原因）。登录时命中直接 403。
-    blocked: HashMap<u64, String>,
+    /// 学号 → 封禁原因（落盘在 `<答题卡目录>/blocked.json`，重启后仍有效）。
+    blocked: HashMap<u64, monitor::BlockedEntry>,
     /// 首次登录时刻（学号 → 秒）。重登沿用，不刷新——监考想看的是「他什么时候进来的」。
     first_login_at: HashMap<u64, u64>,
 }
@@ -517,6 +535,7 @@ fn main() -> Result<()> {
     };
 
     // 名单：`--roster` 给的是「谁」，考试包只能给「有多少人」（信封匿名，见 `monitor` 模块）。
+    let roster_given = cli.roster.is_some();
     let roster = match &cli.roster {
         Some(path) => monitor::load_roster(path)?,
         None => HashSet::new(),
@@ -542,8 +561,21 @@ fn main() -> Result<()> {
         .with_context(|| format!("创建状态目录 {}", state_dir.display()))?;
     harden_state_dir(&state_dir);
     // 监考令牌：优先 `--monitor-token`，否则读/生成 `<answers-dir>/monitor.token`。
-    let monitor_token =
-        monitor::load_or_generate_token(&cli.answers_dir, cli.monitor_token.as_deref());
+    let monitor_token = monitor::load_or_generate_token(
+        &cli.answers_dir,
+        cli.monitor_token.as_deref(),
+        cli.monitor_allow_weak_token,
+    )?;
+    let monitor_weak_token = cli.monitor_token.is_some() && !monitor::is_hex_token(&monitor_token);
+    // 封禁表：重启后仍然生效（只放内存的话，教师机重启 = 被终止的学生又能登回来）。
+    let blocked = monitor::load_blocked(&cli.answers_dir);
+    if !blocked.is_empty() {
+        println!(
+            "已恢复封禁名单：{} 人（{}）",
+            blocked.len(),
+            monitor::blocked_path(&cli.answers_dir).display()
+        );
+    }
 
     // ---- TLS：默认开；没证书就自动生成 ----
     let hosts = tls_hosts(&cli);
@@ -643,7 +675,10 @@ fn main() -> Result<()> {
         event_log: Mutex::new(()),
         write_locks: Mutex::new(HashMap::new()),
         tmp_seq: std::sync::atomic::AtomicU64::new(0),
-        state: Mutex::new(State::default()),
+        state: Mutex::new(State {
+            blocked,
+            ..State::default()
+        }),
         windows,
         finalize_retry: Mutex::new(HashMap::new()),
         review: header.student_review,
@@ -651,7 +686,11 @@ fn main() -> Result<()> {
         secure_cookies: tls_material.is_some(),
         monitor_token,
         monitor_write_mode: cli.monitor_write_mode,
+        monitor_weak_token,
+        monitor_last_write: Mutex::new(None),
+        monitor_write_cooldown_secs: 1,
         roster,
+        roster_known: roster_given,
         roster_len,
     });
 
@@ -766,6 +805,11 @@ fn main() -> Result<()> {
                 "⚠ 当前 --monitor-write-mode allow：明文下也允许写操作（想禁掉用 --monitor-write-mode tls-only）"
             );
         }
+    }
+    if app.monitor_weak_token {
+        println!(
+            "⚠ 使用弱令牌（--monitor-allow-weak-token）：任何人猜中即可替学生收卷/终止，仅限隔离排障"
+        );
     }
     if roster_len > 0 && app.roster.is_empty() {
         println!(
@@ -1228,14 +1272,21 @@ fn login(app: &App, req: &Request) -> Response {
     match unlocked {
         Ok((token, mut student)) => {
             // 断线重连：从磁盘恢复已保存答案与交卷状态。
-            if let Some((answers, submitted, exported)) =
-                app.load_state(student_id, student.session_id)
-            {
-                student.answers = answers;
-                student.submitted = submitted;
-                student.exported = exported;
+            if let Some(restored) = app.load_state(student_id, student.session_id) {
+                student.answers = restored.answers;
+                student.submitted = restored.submitted;
+                student.exported = restored.exported;
+                // 封存时刻也恢复：监考页重启后仍能显示「何时交的」。
+                student.submitted_at = restored.submitted_at;
             }
             let mut state = app.lock_state();
+            // **权威**的封禁检查：上面那次是为了「不消耗限速额度」的快速失败，但它与这里
+            // 之间隔着限速与 KDF（几十毫秒）。监考恰好在这个窗口点「终止」的话，那次检查
+            // 会放一个已被终止的学生进来——所以必须在这段锁里再查一次（同一段锁里写 token，
+            // 中间没有可乘之机）。
+            if let Some(entry) = state.blocked.get(&student_id) {
+                return Response::error(403, format!("已被监考终止作答：{}", entry.reason));
+            }
             // 首次登录时刻只记一次：重登（断线重连、被踢后再登录）不刷新，
             // 否则监考页的「登录时间」会随着每一次刷新往后跳。
             let first = *state
@@ -1622,6 +1673,7 @@ fn save_answer(app: &App, req: &Request) -> Response {
         &answers,
         false,
         None,
+        0,
         false,
     ) {
         Ok(PersistOutcome::Written) => Response::json(200, json!({"ok": true})),
@@ -1643,43 +1695,47 @@ fn submit(app: &App, req: &Request) -> Response {
         return Response::error(401, "未登录");
     };
 
-    // 第一段（持锁）：判重 + 抢占 + 克隆快照。
+    // 第一段（持锁）：判重 + 抢占 + 克隆快照。**锁内不做解密/写盘**。
     //
-    // 交卷是全场最容易撞车的一刻（下课铃一响所有人一起点），所以这里和自动收卷一样
-    // 把「加密 + 写盘」放到锁外：否则 50 个人同时交卷时，第一个人加密答题卡的几十毫秒里
-    // 其余 49 个请求全堵在锁上，页面表现为「点了没反应」。
-    let snapshot = {
+    // 交卷是全场最容易撞车的一刻（下课铃一响所有人一起点），所以「校验已有答题卡 +
+    // 加密 + 写盘」全部放到锁外：否则 50 个人同时交卷时，第一个人解密/加密答题卡的
+    // 几十毫秒里其余 49 个请求全堵在锁上，页面表现为「点了没反应」。
+    // 注意：**不能**写成 `match claim_for_export(&mut app.lock_state(), …)`——
+    // match 的临时 guard 会活到整个 match 结束，下面「卡坏了要重写」那条分支再取
+    // `lock_state()` 就会自己锁死自己（Mutex 不可重入）。先在一个块里取完、把锁放掉。
+    let claim = {
         let mut state = app.lock_state();
-        let Some(st) = state.students.get_mut(&token) else {
-            return Response::error(401, "登录已失效");
-        };
-        if st.submitted {
-            if let Some(name) = st.exported.clone() {
-                // 不能只看「文件存在」：断电可能留下半截卡，那样学生会永远交不了卷。
-                if is_valid_sheet(app, &app.answers_dir.join(&name)) {
+        claim_for_export(&mut state, &token)
+    };
+    let snapshot = match claim {
+        SubmitClaim::Snapshot(snapshot) => snapshot,
+        SubmitClaim::Gone => return Response::error(401, "登录已失效"),
+        // `submitted=true` 但还没有 `exported`：后台 sweep 正在封存（它先置位、再写盘）。
+        // 这时返回 200 会让前端显示「已交卷」，而那一刻卡还没落盘；若 sweep 随后失败
+        // 还会回滚状态。返回 503 让前端提示「正在封存，请稍候」并重试。
+        SubmitClaim::Busy => return Response::error(503, "正在封存答题卡，请稍候"),
+        SubmitClaim::Already(name) => {
+            // 不能只看「文件存在」：断电可能留下半截卡，那样学生会永远交不了卷。
+            if is_valid_sheet(app, &app.answers_dir.join(&name)) {
+                return Response::json(200, json!({"ok": true, "already": true, "file": name}))
+                    .with_cookie(post_submit_cookie(app, &token));
+            }
+            // 状态说已交卷，但答题卡文件不见了/坏了（被手工删掉、盘符换了、目录被清）。
+            // 退回去重写一份：学生没有卡比重复写一份严重得多。
+            let retry = {
+                let mut state = app.lock_state();
+                reset_stale_submit(&mut state, &token, &name);
+                claim_for_export(&mut state, &token)
+            };
+            match retry {
+                SubmitClaim::Snapshot(snapshot) => snapshot,
+                SubmitClaim::Already(name) => {
                     return Response::json(200, json!({"ok": true, "already": true, "file": name}))
                         .with_cookie(post_submit_cookie(app, &token));
                 }
-                // 状态说已交卷，但答题卡文件不见了（被手工删掉、盘符换了、目录被清）。
-                // 退回去重写一份：学生没有卡比重复写一份严重得多。
-                st.exported = None;
-                st.submitted = false;
-            } else {
-                // `submitted=true` 但还没有 `exported`：后台 sweep 正在封存（它先置位、
-                // 再写盘）。这时返回 200 会让前端显示「已交卷」，而那一刻卡还没落盘；
-                // 若 sweep 随后失败还会回滚状态。返回 503 让前端提示「正在封存，请稍候」并重试。
-                return Response::error(503, "正在封存答题卡，请稍候");
+                SubmitClaim::Busy => return Response::error(503, "正在封存答题卡，请稍候"),
+                SubmitClaim::Gone => return Response::error(401, "登录已失效"),
             }
-        }
-        // 抢占：先把 submitted 置位，避免与自动收卷同时冻结（会写出两份同名校验一致的
-        // .eea，事件日志也会重复）。失败时回滚，见第三段。
-        st.submitted = true;
-        FreezeSnapshot {
-            token: token.clone(),
-            student_id: st.student_id,
-            session_id: st.session_id,
-            paper: st.paper.clone(),
-            answers: st.answers.clone(),
         }
     };
 
@@ -1808,6 +1864,7 @@ fn seal_and_export(
         answers,
         true,
         Some(&name),
+        now,
         true,
     )
     .map_err(|e| format!("保存状态失败：{e}"))?;
@@ -1823,6 +1880,63 @@ enum PersistOutcome {
     Written,
     /// 期间已被交卷抢占：放弃这次「未交卷」快照。
     SkippedSubmitted,
+}
+
+/// 从状态文件恢复出来的作答状态。
+struct RestoredState {
+    answers: BTreeMap<String, String>,
+    submitted: bool,
+    exported: Option<String>,
+    /// 封存时刻（旧版本文件里没有这个字段 → 0，页面显示「—」）。
+    submitted_at: u64,
+}
+
+/// 交卷的第一段（持锁）：判重 + 抢占。**不做任何磁盘/解密操作**。
+enum SubmitClaim {
+    /// 抢到了「封存中」，快照可以拿到锁外去做密封。
+    Snapshot(FreezeSnapshot),
+    /// 之前已交卷，文件名待校验（校验在锁外做）。
+    Already(String),
+    /// 已被别的路径（自动收卷）置位但还没落盘。
+    Busy,
+    /// 会话已经不在了（被重新登录顶掉）。
+    Gone,
+}
+
+fn claim_for_export(state: &mut State, token: &str) -> SubmitClaim {
+    let Some(student) = state.students.get_mut(token) else {
+        return SubmitClaim::Gone;
+    };
+    if student.submitted {
+        return match student.exported.clone() {
+            Some(name) => SubmitClaim::Already(name),
+            None => SubmitClaim::Busy,
+        };
+    }
+    // 抢占：先把 submitted 置位，避免与自动收卷同时冻结（会写出两份同名校验一致的
+    // .eea，事件日志也会重复）。失败时回滚，见第三段。
+    student.submitted = true;
+    SubmitClaim::Snapshot(FreezeSnapshot {
+        token: token.to_string(),
+        student_id: student.student_id,
+        session_id: student.session_id,
+        paper: student.paper.clone(),
+        answers: student.answers.clone(),
+    })
+}
+
+/// 把「状态说已交卷、但卡坏了」的学生退回可交卷状态。返回是否真的退回了。
+fn reset_stale_submit(state: &mut State, token: &str, name: &str) -> bool {
+    let Some(student) = state.students.get_mut(token) else {
+        return false;
+    };
+    if student.submitted && student.exported.as_deref() == Some(name) {
+        student.exported = None;
+        student.submitted = false;
+        true
+    } else {
+        false
+    }
 }
 
 /// 待冻结学生的数据快照（交卷接口与自动收卷共用）。
@@ -1844,11 +1958,7 @@ impl App {
             .join(format!("{student_id}-{session_id}.json"))
     }
 
-    fn load_state(
-        &self,
-        student_id: u64,
-        session_id: u32,
-    ) -> Option<(BTreeMap<String, String>, bool, Option<String>)> {
+    fn load_state(&self, student_id: u64, session_id: u32) -> Option<RestoredState> {
         let raw = std::fs::read(self.state_path(student_id, session_id)).ok()?;
         let plain = crypto::decrypt(&self.state_key, &raw, b"web-state").ok()?;
         let v: Value = serde_json::from_slice(&plain).ok()?;
@@ -1863,7 +1973,14 @@ impl App {
             .get("exported")
             .and_then(Value::as_str)
             .map(str::to_string);
-        Some((answers, submitted, exported))
+        // 旧版本的状态文件没有这个字段 → 0（页面显示「—」），不影响任何判定。
+        let submitted_at = v.get("submitted_at").and_then(Value::as_u64).unwrap_or(0);
+        Some(RestoredState {
+            answers,
+            submitted,
+            exported,
+            submitted_at,
+        })
     }
 
     /// 串行化写状态：先拿写锁，再按需短复查内存里的 `submitted`。
@@ -1880,6 +1997,7 @@ impl App {
         answers: &BTreeMap<String, String>,
         submitted: bool,
         exported: Option<&str>,
+        submitted_at: u64,
         durable: bool,
     ) -> std::io::Result<PersistOutcome> {
         // 只锁「这个学生」的写盘：50 人同时交卷时，durable fsync 不会把别人的保存排在后面。
@@ -1898,7 +2016,13 @@ impl App {
             }
         }
         self.write_state(
-            student_id, session_id, answers, submitted, exported, durable,
+            student_id,
+            session_id,
+            answers,
+            submitted,
+            exported,
+            submitted_at,
+            durable,
         )?;
         Ok(PersistOutcome::Written)
     }
@@ -1925,6 +2049,7 @@ impl App {
     ///
     /// `durable`：只有交卷（含自动收卷）需要 `fsync`——那一份写不下去就等于学生丢卡；
     /// 高频的「保存一题」用 `false`，否则每 600 ms 一次 fsync 会把教师机磁盘打满。
+    #[allow(clippy::too_many_arguments)]
     fn write_state(
         &self,
         student_id: u64,
@@ -1932,6 +2057,7 @@ impl App {
         answers: &BTreeMap<String, String>,
         submitted: bool,
         exported: Option<&str>,
+        submitted_at: u64,
         durable: bool,
     ) -> std::io::Result<()> {
         let payload = json!({
@@ -1940,6 +2066,8 @@ impl App {
             "answers": answers,
             "submitted": submitted,
             "exported": exported,
+            // 封存时刻落盘：监考页重启后仍能回答「这个人什么时候交的」。
+            "submitted_at": if submitted_at == 0 { Value::Null } else { json!(submitted_at) },
         });
         let path = self.state_path(student_id, session_id);
         // 序号让并发写的临时名互不相同（历史上两个写者共用一个 `.tmp`，

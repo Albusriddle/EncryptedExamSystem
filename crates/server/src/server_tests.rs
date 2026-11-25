@@ -114,7 +114,13 @@ impl Fixture {
             secure_cookies: false,
             monitor_token: "a".repeat(64),
             monitor_write_mode: monitor::MonitorWriteMode::Allow,
+            // 测试里默认关掉写冷却：不然同一个用例里连着两次写操作会互相 429。
+            // 单独有一条用例把它调回 1 来验证限速本身。
+            monitor_write_cooldown_secs: 0,
+            monitor_last_write: Mutex::new(None),
+            monitor_weak_token: false,
             roster: HashSet::new(),
+            roster_known: false,
             roster_len: 0,
         });
 
@@ -158,7 +164,11 @@ impl Fixture {
             secure_cookies: old.secure_cookies,
             monitor_token: old.monitor_token.clone(),
             monitor_write_mode: old.monitor_write_mode,
+            monitor_write_cooldown_secs: old.monitor_write_cooldown_secs,
+            monitor_last_write: Mutex::new(None),
+            monitor_weak_token: old.monitor_weak_token,
             roster: old.roster.clone(),
+            roster_known: old.roster_known,
             roster_len: old.roster_len,
         });
     }
@@ -278,6 +288,7 @@ impl Fixture {
         let app = Arc::get_mut(&mut self.app).expect("换名单时不应有其它 Arc 持有者");
         app.roster = ids.iter().copied().collect();
         app.roster_len = ids.len();
+        app.roster_known = true;
     }
 
     /// 切换监考写操作开关。
@@ -1456,6 +1467,7 @@ fn stale_snapshot_cannot_overwrite_submitted_state() {
             &answers,
             false,
             None,
+            0,
             true,
         )
         .expect("写盘不应报错");
@@ -1465,12 +1477,12 @@ fn stale_snapshot_cannot_overwrite_submitted_state() {
         "交卷后旧快照必须被丢弃"
     );
 
-    let (_, submitted, exported) = f
+    let restored = f
         .app
         .load_state(STUDENT, SESSION_ID)
         .expect("状态文件应存在");
-    assert!(submitted, "磁盘状态必须还是已交卷");
-    assert!(exported.is_some(), "导出的文件名必须在");
+    assert!(restored.submitted, "磁盘状态必须还是已交卷");
+    assert!(restored.exported.is_some(), "导出的文件名必须在");
 }
 
 /// 「已交卷」的幂等分支要校验卡文件完整性，不能只看文件是否存在。
@@ -1714,12 +1726,12 @@ fn concurrent_saves_and_a_submit_leave_a_submitted_state() {
         });
     });
 
-    let (_, submitted, exported) = f
+    let restored = f
         .app
         .load_state(STUDENT, SESSION_ID)
         .expect("状态文件应存在");
-    assert!(submitted, "并发之后磁盘状态必须仍是已交卷");
-    let name = exported.expect("必须记录了导出的文件名");
+    assert!(restored.submitted, "并发之后磁盘状态必须仍是已交卷");
+    let name = restored.exported.expect("必须记录了导出的文件名");
     assert!(
         is_valid_sheet(&f.app, &f.app.answers_dir.join(&name)),
         "并发之后答题卡必须仍可打开"
@@ -2645,8 +2657,8 @@ fn monitor_page_and_assets_are_no_store() {
 fn monitor_token_file_is_generated_and_reused() {
     let dir = test_dir("monitor-token");
     std::fs::create_dir_all(&dir).expect("建目录");
-    let first = monitor::load_or_generate_token(&dir, None);
-    let second = monitor::load_or_generate_token(&dir, None);
+    let first = monitor::load_or_generate_token(&dir, None, false).expect("生成令牌");
+    let second = monitor::load_or_generate_token(&dir, None, false).expect("复用令牌");
     assert_eq!(first, second, "重启后应复用同一个令牌（书签才有效）");
     assert_eq!(first.len(), 64, "令牌应是 32 字节 hex");
     assert!(first.bytes().all(|b| b.is_ascii_hexdigit()));
@@ -2671,7 +2683,7 @@ fn monitor_token_override_and_exact_match() {
     std::fs::create_dir_all(&dir).expect("建目录");
     let custom = "f".repeat(64);
     assert_eq!(
-        monitor::load_or_generate_token(&dir, Some(&custom)),
+        monitor::load_or_generate_token(&dir, Some(&custom), false).expect("命令行覆盖"),
         custom,
         "命令行覆盖应优先"
     );
@@ -2952,4 +2964,107 @@ fn monitor_collect_unknown_student_is_404() {
     let fx = Fixture::new("monitor-collect-unknown");
     let resp = fx.monitor_post("/api/monitor/collect", json!({"student_id": 999999}));
     assert_status(&resp, 404, "没有会话的学号应 404");
+}
+
+// ---------------------------------------------------------------- 监考页：安全面补充
+// 这五条是 v1.8.0 复审发现的门禁缺口：越权只测了「读」、没测「写」；GET 调写；弱令牌；
+// 令牌是否漏进响应体；收卷与学生交卷撞车时的语义。
+
+/// 学生 cookie 不能调**写**接口（v1.8.0 只测了读接口，写接口漏了越权用例）。
+#[test]
+fn monitor_write_rejects_student_cookie() {
+    let fx = Fixture::new("monitor-write-needs-token");
+    let token = fx.login_ok(STUDENT);
+    let mut req = post_json(
+        "/api/monitor/collect",
+        json!({"student_id": STUDENT}),
+        peer(1),
+    )
+    .csrf();
+    req.headers
+        .insert("cookie".into(), format!("ees_token={token}"));
+    assert_status(&fx.route(&req), 401, "学生 cookie 不能替学生收卷");
+}
+
+/// 写接口只认 POST：GET 落到 404（不存在的路由），不能被「顺手 GET 一下」触发。
+#[test]
+fn monitor_write_route_rejects_get() {
+    let fx = Fixture::new("monitor-write-get-404");
+    assert_status(
+        &fx.monitor_get("/api/monitor/collect"),
+        404,
+        "GET 写接口应当不存在",
+    );
+    assert_status(
+        &fx.monitor_get("/api/monitor/collect-all"),
+        404,
+        "GET 批量接口应当不存在",
+    );
+}
+
+/// 弱令牌必须拒绝：`--monitor-token abc` 这种在局域网里 1 秒就能枚举出来。
+#[test]
+fn weak_monitor_token_is_rejected_unless_allowed() {
+    let dir = test_dir("monitor-weak-token");
+    let err =
+        monitor::load_or_generate_token(&dir, Some("abc"), false).expect_err("弱令牌应被拒绝");
+    assert!(
+        format!("{err}").contains("monitor-token"),
+        "错误文案要点名参数：{err}"
+    );
+    // 逃生阀：显式允许时照用（横幅会红字警告）。
+    let allowed = monitor::load_or_generate_token(&dir, Some("abc"), true).expect("显式允许");
+    assert_eq!(allowed, "abc");
+    let _ = dir;
+}
+
+/// 令牌本身不能出现在任何响应体里（只在启动横幅与令牌文件里）。
+#[test]
+fn monitor_token_never_appears_in_responses() {
+    let fx = Fixture::new("monitor-token-not-leaked");
+    let _token = fx.login_ok(STUDENT);
+    let token = fx.app.monitor_token.clone();
+    for resp in [
+        fx.monitor_get("/api/monitor/stats"),
+        fx.monitor_post("/api/monitor/collect", json!({"student_id": STUDENT})),
+        fx.monitor_get("/monitor"),
+    ] {
+        let body = String::from_utf8_lossy(&resp.body).to_string();
+        assert!(!body.contains(&token), "响应体里出现了监考令牌明文");
+    }
+}
+
+/// 收卷与学生交卷撞车：两种顺序都只产生**一份**答题卡，后来的一方拿到 `already`。
+#[test]
+fn monitor_collect_and_student_submit_do_not_double_write() {
+    // 顺序 A：学生先交卷，监考再点收卷 → 监考拿到 already，不重复写盘。
+    let fx = Fixture::new("monitor-vs-submit-student-first");
+    let token = fx.login_ok(STUDENT);
+    assert_status(&fx.submit(&token), 200, "学生交卷应成功");
+    let resp = fx.monitor_post("/api/monitor/collect", json!({"student_id": STUDENT}));
+    assert_status(&resp, 200, "已封存时监考收卷应为 200");
+    let body = String::from_utf8_lossy(&resp.body).to_string();
+    assert!(body.contains("already"), "应回报 already：{body}");
+    assert_eq!(eea_count(&fx.app.answers_dir), 1, "只应有一份答题卡");
+
+    // 顺序 B：监考先收卷，学生再点交卷 → 学生拿到 already，同样只有一份。
+    drop(fx);
+    let fx = Fixture::new("monitor-vs-submit-monitor-first");
+    let token = fx.login_ok(STUDENT);
+    assert_status(
+        &fx.monitor_post("/api/monitor/collect", json!({"student_id": STUDENT})),
+        200,
+        "监考收卷应成功",
+    );
+    assert_status(&fx.submit(&token), 200, "之后学生交卷应返回已交卷（200）");
+    assert_eq!(eea_count(&fx.app.answers_dir), 1, "只应有一份答题卡");
+}
+
+/// 答题卡目录里的 `.eea` 个数（撞车用例用它断言「只写一份」）。
+fn eea_count(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .expect("读答题卡目录")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".eea"))
+        .count()
 }
