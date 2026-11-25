@@ -4,7 +4,7 @@
 >
 > 本系统的定位是**「防误操作 + 现场监考」**，不是密码学意义上的强防作弊系统。防什么、不防什么，见 [安全边界与威胁模型](docs/安全边界与威胁模型.md)；已经明确接受、且**没有**修复的风险，见 [风险接受记录](docs/风险接受记录.md)。
 
-当前版本：**1.7.0**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
+当前版本：**1.7.1**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
 
 | 组件 | 技术形态 | 职责 |
 |---|---|---|
@@ -211,7 +211,7 @@ crates/builder/      exam-builder：keygen / build / verify / verify-answer-shee
 crates/client/       学生端：GUI（egui）、解锁流程、答题卡、代码编辑器、Markdown 渲染
 crates/server/       exam-server：内置 HTTP/1.1 + 自签 TLS 的网页作答服务端
                      （登录 / 取卷 / 每次保存即落盘 / 交卷 / 自动收卷）
-crates/server/src/   main / tls / clock / secure_fs / index.html
+crates/server/src/   main / tls（mod / material / check / testutil）/ clock / secure_fs / index.html
 crates/server/assets/ app.js / app.css / codemirror.*（静态资源，内嵌进二进制）
 admin/app/core/      Qt-free 核心逻辑：models / state / grading / attendance / audit /
                      receipt / secure / bank_import / images / difficulty
@@ -231,18 +231,28 @@ worker/              Cloudflare Worker 时间服务（**目录为空，未实现
 
 ---
 
-## 8. 测试与验证基线（v1.7.0）
+## 8. 测试与验证基线（v1.7.1）
 
 | 项 | 基线 |
 |---|---|
-| Rust | 371 个 `#[test]`（Windows）/ 369（Linux）；差异来自 `#[cfg(windows)]` / `#[cfg(not(windows))]` 门控 |
-| Python | 453 passed + 1 skipped（收集 454，含参数化展开） |
+| Rust | 372 个 `#[test]`（Windows）/ 370（Linux）；差异来自 `#[cfg(windows)]` / `#[cfg(not(windows))]` 门控 |
+| Python | 461 passed + 1 skipped（收集 462，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 17 项（非 `--full`） |
 | CI | 8 个 job：`rust` / `python` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `tools-scripts` / `web-smoke` |
 
 > 数字会随提交变化，**以 CI 与脚本输出为准**。发布预检的项数看脚本最后一行
 > 「✓ 发布预检通过（N 项）」；测试数量看 `cargo test` / `pytest` 的统计行。
+
+### 已知未做（能力边界，不是待办遗漏）
+
+| 项 | 现状与原因 |
+|---|---|
+| 真机 30–50 台演练 | 脚本能力在（`drill-web.sh` 无人数上限，CI 只跑 12 人）；**真机规模需要现场组织**，历来由使用方在开考前自行演练 |
+| 浏览器本地草稿（IndexedDB） | 未做：服务端是唯一权威副本，现在只靠 `keepalive` 补「关页前最后 0–600 ms」；断网期间未同步的那几题会丢 |
+| 在线监控页 | 未做：服务端没有状态查询接口（监控靠看服务端日志与答题卡目录） |
+| 静态资源 keep-alive | 未做：每个资源单独建连（一次页面加载约 6–7 次 TLS 握手）。局域网 TLS 1.3 只需 1 RTT，收益与「改连接模型」的风险不匹配；**第三方 vendored 资源（`codemirror` / `clike` / `python`）已允许缓存 1 小时**，刷新不再重下 174 KB |
+| 外部证书精确到期日 | 未做：`rustls` 不暴露 `notAfter`，自检只报「是否过期」；要打印日期得引 X.509 解析依赖，不划算 |
 
 发布包结构（`ExamAdmin-<版本>` 解压后）：
 

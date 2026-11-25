@@ -6,11 +6,74 @@
 - 命令行：`exam-builder`（打包、校验、导出 PIN、考后看原卷、校验答题卡）
 - 学生端：`exam-client`（单 exe，双击运行，按场次与网络时间解锁）
 
-> 当前版本 **1.7.0**。Release 正文由 `scripts/release_body.py` 从本文件提取
+> 当前版本 **1.7.1**。Release 正文由 `scripts/release_body.py` 从本文件提取
 > **当前版本那一节**，因此 `## 更新摘要（vX.Y.Z）` 小节必须存在且唯一。
 >
-> **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 66 个版本，最新在前）；
+> **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 67 个版本，最新在前）；
 > 更早版本（v0.13.2 及以前）未逐条整理，需要时查 `git tag` 与 `git log`。
+
+## 更新摘要（v1.7.1）
+
+本版修掉 v1.7.0 复审发现的 **3 个 P2 + 约 24 个 P3**，不新增功能。
+
+### P2（3 条）
+
+- **「`main.rs` 零改动」是假声明**（同类事故第三次）：拆分提交其实改了 2 行
+  （`let check: tls::CertCheck = …` 显式标注类型，用于删掉临时加的 `#[allow(unused_imports)]`），
+  而同一张表下一行已经这么写了——两处口径改成事实；
+- **复审临时目录落进仓库**：`admin/rev6-*/` 里 20 MB 测试夹具，`.gitignore` 只按扩展名挡，
+  `git add -A` 会带进 6 个文件。已删除，并加 `admin/rev*-*/` 规则 + 「临时产物只许写
+  `target/` 或 `.tmp-sess`」的注释；
+- **「关闭 HTTPS → 证书组禁用」没有真实接线用例**：原用例是「手动摆出终态再断言」。
+  新增用例走真实用户动作（`chk_tls.click()` + 确认「是」），断言证书组/来源下拉被禁用、
+  argv 回到 `--tls off` 且四个证书参数一个不出现。删掉 `_on_tls_clicked` 里那三行
+  `_sync_cert_state()` 现在**必然变红**（已用探针验证）。
+
+### 静态资源缓存分级（唯一性能改动）
+
+第三方 vendored 资源（`codemirror.js/css`、`clike.js`、`python.js`）改 `public, max-age=3600`；
+我们自己 `app.js`/`app.css`、页面与接口仍 `no-store`（随版本变、承载协议，不能缓存）。
+原来一律 `no-store`，导致 174 KB 的 `codemirror.min.js` **每次刷新都重下**。
+keep-alive 明确不做（局域网 TLS1.3 只需 1 RTT，收益与改动风险不匹配），
+一次页面加载仍是约 7 次握手。
+
+### 管理端「自己的证书」的边角（8 条）
+
+`pem_kind` 改为**正则判定 + 只读前 64 KiB**（原来整文件读进内存；且「证书里注释含
+`PRIVATE KEY`」会被误判成 `both`）；**OpenSSH 格式与被口令保护的私钥现在直接拒绝**并给转换命令
+（服务端 100% 不认）；把**目录**选进证书框时给专门文案（原来误报「文件被移动或删除」）；
+删掉 `_sync_cert_state()` 里那段被 CI 打回的旧思路注释；服务端自检拒绝启动时状态行改成
+「启动失败（退出码 N），见下方日志」（原来只显示「已停止」）；补 8 条用例
+（真实接线、浏览取消、默认自签 argv、`pem_kind` 四种新输入、只读头部、启动失败状态）。
+
+### 控件守护与门禁
+
+`test_ui_widgets.py` 的 AST 兜底加入 `QCheckBox`/`QRadioButton`——AGENTS §7.6 的
+「勾选框必须走 `make_checkbox`」此前只能靠人眼；`preflight-release.sh` 的节号重排为连续
+1–10（`6b`/`6c` 各自降为独立节，17 项计数不变），CI 与 AGENTS 里对旧节号的引用同步更新。
+
+### `tls` 拆分留下的尾巴（6 条）
+
+修好失效的 intra-doc link（`material.rs` 里指向 `check_external`）；`mod.rs` 的注释按事实重写
+（`fingerprint_hex` 已不在重导出里、`main.rs` 现在就写着 `tls::CertCheck`）并补「自检见
+`check.rs`」；`fingerprint_hex` 收窄为模块私有；`TlsMaterial` 移到 `material.rs`（`mod.rs` 只剩
+文档 + 重导出）；删掉 16 行与 `TestDir`(Drop) 重复的 `remove_dir_all`；`cargo doc` 警告 3 → **0**。
+
+### 文档（8 条 + 1 张表）
+
+旧 `tls.rs` 行数 1296 → **1381**；对话框高度改成**最终实现**（日志区最小 120 px + 构造时钉死下界），
+并注明「Windows CI 两次红」；v1.7.0 小节补上「发布前 CI 暴露并修掉的两处」；教师手册第 2 步补
+「HTTPS / 证书来源」两行、危险开关清单补「关闭 HTTPS」、「再选三个文件」措辞改准；
+README 目录树把 `tls` 标成目录；历史轮次里指向 `tls.rs` 的路径加「v1.7.0 起拆为 `tls/`」；
+README 新增「**已知未做（能力边界）**」表（真机 30–50 台演练 / 浏览器本地草稿 / 在线监控页 /
+keep-alive / 精确到期日，各写原因）。
+
+### 验证
+
+- Rust **372**（Windows）/ **370**（Linux）；pytest **461 passed + 1 skipped**（收集 462，新增 9 条）；
+  `cargo doc` 警告 **0**；预检 **17 项**（节号 1–10）；`verify-embed` 17 项；
+  `smoke-web` / `smoke-tls-cert` / `drill --students 6` 全过；CI 8/8；
+- 缓存头实测：`/assets/codemirror.js` → `public, max-age=3600`；`/assets/app.js`、`/` → `no-store`。
 
 ## 更新摘要（v1.7.0）
 
@@ -36,12 +99,15 @@ X.509 解析，也不会把「看起来对」的证书当成「能用」。
   即使将来有人绕过它拼参数也不会带出残留值）；
 - 取消「使用 HTTPS」时证书组**禁用**（不是隐藏）——老师能看到它为什么不生效；
 - 运行中一律禁用（改动需重启服务生效，与其它参数一致）；
-- 对话框高度改为按内容量 `sizeHint()` 自适应（不写死像素：150% DPI 下同一像素值对应的
-  逻辑高度更小，会把日志区压到看不见）。
+- 日志区与窗口下界：日志区 `setMinimumHeight(120)`；窗口下界在构造时按「证书区可见」的状态
+  `setMinimumSize(720, _min_height)` **钉死**，`_sync_cert_state()` 只负责把矮于下界的窗口撑上去。
+  **这条是 Windows CI 两次红逼出来的**：证书区展开后日志区被压到 70 px，而老师排查
+  「服务端起不来」全靠那块日志。不写死像素——150% DPI 下同一像素值对应的逻辑高度更小，
+  固定值会被压没。
 
 ### `tls` 模块拆分（零行为变化）
 
-`crates/server/src/tls.rs`（1296 行）拆成目录：
+`crates/server/src/tls.rs`（1381 行）拆成目录：
 
 | 文件 | 内容 |
 |---|---|
@@ -51,8 +117,9 @@ X.509 解析，也不会把「看起来对」的证书当成「能用」。
 | `tls/testutil.rs`（`#[cfg(test)]`） | `TestDir`（Drop 清理）、`make_cert` / `make_ca` / `server_auth` |
 
 只做「移动 + 最小可见性调整」：`crate::tls::{generate, load, load_or_generate, check_external,
-normalize_host, CertCheck, TlsMaterial}` 路径全部不变，**`main.rs` 与 `server_tests.rs` 一行未动**，
-`cargo test -p server` 仍是 **97 passed**。
+normalize_host, CertCheck, TlsMaterial}` 路径全部不变，**`server_tests.rs` 零改动**；
+`main.rs` 只改 1 处（`let check: tls::CertCheck = …` 显式标注返回类型，用于去掉拆分时临时加的
+`#[allow(unused_imports)]`），`cargo test -p server` 仍是 **97 passed**。
 
 ### 验证
 
@@ -61,6 +128,8 @@ normalize_host, CertCheck, TlsMaterial}` 路径全部不变，**`main.rs` 与 `s
   `smoke-tls-cert`（6 条）、`drill --students 6` 全过；CI 8/8；
 - 管理端端到端接线实测：`证书来源=自己的证书 + 严格自检` → `QProcess.start` 收到
   `--tls-cert/--tls-key/--tls-check strict`；只填证书不填私钥 → 弹警告且**不启动**。
+- **发布前 CI 暴露并修掉两处**：Windows 上证书区展开后日志区被压扁（`435bdfd`）、
+  测试夹具里的假 PEM 头触发 secret-scan 误报（`73e2e9a`，改成拼接构造 PEM 头）。
 
 ## 更新摘要（v1.6.1）
 
