@@ -7,6 +7,16 @@
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# 二进制定位：CI 的 release-preflight 用 `cargo build --release --target <triple>` 构建，
+# 产物在 `target/<triple>/release`；本地是 `target/release`。两处都认。
+if [ -z "${BIN:-}" ]; then
+  for cand in "$ROOT/target/release" "$ROOT"/target/*/release; do
+    if [ -x "$cand/exam-server" ] || [ -x "$cand/exam-server.exe" ]; then
+      BIN=$cand
+      break
+    fi
+  done
+fi
 BIN=${BIN:-$ROOT/target/release}
 EXE=""
 [ -f "$BIN/exam-server.exe" ] && EXE=".exe"
