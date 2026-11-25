@@ -253,13 +253,19 @@ class WebExamDialog(QDialog):
 
         # 先按默认（自签）把证书区域收起来；此后由 `_sync_cert_state()` 统一维护。
         self._inputs_editable = True
+        # 先给一个兜底下界（第一轮 `_sync_cert_state()` 会用到它），量完真实值后覆盖。
+        self._min_height = 640
         self._sync_cert_state()
         # 高度按**内容**自适应，不用固定像素：v1.7.0 多了「证书来源」+ 三行文件选择，
         # 而固定像素在 150% DPI 的机器上会被折算成更小的逻辑高度，把日志区挤没
         # （老师排查启动失败全靠那块日志）。这里先量一次「证书区域也可见」时的高度。
         self.cert_box.show()
+        # 量两样东西：`sizeHint`（舒适高度）与「布局最小需要」（窗口不能再矮于它）。
+        # 都必须在「证书区可见」时量——否则切到「自己的证书」后窗口会被内容裁掉。
         hint = self.sizeHint().height()
+        self._min_height = max(640, self.minimumSizeHint().height())
         self._sync_cert_state()  # 自签时把它收回去
+        self.setMinimumSize(720, self._min_height)
         self.resize(720, max(640, hint))
 
     # -- 证书区域 ---------------------------------------------------------
@@ -311,13 +317,11 @@ class WebExamDialog(QDialog):
         # 证书区一显隐，布局需要的空间就变了：把「最小高度」跟着更新，窗口被撑到够用为止。
         # 只用 resize() 不行——Windows 上字体/DPI 不同，show() 之后 sizeHint 还会再长一截，
         # 结果窗口比布局矮，日志区（排查启动失败全靠它）被压扁。
-        need = self.minimumSizeHint().height()
-        self.setMinimumHeight(need)
-        # `setMinimumHeight` 只是设了下界，Qt 不会立刻把现有窗口撑大（要等下一次布局），
-        # 所以这里主动 resize 到「sizeHint / 最小需要 / 640」三者的最大者。
-        target = max(self.sizeHint().height(), need, 640)
-        if self.height() < target:
-            self.resize(max(self.width(), 720), target)
+        # 下界在构造时就用「证书区可见」的状态钉好了（`self._min_height`）。这里不能按
+        # 「当前」minimumSizeHint 去改它：切换来源时布局还没激活，量到的是旧值，
+        # 会把下界改小、窗口反而被裁（Windows 上实测 642 < 696）。
+        if self.height() < self._min_height:
+            self.resize(max(self.width(), 720), self._min_height)
 
     def _tls_args(self) -> dict[str, object]:
         """把界面上的证书选择映射成 `web_command()` / `validate_inputs()` 的四个参数。
