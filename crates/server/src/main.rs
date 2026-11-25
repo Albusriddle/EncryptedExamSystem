@@ -122,7 +122,7 @@ struct Cli {
     /// TLS 模式：auto（默认，没证书就自动生成自签证书）/ off（明文，不推荐）
     #[arg(long, value_enum, default_value_t = TlsMode::Auto)]
     tls: TlsMode,
-    /// 已有证书（不给就自动生成到 <answers-dir>/tls/）
+    /// 已有证书（不给就自动生成到 `<answers-dir>/tls/`）
     #[arg(long)]
     tls_cert: Option<PathBuf>,
     /// 已有私钥
@@ -150,7 +150,7 @@ struct Cli {
     /// 答题卡输出目录（默认 ./answers）
     #[arg(long, default_value = "answers")]
     answers_dir: PathBuf,
-    /// 作答状态目录（默认 <answers-dir>/state）
+    /// 作答状态目录（默认 `<answers-dir>/state`）
     #[arg(long)]
     state_dir: Option<PathBuf>,
     /// 启动时校验网络时间：off / warn（默认，只告警）/ require（不通过拒绝启动）
@@ -249,11 +249,25 @@ struct Request {
     peer: IpAddr,
 }
 
+/// 默认缓存策略：不缓存。
+///
+/// 接口与页面都携带会话/协议状态；`app.js`/`app.css` 随版本变——缓存一份旧的可能让
+/// 「升级后行为不一致」这类问题极难排查（学生机器上跑着上个版本的脚本）。
+const CACHE_NO_STORE: &str = "no-store";
+
+/// 第三方 vendored 资源（CodeMirror 及其语言模式）的缓存策略。
+///
+/// 它们的内容由文件内容决定、不随本服务逻辑变，允许缓存 1 小时；否则一次页面加载要
+/// 重下 174 KB 的 `codemirror.min.js`，每次刷新都重来一遍。
+const CACHE_VENDORED: &str = "public, max-age=3600";
+
 struct Response {
     status: u16,
     content_type: &'static str,
     body: Vec<u8>,
     headers: Vec<(String, String)>,
+    /// 缓存策略见 `CACHE_NO_STORE` / `CACHE_VENDORED`。
+    cache_control: &'static str,
 }
 
 impl Response {
@@ -263,6 +277,7 @@ impl Response {
             content_type: "application/json; charset=utf-8",
             body: value.to_string().into_bytes(),
             headers: Vec::new(),
+            cache_control: CACHE_NO_STORE,
         }
     }
     fn error(status: u16, msg: impl Into<String>) -> Self {
@@ -274,6 +289,14 @@ impl Response {
             content_type,
             body: body.as_bytes().to_vec(),
             headers: Vec::new(),
+            cache_control: CACHE_NO_STORE,
+        }
+    }
+    /// 第三方 vendored 资源：允许缓存 1 小时（见 `CACHE_VENDORED`）。
+    fn vendored_asset(content_type: &'static str, body: &'static str) -> Self {
+        Self {
+            cache_control: CACHE_VENDORED,
+            ..Self::asset(content_type, body)
         }
     }
     fn html_owned(body: String) -> Self {
@@ -282,6 +305,7 @@ impl Response {
             content_type: "text/html; charset=utf-8",
             body: body.into_bytes(),
             headers: Vec::new(),
+            cache_control: CACHE_NO_STORE,
         }
     }
     fn with_cookie(mut self, cookie: String) -> Self {
@@ -534,7 +558,9 @@ fn main() -> Result<()> {
             None
         }
     };
-    let tls_material = match cli.tls {
+    // 显式标注类型：`TlsMaterial` 由 `tls` 模块 `pub use` 出来（保持 `crate::tls::TlsMaterial`
+    // 这个对外路径），不标注的话那个重导出在 bin crate 里无人具名引用，会触发 unused_imports。
+    let tls_material: Option<tls::TlsMaterial> = match cli.tls {
         TlsMode::Off => None,
         TlsMode::Auto => Some(match (&cli.tls_cert, &cli.tls_key) {
             // 老师给了自己的证书（例如用内网 CA 签的）：只加载，绝不覆盖。
@@ -1007,19 +1033,19 @@ fn route(app: &App, req: &Request) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../assets/app.js"),
         ),
-        ("GET", "/assets/codemirror.css") => Response::asset(
+        ("GET", "/assets/codemirror.css") => Response::vendored_asset(
             "text/css; charset=utf-8",
             include_str!("../assets/codemirror.min.css"),
         ),
-        ("GET", "/assets/codemirror.js") => Response::asset(
+        ("GET", "/assets/codemirror.js") => Response::vendored_asset(
             "text/javascript; charset=utf-8",
             include_str!("../assets/codemirror.min.js"),
         ),
-        ("GET", "/assets/clike.js") => Response::asset(
+        ("GET", "/assets/clike.js") => Response::vendored_asset(
             "text/javascript; charset=utf-8",
             include_str!("../assets/clike.min.js"),
         ),
-        ("GET", "/assets/python.js") => Response::asset(
+        ("GET", "/assets/python.js") => Response::vendored_asset(
             "text/javascript; charset=utf-8",
             include_str!("../assets/python.min.js"),
         ),
@@ -2131,7 +2157,7 @@ fn write_response(stream: &mut impl Write, resp: Response) -> Result<()> {
          Content-Type: {}\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
-         Cache-Control: no-store\r\n\
+         Cache-Control: {}\r\n\
          Content-Security-Policy: {}\r\n\
          X-Content-Type-Options: nosniff\r\n\
          X-Frame-Options: DENY\r\n\
@@ -2141,6 +2167,7 @@ fn write_response(stream: &mut impl Write, resp: Response) -> Result<()> {
         status_text(resp.status),
         resp.content_type,
         resp.body.len(),
+        resp.cache_control,
         CONTENT_SECURITY_POLICY
     );
     for (k, v) in &resp.headers {

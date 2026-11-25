@@ -2127,6 +2127,34 @@ fn every_response_carries_security_headers() {
     }
 }
 
+/// 静态资源的缓存要分级：第三方 vendored 资源可缓存，我们自己的 app.js/app.css 不行。
+///
+/// 为什么必须分级：`write_response` 原来对**所有**响应写 `Cache-Control: no-store`，
+/// 于是 174 KB 的 `codemirror.min.js` 每次刷新都要重下；而 `app.js`/`app.css` 随版本变，
+/// 缓存一份旧的在学生机器上跑，会让「升级后行为不一致」这类问题极难排查。
+#[test]
+fn vendored_assets_are_cacheable_but_our_own_scripts_are_not() {
+    let f = Fixture::new("cache-control");
+    let headers_of = |path: &str| {
+        let mut buf: Vec<u8> = Vec::new();
+        write_response(&mut buf, f.route(&get(path, peer(1)))).expect("写响应");
+        String::from_utf8_lossy(&buf).to_string()
+    };
+
+    let codemirror = headers_of("/assets/codemirror.js");
+    assert!(
+        codemirror.contains("Cache-Control: public, max-age=3600"),
+        "第三方静态资源应允许缓存 1 小时：\n{codemirror}"
+    );
+    for path in ["/assets/app.js", "/assets/app.css", "/"] {
+        let text = headers_of(path);
+        assert!(
+            text.contains("Cache-Control: no-store"),
+            "{path} 必须 no-store（随版本变或承载会话）：\n{text}"
+        );
+    }
+}
+
 /// 真走 `handle()` 的 TLS 链路：握手 → 取首页 → 200 且带 CSP。
 ///
 /// 之前只有 `serve()` 的用例，`ServerConnection::new` + `StreamOwned` 这段生产代码
