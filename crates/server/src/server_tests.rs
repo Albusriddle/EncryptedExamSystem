@@ -112,6 +112,10 @@ impl Fixture {
             // 单元测试直接调 route()，不经过监听层，所以默认是明文模式。
             tls: None,
             secure_cookies: false,
+            monitor_token: "a".repeat(64),
+            monitor_write_mode: monitor::MonitorWriteMode::Allow,
+            roster: HashSet::new(),
+            roster_len: 0,
         });
 
         Self {
@@ -152,6 +156,10 @@ impl Fixture {
             review: old.review,
             tls: old.tls.clone(),
             secure_cookies: old.secure_cookies,
+            monitor_token: old.monitor_token.clone(),
+            monitor_write_mode: old.monitor_write_mode,
+            roster: old.roster.clone(),
+            roster_len: old.roster_len,
         });
     }
 
@@ -221,6 +229,40 @@ impl Fixture {
         st.answers.insert(qid.to_string(), value.to_string());
     }
 
+    /// 往状态表里直接插一个学生（只给「批量收卷部分失败」这类需要在场多人的用例用）。
+    ///
+    /// 为什么不再登录一次：同学号是单会话（重新登录会顶掉旧 token），造不出
+    /// 「两个人同时在线」的场面；这里借用已有学生的卷面，复制出第二个学号。
+    fn insert_fake_student(&self, token: &str, student_id: u64) {
+        let now = self.app.now();
+        let mut state = self.app.lock_state();
+        let (paper, session_id) = {
+            let source = state
+                .students
+                .values()
+                .next()
+                .expect("先登录一个学生，借用他的卷面");
+            (source.paper.clone(), source.session_id)
+        };
+        state.students.insert(
+            token.to_string(),
+            Student {
+                student_id,
+                session_id,
+                paper,
+                answers: BTreeMap::new(),
+                submitted: false,
+                exported: None,
+                last_seen: now,
+                logged_in_at: now,
+                submitted_at: 0,
+            },
+        );
+        state
+            .tokens_by_student
+            .insert(student_id, token.to_string());
+    }
+
     fn state_path(&self) -> PathBuf {
         self.app
             .state_dir
@@ -229,6 +271,41 @@ impl Fixture {
 
     fn eea_files(&self) -> Vec<PathBuf> {
         files_with_ext(&self.app.answers_dir, "eea")
+    }
+
+    /// 设置名单（`--roster` 的等价物）。
+    fn set_roster(&mut self, ids: &[u64]) {
+        let app = Arc::get_mut(&mut self.app).expect("换名单时不应有其它 Arc 持有者");
+        app.roster = ids.iter().copied().collect();
+        app.roster_len = ids.len();
+    }
+
+    /// 切换监考写操作开关。
+    fn set_monitor_write_mode(&mut self, mode: monitor::MonitorWriteMode) {
+        let app = Arc::get_mut(&mut self.app).expect("换写模式时不应有其它 Arc 持有者");
+        app.monitor_write_mode = mode;
+    }
+
+    /// 带监考令牌的 GET。
+    fn monitor_get(&self, path: &str) -> Response {
+        let mut req = get(path, peer(1));
+        req.headers
+            .insert("x-monitor-token".into(), self.app.monitor_token.clone());
+        self.route(&req)
+    }
+
+    /// 带监考令牌 + CSRF 的 POST。
+    fn monitor_post(&self, path: &str, body: Value) -> Response {
+        let mut req = post_json(path, body, peer(1)).csrf();
+        req.headers
+            .insert("x-monitor-token".into(), self.app.monitor_token.clone());
+        self.route(&req)
+    }
+
+    fn monitor_stats(&self) -> Value {
+        let resp = self.monitor_get("/api/monitor/stats");
+        assert_status(&resp, 200, "带令牌取监考统计应成功");
+        json_body(&resp)
     }
 
     fn events(&self) -> Vec<Value> {
@@ -2431,4 +2508,448 @@ fn submit_during_sweep_returns_503() {
             .contains("封存"),
         "文案要说明正在封存"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 监考页（`/monitor`）
+// ---------------------------------------------------------------------------
+//
+// 这一组用例盯的是「监考最怕的三件事」：
+// 1) 令牌能从学生侧被绕过（学生 cookie 不该能读监考数据）；
+// 2) 收卷/终止把数据弄坏（必须复用 `seal_and_export`，产生的卡要能被 `answer_sheet::open` 读）；
+// 3) 误点「终止」把学生永久锁在门外（必须能解除，且答案不丢）。
+
+/// 无令牌 / 错令牌一律 401，不区分「没带」与「带错」。
+#[test]
+fn monitor_stats_requires_the_token() {
+    let fx = Fixture::new("monitor-auth");
+    let no_token = fx.route(&get("/api/monitor/stats", peer(1)));
+    assert_status(&no_token, 401, "没带令牌应 401");
+
+    let mut wrong = get("/api/monitor/stats", peer(1));
+    wrong
+        .headers
+        .insert("x-monitor-token".into(), "b".repeat(64));
+    assert_status(&fx.route(&wrong), 401, "令牌不对应 401");
+}
+
+/// 学生 cookie **不能**读监考数据：这是越权边界，必须有回归用例。
+#[test]
+fn monitor_stats_rejects_student_cookie() {
+    let fx = Fixture::new("monitor-cookie");
+    let token = fx.login_ok(STUDENT);
+    let resp = fx.route(&get("/api/monitor/stats", peer(1)).token(&token));
+    assert_status(&resp, 401, "学生 cookie 不能当监考令牌");
+}
+
+/// 名单里的人没登录也要列出来（监考最关心「谁还没进来」），并按学号升序。
+#[test]
+fn monitor_stats_lists_roster_and_states() {
+    let mut fx = Fixture::new("monitor-roster");
+    fx.set_roster(&[STUDENT, 2021002]);
+    let token = fx.login_ok(STUDENT);
+    let qid = fx.qids(&token)[0].clone();
+    assert_status(&fx.save(&token, &qid, "答案"), 200, "保存应成功");
+
+    let stats = fx.monitor_stats();
+    assert_eq!(stats["counts"]["roster"], 2, "名单 2 人");
+    assert_eq!(stats["counts"]["logged_in"], 1, "只登录了 1 人");
+    assert_eq!(stats["counts"]["not_logged_in"], 1, "还有 1 人没登录");
+    assert_eq!(stats["counts"]["online"], 1, "刚保存过，应算在线");
+
+    let rows = stats["students"].as_array().expect("students 应是数组");
+    assert_eq!(rows.len(), 2, "名单里的两人都要有行");
+    assert_eq!(rows[0]["id"], STUDENT, "按学号升序，2021001 在前");
+    assert_eq!(rows[0]["state"], "answering");
+    assert_eq!(rows[0]["answered"], 1, "已答 1 题");
+    assert!(rows[0]["total"].as_u64().unwrap_or(0) >= 3, "总题数应 >= 3");
+    assert_eq!(rows[1]["id"], 2021002);
+    assert_eq!(rows[1]["state"], "not_logged_in");
+}
+
+/// 「封存中」与「已交卷」必须是两个状态：前者意味着卡还没落盘，监考不能当成已完成。
+#[test]
+fn monitor_stats_distinguishes_sealing_from_submitted() {
+    let fx = Fixture::new("monitor-sealing");
+    let token = fx.login_ok(STUDENT);
+    // 直接摆出 sweep 的中间态：submitted=true 但 exported=None。
+    {
+        let mut state = fx.app.lock_state();
+        let st = state.students.get_mut(&token).expect("学生状态应存在");
+        st.submitted = true;
+        st.exported = None;
+    }
+    let stats = fx.monitor_stats();
+    assert_eq!(stats["counts"]["sealing"], 1, "应识别出 1 个封存中");
+    assert_eq!(stats["counts"]["submitted"], 1, "也算已交卷");
+    assert_eq!(stats["counts"]["exported"], 0, "但还没有卡");
+    assert_eq!(stats["students"][0]["state"], "sealing");
+
+    // 撤回「封存中」这个人为状态，才轮到学生自己交卷（否则 submit 按设计返回 503）。
+    {
+        let mut state = fx.app.lock_state();
+        let st = state.students.get_mut(&token).expect("学生状态应存在");
+        st.submitted = false;
+    }
+    assert_status(&fx.submit(&token), 200, "真正交卷应成功");
+    let stats = fx.monitor_stats();
+    assert_eq!(stats["counts"]["sealing"], 0);
+    assert_eq!(stats["counts"]["exported"], 1);
+    assert_eq!(stats["students"][0]["state"], "submitted");
+    assert!(
+        stats["students"][0]["submitted_at"].as_u64().unwrap_or(0) > 0,
+        "已封存应有封存时刻"
+    );
+}
+
+/// 统计接口**只给计数**：绝不能把答案带出来（否则监考页变成泄题面）。
+#[test]
+fn monitor_stats_never_leaks_answers() {
+    let fx = Fixture::new("monitor-noleak");
+    let token = fx.login_ok(STUDENT);
+    let qid = fx.qids(&token)[0].clone();
+    let secret = "这是学生的私密作答-donotleak";
+    assert_status(&fx.save(&token, &qid, secret), 200, "保存应成功");
+
+    let resp = fx.monitor_get("/api/monitor/stats");
+    let body = String::from_utf8_lossy(&resp.body).to_string();
+    assert!(!body.contains(secret), "监考统计里出现了答案内容：{body}");
+    assert!(!body.contains(&qid), "连题号都不该下发");
+}
+
+/// 监考页与它的两个静态资源都要能取到，且**不缓存**（脚本随版本变）。
+#[test]
+fn monitor_page_and_assets_are_no_store() {
+    let fx = Fixture::new("monitor-page");
+    let page = fx.route(&get("/monitor", peer(1)));
+    assert_status(&page, 200, "监考页应可访问");
+    assert_eq!(page.cache_control, "no-store", "页面不能缓存");
+    assert!(!page.body.is_empty(), "页面不应为空");
+
+    for path in ["/assets/monitor.js", "/assets/monitor.css"] {
+        let resp = fx.route(&get(path, peer(1)));
+        assert_status(&resp, 200, "静态资源应可访问");
+        assert_eq!(resp.cache_control, "no-store", "{path} 不能缓存");
+    }
+
+    // 安全响应头走 `write_response` 统一出口：这里顺带确认 CSP 也在页面上。
+    let mut buf: Vec<u8> = Vec::new();
+    write_response(&mut buf, page).expect("写响应");
+    let text = String::from_utf8_lossy(&buf).to_string();
+    assert!(text.contains("Content-Security-Policy:"), "缺 CSP");
+    assert!(text.contains("Cache-Control: no-store"), "缺 no-store");
+}
+
+/// 令牌文件：首次生成、之后复用、内容是 64 位 hex、（Unix）权限 0600。
+#[test]
+fn monitor_token_file_is_generated_and_reused() {
+    let dir = test_dir("monitor-token");
+    std::fs::create_dir_all(&dir).expect("建目录");
+    let first = monitor::load_or_generate_token(&dir, None);
+    let second = monitor::load_or_generate_token(&dir, None);
+    assert_eq!(first, second, "重启后应复用同一个令牌（书签才有效）");
+    assert_eq!(first.len(), 64, "令牌应是 32 字节 hex");
+    assert!(first.bytes().all(|b| b.is_ascii_hexdigit()));
+    let path = monitor::token_path(&dir);
+    assert!(path.is_file(), "令牌文件应落盘");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path)
+            .expect("读元数据")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "令牌文件应仅当前用户可读");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--monitor-token` 覆盖优先；比较必须是精确匹配（前缀不算）。
+#[test]
+fn monitor_token_override_and_exact_match() {
+    let dir = test_dir("monitor-override");
+    std::fs::create_dir_all(&dir).expect("建目录");
+    let custom = "f".repeat(64);
+    assert_eq!(
+        monitor::load_or_generate_token(&dir, Some(&custom)),
+        custom,
+        "命令行覆盖应优先"
+    );
+    assert!(monitor::token_matches(&custom, &custom));
+    assert!(
+        !monitor::token_matches(&custom, &custom[..32]),
+        "前缀不能通过"
+    );
+    assert!(!monitor::token_matches(&custom, &"e".repeat(64)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 「登录时间」只记首次：重登（断线重连）不刷新，否则监考页的时间会一直往后跳。
+#[test]
+fn monitor_logged_in_at_keeps_first_login() {
+    let fx = Fixture::new("monitor-login-time");
+    let _first = fx.login_ok(STUDENT);
+    let at1 = fx.monitor_stats()["students"][0]["logged_in_at"]
+        .as_u64()
+        .expect("应有登录时间");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let _second = fx.login_ok(STUDENT);
+    let at2 = fx.monitor_stats()["students"][0]["logged_in_at"]
+        .as_u64()
+        .expect("应有登录时间");
+    assert_eq!(at1, at2, "重登不应刷新首次登录时间");
+}
+
+/// 强制收卷：生成的卡必须能被 `answer_sheet::open` 读出（与学生交卷同一路径）。
+#[test]
+fn monitor_collect_seals_a_valid_sheet() {
+    let fx = Fixture::new("monitor-collect");
+    let token = fx.login_ok(STUDENT);
+    let qids = fx.qids(&token);
+    assert_status(
+        &fx.save(&token, &qids[0], "监考收卷前的答案"),
+        200,
+        "保存应成功",
+    );
+
+    let resp = fx.monitor_post("/api/monitor/collect", json!({"student_id": STUDENT}));
+    assert_status(&resp, 200, "收卷应成功");
+    let name = body_json(&resp)["file"]
+        .as_str()
+        .unwrap_or_else(|| panic!("响应里应有 file"))
+        .to_string();
+    let path = fx.app.answers_dir.join(&name);
+    let bytes = std::fs::read(&path).expect("答题卡应落盘");
+    let sheet = answer_sheet::open(&fx.app.k_manifest, &bytes).expect("答题卡应可校验");
+    assert_eq!(sheet.student_id, STUDENT);
+    // 第 1 题是填空：服务端存的是 `encode_parts` 的 JSON 数组，不能直接与原文比较。
+    let in_sheet = sheet.answers.iter().flatten().any(|raw| {
+        answer_sheet::decode_parts(raw)
+            .iter()
+            .any(|part| part == "监考收卷前的答案")
+    });
+    assert!(in_sheet, "已保存的答案应进卡：{:?}", sheet.answers);
+
+    // 学生侧立刻表现为「已交卷」。
+    let paper = fx.route(&get("/api/paper", peer(1)).token(&token));
+    assert_status(&paper, 200, "取卷仍应成功");
+    assert_eq!(json_body(&paper)["submitted"], true);
+
+    let events = fx.events();
+    assert!(
+        events
+            .iter()
+            .any(|e| e["ev"] == "monitor_collect" && e["student"] == STUDENT),
+        "应有收卷审计行：{events:?}"
+    );
+}
+
+/// 重复收卷是幂等的（返回 already，不再写盘）。
+#[test]
+fn monitor_collect_is_idempotent() {
+    let fx = Fixture::new("monitor-collect-twice");
+    let _token = fx.login_ok(STUDENT);
+    let first = fx.monitor_post("/api/monitor/collect", json!({"student_id": STUDENT}));
+    assert_status(&first, 200, "首次收卷应成功");
+    let second = fx.monitor_post("/api/monitor/collect", json!({"student_id": STUDENT}));
+    assert_status(&second, 200, "重复收卷也应成功");
+    assert_eq!(json_body(&second)["already"], true, "第二次应标记 already");
+    assert_eq!(fx.eea_files().len(), 1, "不应写出两份卡");
+}
+
+/// 批量收卷：服务端必须校验确认串（前端输入框挡不住 curl）。
+#[test]
+fn monitor_collect_all_requires_confirm_word() {
+    let fx = Fixture::new("monitor-collect-all-confirm");
+    let _token = fx.login_ok(STUDENT);
+
+    let missing = fx.monitor_post("/api/monitor/collect-all", json!({}));
+    assert_status(&missing, 400, "没有确认串应 400");
+    let wrong = fx.monitor_post("/api/monitor/collect-all", json!({"confirm": "ok"}));
+    assert_status(&wrong, 400, "确认串不对应 400");
+
+    let ok = fx.monitor_post("/api/monitor/collect-all", json!({"confirm": "收卷"}));
+    assert_status(&ok, 200, "确认串正确应成功");
+    let body = body_json(&ok);
+    assert_eq!(body["collected"].as_array().map(Vec::len), Some(1));
+    assert_eq!(fx.eea_files().len(), 1, "应写出 1 份卡");
+}
+
+/// 批量收卷里「某人正被封存」只算那一人失败，不影响其他人。
+#[test]
+fn monitor_collect_all_reports_partial_failure() {
+    let mut fx = Fixture::new("monitor-collect-all-partial");
+    let token_a = fx.login_ok(STUDENT);
+    // ① 把第一位摆成「封存中」（sweep 的中间态）：collect_one 会判失败，但不能影响别人。
+    {
+        let mut state = fx.app.lock_state();
+        let st = state.students.get_mut(&token_a).expect("学生状态应存在");
+        st.submitted = true;
+        st.exported = None;
+    }
+    // ② 第二位直接插进状态表：再走一次登录会把第一位顶掉（同学号单会话），
+    //    这里只需要一个「未封存」的会话存在即可。
+    fx.insert_fake_student("fake-token-2021002", 2021002);
+    let _ = &mut fx;
+    let resp = fx.monitor_post("/api/monitor/collect-all", json!({"confirm": "收卷"}));
+    assert_status(&resp, 200, "批量收卷整体应成功");
+    let body = body_json(&resp);
+    assert_eq!(
+        body["failed"].as_array().map(Vec::len),
+        Some(1),
+        "封存中的那位应单独失败：{body}"
+    );
+    assert_eq!(
+        body["collected"].as_array().map(Vec::len),
+        Some(1),
+        "另一位应被收卷：{body}"
+    );
+    assert_eq!(fx.eea_files().len(), 1, "只写出成功那位的卡");
+}
+
+/// 终止 = 先封存 → 再吊销 token → 再封禁；解除后能重新登录且答案还在。
+#[test]
+fn monitor_block_seals_revokes_and_can_be_undone() {
+    let fx = Fixture::new("monitor-block");
+    let token = fx.login_ok(STUDENT);
+    let qids = fx.qids(&token);
+    assert_status(
+        &fx.save(&token, &qids[0], "终止前的答案"),
+        200,
+        "保存应成功",
+    );
+
+    let resp = fx.monitor_post(
+        "/api/monitor/block",
+        json!({"student_id": STUDENT, "reason": "违纪"}),
+    );
+    assert_status(&resp, 200, "终止应成功");
+    assert!(
+        body_json(&resp)["sealed"].as_str().is_some(),
+        "终止前必须封存答题卡"
+    );
+    assert_eq!(fx.eea_files().len(), 1, "应有答题卡落盘");
+
+    // ② token 已吊销
+    let after = fx.route(&get("/api/paper", peer(1)).token(&token));
+    assert_status(&after, 401, "被终止后旧 token 应立即失效");
+
+    // ③ 重新登录被拒
+    let relogin = fx.login(STUDENT);
+    assert_status(&relogin, 403, "被终止的学生不能重新登录");
+    assert!(
+        err_msg(&relogin).contains("监考"),
+        "文案要说清是监考终止的：{}",
+        err_msg(&relogin)
+    );
+
+    // 解除后能登录，且答案仍在（封存的卡与状态文件都没被删）
+    let unblock = fx.monitor_post("/api/monitor/unblock", json!({"student_id": STUDENT}));
+    assert_status(&unblock, 200, "解除应成功");
+    let token2 = fx.login_ok(STUDENT);
+    // 终止时卡已封存：重登后按默认策略（仅教师可看原卷）不再下发卷面，
+    // 所以「答案还在」要对着答题卡验证，而不是对着 /api/paper。
+    let paper = fx.paper_json(&token2);
+    assert_eq!(paper["submitted"], true, "解除后仍是已交卷：{paper}");
+    let sheet_path = fx.eea_files();
+    assert_eq!(sheet_path.len(), 1, "答题卡应仍在");
+    let bytes = std::fs::read(&sheet_path[0]).expect("读答题卡");
+    let sheet = answer_sheet::open(&fx.app.k_manifest, &bytes).expect("答题卡应仍可校验");
+    let kept = sheet.answers.iter().flatten().any(|raw| {
+        answer_sheet::decode_parts(raw)
+            .iter()
+            .any(|part| part == "终止前的答案")
+    });
+    assert!(kept, "解除后答题卡里的答案应还在：{:?}", sheet.answers);
+
+    let events = fx.events();
+    assert!(
+        events.iter().any(|e| e["ev"] == "monitor_block"),
+        "应有终止审计行"
+    );
+    assert!(
+        events.iter().any(|e| e["ev"] == "monitor_unblock"),
+        "应有解除审计行"
+    );
+}
+
+/// 写操作要求 CSRF 头（与学生接口同口径）。
+#[test]
+fn monitor_write_requires_csrf_header() {
+    let fx = Fixture::new("monitor-csrf");
+    let _token = fx.login_ok(STUDENT);
+    let mut req = post_json(
+        "/api/monitor/collect",
+        json!({"student_id": STUDENT}),
+        peer(1),
+    );
+    req.headers
+        .insert("x-monitor-token".into(), fx.app.monitor_token.clone());
+    let resp = fx.route(&req);
+    assert_status(&resp, 403, "缺 CSRF 头应 403");
+    assert!(err_msg(&resp).contains("CSRF"), "文案应点名 CSRF");
+}
+
+/// 默认 `allow`：明文模式下也能收卷（产品决定：机房可能只跑明文排障）。
+#[test]
+fn monitor_write_allowed_in_plaintext_by_default() {
+    let fx = Fixture::new("monitor-plaintext-allow");
+    let _token = fx.login_ok(STUDENT);
+    assert!(!fx.app.secure_cookies, "fixture 是明文模式");
+    let resp = fx.monitor_post("/api/monitor/collect", json!({"student_id": STUDENT}));
+    assert_status(&resp, 200, "默认 allow：明文下也应允许收卷");
+}
+
+/// `tls-only`：明文下写操作 403，但只读仍可用。
+#[test]
+fn monitor_tls_only_blocks_writes_in_plaintext() {
+    let mut fx = Fixture::new("monitor-tls-only");
+    let _token = fx.login_ok(STUDENT);
+    fx.set_monitor_write_mode(monitor::MonitorWriteMode::TlsOnly);
+
+    let stats = fx.monitor_get("/api/monitor/stats");
+    assert_status(&stats, 200, "只读不受影响");
+    assert_eq!(json_body(&stats)["write_mode"], "tls-only");
+    assert_eq!(json_body(&stats)["plaintext_warning"], true);
+
+    let resp = fx.monitor_post("/api/monitor/collect", json!({"student_id": STUDENT}));
+    assert_status(&resp, 403, "明文 + tls-only 应拒绝写操作");
+    assert!(
+        err_msg(&resp).contains("write-mode"),
+        "文案要告诉老师怎么开：{}",
+        err_msg(&resp)
+    );
+}
+
+/// 审计行只记令牌**指纹**，绝不能把令牌本身写进日志。
+#[test]
+fn monitor_audit_never_contains_the_token() {
+    let fx = Fixture::new("monitor-audit");
+    let _token = fx.login_ok(STUDENT);
+    assert_status(
+        &fx.monitor_post("/api/monitor/collect", json!({"student_id": STUDENT})),
+        200,
+        "收卷应成功",
+    );
+    let text =
+        std::fs::read_to_string(fx.app.answers_dir.join("events.jsonl")).expect("事件日志应存在");
+    assert!(
+        !text.contains(&fx.app.monitor_token),
+        "审计日志里出现了令牌明文：{text}"
+    );
+    let events = fx.events();
+    let line = events
+        .iter()
+        .find(|e| e["ev"] == "monitor_collect")
+        .expect("应有收卷审计行");
+    let by = line["by"].as_str().expect("应有 by 字段");
+    assert_eq!(by.len(), 8, "指纹应是 8 位 hex：{by}");
+}
+
+/// 未登录的学号去收卷 → 404（不是 500：这不是服务端错误）。
+#[test]
+fn monitor_collect_unknown_student_is_404() {
+    let fx = Fixture::new("monitor-collect-unknown");
+    let resp = fx.monitor_post("/api/monitor/collect", json!({"student_id": 999999}));
+    assert_status(&resp, 404, "没有会话的学号应 404");
 }

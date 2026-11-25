@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>保密考试系统 · 监考</title>
+<link rel="stylesheet" href="/assets/monitor.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+<!-- 断线/令牌失效横幅：常驻最外层，任何状态下都看得见 -->
+<div id="net" class="banner alert hidden" role="alert"><span id="netText"></span></div>
+<!-- 明文告警：由服务端 stats.plaintext_warning 决定显隐（默认藏） -->
+<div id="plaintextWarn" class="banner danger hidden" role="alert">
+  ⚠ 当前是明文 HTTP：监考令牌可被同网段嗅探。收卷/终止操作请在 HTTPS 下使用。
+</div>
+
+<header class="bar">
+  <h1>监考</h1>
+  <span id="session" class="muted"></span>
+  <span id="clock" class="muted"></span>
+  <span class="spacer"></span>
+  <button id="refreshBtn" class="secondary" title="立即拉取一次最新状态">立即刷新</button>
+</header>
+
+<main>
+  <section id="counts" class="counts" aria-label="总体进度"></section>
+
+  <section id="actions" class="actions">
+    <button id="collectAllBtn" class="danger" disabled
+            title="把尚未交卷的学生立刻封存">批量收卷</button>
+    <span id="actionMsg" class="muted" role="status"></span>
+  </section>
+
+  <section id="tokenMissing" class="card hidden" role="alert">
+    <h2>缺少监考令牌</h2>
+    <p>请从服务端启动横幅里复制<strong>完整地址</strong>（形如 <code>/monitor?t=…</code>），
+       不要只复制到 <code>/monitor</code>。</p>
+    <p class="muted">如果是从书签打开的，令牌可能已被清除——请重新打开一次带
+       <code>?t=</code> 的地址（令牌不会写进历史或地址栏）。</p>
+  </section>
+
+  <section id="tableWrap" class="table-wrap">
+    <table id="table">
+      <thead>
+        <tr>
+          <th scope="col" class="col-id">学号</th>
+          <th scope="col" class="col-state">状态</th>
+          <th scope="col" class="col-answered">已答</th>
+          <th scope="col" class="col-seen">最后保存</th>
+          <th scope="col" class="col-login">登录时间</th>
+          <th scope="col" class="col-ops">操作</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p id="empty" class="empty muted hidden">还没有学生状态数据。</p>
+  </section>
+</main>
+
+<div id="toast" class="toast" role="status"></div>
+
+<dialog id="confirmDlg">
+  <form method="dialog">
+    <h2 id="confirmTitle"></h2>
+    <p id="confirmBody"></p>
+    <div id="confirmExtra"></div>
+    <menu>
+      <button id="confirmCancel" class="secondary" value="cancel">取消</button>
+      <button id="confirmOk" class="primary" value="ok">确定</button>
+    </menu>
+  </form>
+</dialog>
+
+<script src="/assets/monitor.js"></script>
+</body>
+</html>

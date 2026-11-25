@@ -9,7 +9,7 @@
 //! 仍是**阶段 1 实现**，不是生产形态：没有 SQLite，管理端只有启动入口，登录限速也很粗糙。
 //! v1.5.0 起默认 HTTPS（自签证书；`--tls off` 回退明文）。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -49,6 +49,7 @@ fn max_body_for(path: &str) -> usize {
 }
 
 mod clock;
+mod monitor;
 mod secure_fs;
 mod tls;
 
@@ -168,6 +169,21 @@ struct Cli {
     /// 或老师复测的场景。真正防 PIN 爆破的是按学号的 10 次/分钟。
     #[arg(long, default_value_t = 60)]
     login_rate_limit: u32,
+    /// 监考页令牌（默认从 `<answers-dir>/monitor.token` 读或自动生成）
+    ///
+    /// 应急时才用：命令行参数会出现在进程列表（`tasklist`）里，同机的其他账户能看见。
+    #[arg(long)]
+    monitor_token: Option<String>,
+    /// 监考页写操作开关：allow（默认，明文也允许收卷/终止）/ tls-only（明文下禁用写操作）
+    #[arg(long, value_enum, default_value_t = monitor::MonitorWriteMode::Allow)]
+    monitor_write_mode: monitor::MonitorWriteMode,
+    /// 学生名单文件（每行一个学号，`#` 开头为注释）
+    ///
+    /// 为什么监考页需要它：考试包里的信封是**匿名**的（按学号派生入场密钥定位），运行时
+    /// 拿不到「名单里有哪些学号」。没有这份文件，监考页只能列出「已登录的人」，
+    /// 而监考最想看的恰恰是「谁还没进来」。
+    #[arg(long)]
+    roster: Option<PathBuf>,
 }
 
 /// 每个学生的写盘锁：`(学号, 场次)` → 锁。
@@ -219,6 +235,15 @@ struct App {
     /// 包里的「学生回看」策略。离线端一直按它控制交卷后能不能看卷；网页端 v1.4.10
     /// 及以前**完全忽略**它（交卷后照样能看全卷），与「仅教师可查看原卷」的默认相反。
     review: common::model::StudentReviewPolicy,
+    /// 监考令牌（见 `monitor` 模块）。
+    monitor_token: String,
+    /// 监考页写操作开关。
+    monitor_write_mode: monitor::MonitorWriteMode,
+    /// 名单里的学号（`--roster`；拿不到时为空的集合）。
+    roster: HashSet<u64>,
+    /// 名单人数：给了 `--roster` 就是文件行数，否则取当前场次的信封数
+    /// （信封匿名，只能知道「有多少人」，不知道「是谁」）。
+    roster_len: usize,
 }
 
 #[derive(Default)]
@@ -228,6 +253,10 @@ struct State {
     tokens_by_student: HashMap<u64, String>,
     attempts: HashMap<IpAddr, (u32, u64)>,
     attempts_student: HashMap<u64, (u32, u64)>,
+    /// 被监考终止的学生（学号 → 原因）。登录时命中直接 403。
+    blocked: HashMap<u64, String>,
+    /// 首次登录时刻（学号 → 秒）。重登沿用，不刷新——监考想看的是「他什么时候进来的」。
+    first_login_at: HashMap<u64, u64>,
 }
 
 struct Student {
@@ -239,6 +268,10 @@ struct Student {
     /// 已导出的答题卡文件名（幂等，避免重复写盘）
     exported: Option<String>,
     last_seen: u64,
+    /// 首次登录时刻（重登不刷新，见 `State::first_login_at`）。
+    logged_in_at: u64,
+    /// 封存时刻（0 = 未封存或重启后未知）。只用于监考页显示，不参与判定。
+    submitted_at: u64,
 }
 
 struct Request {
@@ -483,6 +516,22 @@ fn main() -> Result<()> {
         anyhow::bail!("考试包里没有任何场次")
     };
 
+    // 名单：`--roster` 给的是「谁」，考试包只能给「有多少人」（信封匿名，见 `monitor` 模块）。
+    let roster = match &cli.roster {
+        Some(path) => monitor::load_roster(path)?,
+        None => HashSet::new(),
+    };
+    let roster_len = if roster.is_empty() {
+        header
+            .sessions
+            .iter()
+            .find(|s| s.session_id == session_id)
+            .map(|s| s.envelopes.len())
+            .unwrap_or(0)
+    } else {
+        roster.len()
+    };
+
     std::fs::create_dir_all(&cli.answers_dir)
         .with_context(|| format!("创建答题卡目录 {}", cli.answers_dir.display()))?;
     let state_dir = cli
@@ -492,6 +541,9 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("创建状态目录 {}", state_dir.display()))?;
     harden_state_dir(&state_dir);
+    // 监考令牌：优先 `--monitor-token`，否则读/生成 `<answers-dir>/monitor.token`。
+    let monitor_token =
+        monitor::load_or_generate_token(&cli.answers_dir, cli.monitor_token.as_deref());
 
     // ---- TLS：默认开；没证书就自动生成 ----
     let hosts = tls_hosts(&cli);
@@ -597,6 +649,10 @@ fn main() -> Result<()> {
         review: header.student_review,
         tls: tls_material.as_ref().map(|m| Arc::clone(&m.config)),
         secure_cookies: tls_material.is_some(),
+        monitor_token,
+        monitor_write_mode: cli.monitor_write_mode,
+        roster,
+        roster_len,
     });
 
     let listener = bind_listener(&cli.bind, cli.port)?;
@@ -684,6 +740,37 @@ fn main() -> Result<()> {
         }
     } else {
         println!("⚠ 当前是明文 HTTP（--tls off）：同网段可嗅探，仅建议排障时使用");
+    }
+    // 监考页：地址里带令牌，方便老师直接点开；令牌同时在文件里（重启不变）。
+    let token_path = monitor::token_path(&cli.answers_dir);
+    println!(
+        "监考页：{scheme}://{}:{}/monitor?t={}",
+        url_host(&bind_host(&cli.bind)),
+        cli.port,
+        app.monitor_token
+    );
+    println!(
+        "（只读 + 收卷/终止；令牌见 {}，泄漏就删掉它重启会重新生成）",
+        token_path.display()
+    );
+    if tls_material.is_none() {
+        // 明文是老师主动选的（排障/机房只跑明文），但令牌一旦被嗅探就能替全班收卷，
+        // 这条风险必须打在屏幕上，而不是只写在文档里。
+        println!("⚠ 明文模式：监考令牌可被同网段嗅探 → 拿到它就能替学生收卷/终止");
+        println!(
+            "⚠ 监考页地址只发给信任的人；考完请删 {}",
+            token_path.display()
+        );
+        if cli.monitor_write_mode == monitor::MonitorWriteMode::Allow {
+            println!(
+                "⚠ 当前 --monitor-write-mode allow：明文下也允许写操作（想禁掉用 --monitor-write-mode tls-only）"
+            );
+        }
+    }
+    if roster_len > 0 && app.roster.is_empty() {
+        println!(
+            "⚠ 名单有 {roster_len} 人，但没给 --roster：监考页只能列出已登录的人（不知道谁还没来）"
+        );
     }
     println!(
         "场次 #{session_id}；答题卡输出到 {}",
@@ -1055,6 +1142,25 @@ fn route(app: &App, req: &Request) -> Response {
         ("POST", "/api/submit") => submit(app, req),
         ("POST", "/api/logout") => logout(app, req),
         ("GET", "/api/time") => time_info(app, req),
+        // ---- 监考页（令牌在 monitor 模块统一校验）----
+        ("GET", "/monitor") => monitor::page(app),
+        ("GET", "/assets/monitor.css") => {
+            // 与 app.css 同口径：no-store。监考页脚本随版本变，缓存旧版会出现
+            // 「按钮点了没反应」这类极难排查的问题。
+            Response::asset(
+                "text/css; charset=utf-8",
+                include_str!("../assets/monitor.css"),
+            )
+        }
+        ("GET", "/assets/monitor.js") => Response::asset(
+            "text/javascript; charset=utf-8",
+            include_str!("../assets/monitor.js"),
+        ),
+        ("GET", "/api/monitor/stats") => monitor::stats(app, req),
+        ("POST", "/api/monitor/collect") => monitor::collect(app, req),
+        ("POST", "/api/monitor/collect-all") => monitor::collect_all(app, req),
+        ("POST", "/api/monitor/block") => monitor::block(app, req),
+        ("POST", "/api/monitor/unblock") => monitor::unblock(app, req),
         _ => Response::error(404, "not found"),
     }
 }
@@ -1076,6 +1182,11 @@ fn login(app: &App, req: &Request) -> Response {
         return Response::error(400, "缺少 student_id");
     };
     let pin = body.get("pin").and_then(Value::as_str).map(str::to_string);
+
+    // 监考终止过的学生：直接 403，连解锁都不做（也不消耗限速额度——他再试也没用）。
+    if let Some(reason) = monitor::blocked_reason(app, student_id) {
+        return Response::error(403, format!("已被监考终止作答：{reason}"));
+    }
 
     // 按 IP 的计数放在「请求体解析成功、学号已拿到」之后。
     //
@@ -1125,6 +1236,13 @@ fn login(app: &App, req: &Request) -> Response {
                 student.exported = exported;
             }
             let mut state = app.lock_state();
+            // 首次登录时刻只记一次：重登（断线重连、被踢后再登录）不刷新，
+            // 否则监考页的「登录时间」会随着每一次刷新往后跳。
+            let first = *state
+                .first_login_at
+                .entry(student_id)
+                .or_insert(student.logged_in_at);
+            student.logged_in_at = first;
             if let Some(old) = state.tokens_by_student.insert(student_id, token.clone()) {
                 state.students.remove(&old);
             }
@@ -1247,6 +1365,10 @@ impl App {
                 submitted: false,
                 exported: None,
                 last_seen: now,
+                // 真正的「首次登录时刻」在 `login()` 里按 `first_login_at` 覆盖：
+                // 重登时会沿用第一次的值，不刷新。
+                logged_in_at: now,
+                submitted_at: 0,
             };
             return Ok((token, student));
         }
@@ -1584,6 +1706,7 @@ fn submit(app: &App, req: &Request) -> Response {
     match result {
         Ok(name) => {
             st.exported = Some(name.clone());
+            st.submitted_at = now;
             st.last_seen = now;
             Response::json(200, json!({"ok": true, "file": name}))
                 .with_cookie(post_submit_cookie(app, &token))
@@ -1860,6 +1983,19 @@ impl App {
     }
 
     fn log_event(&self, student_id: u64, kind: &str, detail: &str) -> std::io::Result<()> {
+        self.append_event_line(&json!({
+            "at": self.now(),
+            "student_id": student_id,
+            "kind": kind,
+            "detail": detail,
+        }))
+    }
+
+    /// 追加一行事件日志（交卷 / 保存 / 监考操作共用）。
+    ///
+    /// 抽出来是为了让监考审计也能复用同一把串行锁与同一套权限收紧——两处各写一份
+    /// 「打开 → 收紧 → 写」迟早会漂（一处忘了 harden 就等于把学号与操作记录公开）。
+    fn append_event_line(&self, value: &Value) -> std::io::Result<()> {
         use std::io::Write as _;
         // 先拿写锁：事件日志由交卷 / 保存等多条线程并发追加，没有锁时一次 `writeln!`
         // 拆出的两次 `write` 会与别人的写入在字节层面交错，整行变成无法解析的乱码
@@ -1878,11 +2014,8 @@ impl App {
             eprintln!("⚠ 事件日志权限收紧失败 {}：{e}", path.display());
         }
         // 自己拼好整行、一次 `write_all` 落盘：即使将来有人去掉这把锁，单次写也比
-        // `writeln!` 的两段写安全得多。
-        let line = format!(
-            "{}\n",
-            json!({"at": self.now(), "student_id": student_id, "kind": kind, "detail": detail})
-        );
+        // `writeln!` 的两段写更安全。
+        let line = format!("{value}\n");
         f.write_all(line.as_bytes())
     }
 }
@@ -1891,10 +2024,13 @@ fn time_info(app: &App, req: &Request) -> Response {
     let Some(token) = cookie_token(req) else {
         return Response::error(401, "未登录");
     };
-    let state = app.lock_state();
-    let Some(st) = state.students.get(&token) else {
+    let mut state = app.lock_state();
+    let Some(st) = state.students.get_mut(&token) else {
         return Response::error(401, "登录已失效");
     };
+    // 监考页的「在线」判定就看这个时间戳：学生端每 15 s 轮询一次 `/api/time`，
+    // 所以这里必须续期——只靠保存/取卷续期的话，正在答题但没改动的学生会显示成离线。
+    st.last_seen = app.now();
     let (start, end) = session_window(app, st.session_id).unwrap_or((0, 0));
     // 前端每 15 秒轮询一次：这里顺手续期，长考试不会被 60 分钟 TTL 掐断。
     Response::json(
@@ -2008,6 +2144,7 @@ fn sweep_tick(app: &App) {
         match result {
             Ok(name) => {
                 st.exported = Some(name);
+                st.submitted_at = now;
                 st.last_seen = now;
                 let mut retry = app
                     .finalize_retry

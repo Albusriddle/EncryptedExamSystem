@@ -1,6 +1,6 @@
 # exam-server（网页考试）
 
-- 适用版本：**v1.7.1**
+- 适用版本：**v1.8.0**
 
 网页版学生端：教师在隔离局域网里启动它（管理端「网页考试…」入口），
 学生用浏览器打开 `https://<教师机 IP>:8443/`（首次需点「高级 → 继续前往」），
@@ -64,6 +64,9 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `--time-check` | `off` / `warn`（默认，只告警）/ `require`（不通过拒绝启动） |
 | `--time-tolerance` | 允许的本机与网络时间偏差，默认 `120` 秒（夹取到 30–86400） |
 | `--login-rate-limit` | 同一 IP 每分钟登录尝试上限，默认 `60`；`0` = 不限制（演练/同 NAT 时用） |
+| `--monitor-token` | 监考令牌（默认从 `<answers-dir>/monitor.token` 读或自动生成；**命令行会进进程列表，仅应急用**） |
+| `--monitor-write-mode` | 监考页写操作：`allow`（默认，明文也允许收卷/终止）/ `tls-only`（明文下写操作 403） |
+| `--roster` | 学生名单文件（每行一个学号，`#` 开头为注释）；不给就只能看到「已登录的人」 |
 
 启动时会先做一次三源网络时间校验并打印结论（本地时间 / 网络时间 / 偏差 / 生效偏移）。
 管理端「网页考试…」对话框可以设置 `--port` / `--bind` / `--answers-dir` / `--time-check` /
@@ -90,6 +93,46 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 | `POST` | `/api/submit` | 冻结并写出 `.eea`；默认策略下同时让会话立即失效 |
 | `POST` | `/api/logout` | 主动退出：清 cookie 并从内存删 token（旧 cookie 立刻 401） |
 | `GET` | `/api/time` | 服务器时间与剩余秒数；附带 `time_mode` / `clock_offset_secs` 便于排障 |
+| `GET` | `/monitor` | 监考页（表格；只读 + 收卷/终止） |
+| `GET` | `/api/monitor/stats` | 监考统计（需 `X-Monitor-Token`） |
+| `POST` | `/api/monitor/collect` | `{student_id}` 强制收卷（幂等） |
+| `POST` | `/api/monitor/collect-all` | `{confirm:"收卷"}` 批量收卷；服务端会再校验确认串 |
+| `POST` | `/api/monitor/block` | `{student_id, reason?}` 终止：**先封存 → 再吊销 token → 再封禁** |
+| `POST` | `/api/monitor/unblock` | `{student_id}` 解除封禁（误点救援） |
+
+## 监考页
+
+启动横幅会打印一行 `监考页：<scheme>://<host>:<port>/monitor?t=<token>`，老师直接点开即可。
+
+- **令牌**：首次启动生成 32 字节 hex 写进 `<answers-dir>/monitor.token`（0600 / 受保护 DACL），
+  之后重启**复用**（书签一直有效）；`--monitor-token` 可覆盖，但它会进进程列表，只作应急。
+  泄漏就删掉该文件重启，会重新生成。页面从 `?t=` 读一次、存进 `sessionStorage` 后立刻
+  `history.replaceState` 抹掉地址栏——后续请求只带 `X-Monitor-Token` 头，**不设 cookie**。
+- **为什么单独一套令牌**：学生 cookie 只能证明「这个浏览器是某个学生」。若监考页认它，
+  任何学生打开 `/monitor` 就能看全班进度；若监考令牌下发成 cookie，又会被浏览器自动带进
+  学生的写请求。
+- **只读接口** `/api/monitor/stats` 只给**计数**（学号、状态、已答/总题、最后活跃、登录/封存时刻），
+  **绝不下发答案与题干**——监考页不能变成泄题面。`state` 取值：
+  `not_logged_in` / `offline` / `answering` / `sealing`（已置位但卡还没落盘）/ `submitted` / `blocked`。
+  `last_seen` 是**距今秒数**（另有 `last_seen_unix` 给绝对值）。
+- **名单**：考试包的信封是匿名的（按学号派生入场密钥定位），运行时**拿不到「名单里有哪些学号」**。
+  所以「谁还没进来」需要 `--roster <文件>`；不给时只能看到「已登录的人」与「应有 N 人」
+  （N 来自信封数），横幅会提示这一点。管理端将来可以自动生成这份文件。
+- **写操作**（收卷 / 批量收卷 / 终止 / 解除）要求 `POST` + `X-Monitor-Token` + `X-EES-CSRF: 1`：
+  自定义头本身就是 CSRF 防线（跨站页面带它会触发 CORS 预检，而本服务不发任何 CORS 头）。
+  写操作全部写进 `events.jsonl` 审计，**只记令牌指纹（SHA-256 前 8 位）**，不记令牌本身。
+- **强制收卷复用 `seal_and_export`**（与学生交卷、自动收卷同一条路径），所以产出的 `.eea`
+  格式与指纹完全一致；失败会回滚「已交卷」标记。
+- **批量收卷** `collect-all` 必须带 `{"confirm":"收卷"}`，**服务端再校验一次**（前端输入框挡不住 curl）。
+  返回 `collected` / `already`（已封存过）/ `failed`（例如正被自动收卷持有），
+  部分失败不影响其他人。
+- **终止**的顺序是固定的：① 先封存（失败则整件事不生效，避免「人被封了卡没写」）
+  ② 吊销 token（学生下一次请求 401）③ 写入 `blocked`（重新登录直接 403「已被监考终止作答」）。
+  **必须能解除**：误点一次就把学生锁在考场外是最不可接受的现场事故；解除后答案仍在，可重新登录
+  （若卡已封存，重登会显示「已交卷」，符合预期）。
+- **明文模式**：默认仍允许写操作（机房可能只跑明文排障），但令牌可被同网段嗅探——
+  启动横幅会红字警告。要求严格的部署用 `--monitor-write-mode tls-only`（明文下写操作 403，
+  只读仍可用）。
 
 ## TLS
 
@@ -157,7 +200,10 @@ exam-server --package StudentClient.exe --keyfile key.txt \
   `policyConstraints` 这类字段不会单独报；需要逐字段核对请用 `openssl x509 -text`。
   也不打印精确到期日（`rustls` 不暴露 `notAfter`），只回答「是否过期」；
 - `--tls off` 时仍是明文 HTTP（仅建议排障）；
-- 状态文件是加密 JSON（不是 SQLite）；没有管理端监控页；
+- 状态文件是加密 JSON（不是 SQLite）；
+- **监考页只有实时表格**：没有历史趋势/图表、没有导出，也不做「逐人把卡下载下来」；
+  它按 15 s 轮询（与学生的 `/api/time` 同频），不是秒级推送；
+- 监考页的「在线」= 60 s 内有过请求；学生关掉页面但没交卷，会显示 `offline` 而不是消失；
 - 多标签页只靠单会话 token 顶掉旧页面，没有强制关闭；
 - 隔离局域网没有外网时取时必然失败：默认档只告警，此时场次判定退回教师机系统时钟，
   需要现场确认时钟（`--time-check require` 可让它在取时失败时拒绝启动）；
@@ -172,4 +218,4 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 
 ## 下一步（阶段 1 剩余）
 
-axum/tokio + SQLite（WAL）+ 管理端监控页（在线人数 / 交卷进度 / 逐人导出）。
+axum/tokio + SQLite（WAL）；监考页的历史趋势/导出（当前只有实时表格）。

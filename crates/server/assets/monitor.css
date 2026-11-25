@@ -1,0 +1,258 @@
+/* 监考页样式。
+ *
+ * 为什么全部写在文件里：服务端 CSP 是 `style-src 'self'`，HTML 里的 `style="…"` 与行内
+ * `<style>` 都会被拦掉（v1.5.0 以来一直如此）。显隐统一用 `.hidden` 类。
+ *
+ * 桌面优先：1280 宽下表格不能横向溢出——`table-layout: fixed` + 单元格省略号；
+ * 更窄的屏幕交给 `.table-wrap` 的横向滚动，不引第三方库。
+ */
+
+:root { color-scheme: light dark; }
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans CJK SC", sans-serif;
+  margin: 0;
+  background: #f6f7f9;
+  color: #1d1e20;
+}
+
+@media (prefers-color-scheme: dark) {
+  body { background: #17181a; color: #e6e6e6; }
+  .bar { background: #17181a; }
+  .counts .cell { background: #1f2023; border-color: #2e3034; }
+  table { background: #1f2023; }
+  th, td { border-color: #2e3034; }
+  thead th { background: #232529; }
+  button.secondary { border-color: #4a6fd0; color: #9db8ff; }
+  dialog { background: #1f2023; color: #e6e6e6; border-color: #2e3034; }
+  code { background: #26282c; }
+}
+
+.hidden { display: none; }
+
+/* ---------------------------------------------------------------- 顶部 */
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 20px;
+  background: #f6f7f9;
+  border-bottom: 1px solid #e2e4e8;
+}
+
+.bar h1 { font-size: 18px; margin: 0; }
+
+.spacer { margin-left: auto; }
+
+.muted { color: #777; font-size: 13px; }
+
+main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 48px; }
+
+/* ---------------------------------------------------------------- 横幅 */
+.banner {
+  padding: 10px 16px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.banner.alert { background: #b03030; color: #fff; }
+.banner.danger {
+  background: #fff2f2;
+  color: #a02020;
+  border-bottom: 1px solid #f0c8c8;
+}
+
+@media (prefers-color-scheme: dark) {
+  .banner.danger { background: #3a1f1f; color: #ffb4b4; border-bottom-color: #5a2a2a; }
+}
+
+/* ---------------------------------------------------------------- 计数 */
+.counts {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 10px;
+  margin: 4px 0 14px;
+}
+
+.counts .cell {
+  background: #fff;
+  border: 1px solid #e2e4e8;
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.counts .num { font-size: 22px; font-weight: 600; line-height: 1.2; }
+.counts .label { font-size: 12px; color: #777; margin-top: 2px; }
+.counts .cell.emphasis .num { color: #2f6fed; }
+.counts .cell.warn .num { color: #b06a00; }
+.counts .cell.bad .num { color: #b03030; }
+.counts .cell.good .num { color: #1f8a4c; }
+
+/* ---------------------------------------------------------------- 操作行 */
+.actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+#actionMsg { font-size: 13px; white-space: pre-wrap; }
+
+button {
+  font-size: 14px;
+  padding: 7px 13px;
+  border-radius: 6px;
+  border: 1px solid #2f6fed;
+  background: #2f6fed;
+  color: #fff;
+  cursor: pointer;
+}
+
+button.secondary { background: transparent; color: #2f6fed; }
+button.danger { background: #b03030; border-color: #b03030; }
+button.primary { background: #2f6fed; border-color: #2f6fed; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* 表格里的小按钮：不抢视线，但危险动作仍是红的 */
+td button {
+  font-size: 13px;
+  padding: 4px 9px;
+  margin-right: 6px;
+}
+
+td button.danger { background: transparent; color: #b03030; border-color: #d9a3a3; }
+td button.secondary { background: transparent; color: #2f6fed; border-color: #b9caf5; }
+td button.unblock { background: transparent; color: #1f8a4c; border-color: #a8d3ba; }
+
+/* ---------------------------------------------------------------- 表格 */
+.table-wrap {
+  overflow-x: auto;
+  border-radius: 8px;
+}
+
+table {
+  width: 100%;
+  min-width: 860px;
+  border-collapse: collapse;
+  background: #fff;
+  table-layout: fixed;
+}
+
+th, td {
+  border-bottom: 1px solid #e2e4e8;
+  padding: 8px 10px;
+  text-align: left;
+  font-size: 14px;
+  vertical-align: middle;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+thead th { background: #f0f2f5; font-weight: 600; font-size: 13px; }
+
+.col-id { width: 110px; }
+.col-state { width: 104px; }
+.col-answered { width: 84px; }
+.col-seen { width: 132px; }
+.col-login { width: 110px; }
+.col-ops { width: 210px; }
+
+/* 状态色：与文案配合，不只靠颜色（色弱也能读文案） */
+.state { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 13px; }
+.state-not_logged_in { background: #f0f2f5; color: #777; }
+.state-offline { background: #eef0f3; color: #5b6069; }
+.state-answering { background: #e8f0ff; color: #1b4fbf; }
+.state-sealing { background: #fff3e0; color: #a35b00; }
+.state-submitted { background: #e6f6ec; color: #1a7a45; }
+.state-blocked { background: #fdecec; color: #a02020; }
+
+@media (prefers-color-scheme: dark) {
+  .state-not_logged_in { background: #26282c; color: #9aa0a8; }
+  .state-offline { background: #26282c; color: #b0b6be; }
+  .state-answering { background: #1d2a44; color: #9db8ff; }
+  .state-sealing { background: #3a2c12; color: #ffc46b; }
+  .state-submitted { background: #16321f; color: #7fd6a0; }
+  .state-blocked { background: #3a1d1d; color: #ff9b9b; }
+}
+
+tr.row-blocked td, tr.row-blocked th { background: #fff6f6; }
+@media (prefers-color-scheme: dark) {
+  tr.row-blocked td, tr.row-blocked th { background: #2a1c1c; }
+}
+
+.empty { padding: 16px 4px; }
+
+/* ---------------------------------------------------------------- toast */
+.toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  max-width: 60ch;
+  background: #222;
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 6px;
+  opacity: 0;
+  transition: opacity .2s;
+  pointer-events: none;
+}
+
+.toast.show { opacity: .95; }
+.toast.err { background: #b03030; }
+.toast.ok { background: #1f6f45; }
+
+/* ---------------------------------------------------------------- 对话框 */
+dialog {
+  border: 1px solid #e2e4e8;
+  border-radius: 10px;
+  padding: 18px 20px;
+  max-width: 560px;
+  background: #fff;
+  color: #1d1e20;
+}
+
+dialog::backdrop { background: rgba(0, 0, 0, .35); }
+dialog h2 { font-size: 17px; margin: 0 0 10px; }
+dialog p { margin: 0 0 10px; line-height: 1.5; font-size: 14px; }
+dialog menu { display: flex; gap: 10px; justify-content: flex-end; margin: 14px 0 0; padding: 0; }
+
+dialog .hint { color: #777; font-size: 13px; }
+
+dialog input[type=text] {
+  font-size: 15px;
+  padding: 7px 10px;
+  border: 1px solid #c9ccd2;
+  border-radius: 6px;
+  width: 160px;
+}
+
+/* ---------------------------------------------------------------- 缺令牌提示 */
+.card {
+  background: #fff;
+  border: 1px solid #e2e4e8;
+  border-radius: 8px;
+  padding: 18px;
+  margin: 12px 0;
+}
+
+.card h2 { font-size: 16px; margin: 0 0 8px; }
+.card p { margin: 0 0 8px; line-height: 1.5; font-size: 14px; }
+
+code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  background: #f0f2f5;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .card { background: #1f2023; border-color: #2e3034; }
+  code { background: #26282c; }
+}
