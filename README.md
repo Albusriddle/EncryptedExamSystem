@@ -4,13 +4,14 @@
 >
 > 本系统的定位是**「防误操作 + 现场监考」**，不是密码学意义上的强防作弊系统。防什么、不防什么，见 [安全边界与威胁模型](docs/安全边界与威胁模型.md)；已经明确接受、且**没有**修复的风险，见 [风险接受记录](docs/风险接受记录.md)。
 
-当前版本：**1.5.1**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
+当前版本：**1.5.2**（`VERSION` / `Cargo.toml` / `admin/pyproject.toml` 三处一致）
 
 | 组件 | 技术形态 | 职责 |
 |---|---|---|
 | `ExamAdmin` | Python + PySide6 | 教师端图形界面：题库、学生与班级、场次、打包、收卷判分、审计 |
 | `exam-builder` | Rust CLI | 打包、校验包、校验答题卡、导出 PIN 表、考后查看原卷 |
 | `exam-client` | Rust + egui 单文件 exe | 学生端：学号（可选 PIN）登录、网络时间门禁、离线作答、答题卡落盘 |
+| `exam-server` | Rust 内置 HTTP/1.1 + TLS | 网页作答服务端：登录 / 取卷 / 每次保存即加密落盘 / 交卷 / 自动收卷（可选，仅隔离局域网） |
 
 > 文档在 `docs/` 下（本文链接带 `docs/` 前缀），`docs/` 内各文档互为同级；另有开发用的题库质检 skill 位于 `.agents/skills/question-bank-qc/`。
 
@@ -100,6 +101,7 @@
 - 网页登录限速按**真实对端 IP** 分桶（默认 60 次/分钟，可配置）；监听地址可只绑局域网网卡；
 - 代码高亮只影响显示，不执行代码；
 - 网页考试默认 **HTTPS（自签证书）**（v1.5.0 起）：启动时自动生成证书并打印指纹，学生首次访问点「高级 → 继续前往」；明文端口只做 301 跳转，不承载任何数据。
+- 网页服务端的参数表、TLS / 证书细节与已知限制见 [crates/server/README.md](crates/server/README.md)。
 
 **已接受风险（不得写成「已修复」）**
 
@@ -202,6 +204,10 @@ crates/common/       共享模型、加密、容器格式、抽题、答题卡�
 crates/builder/      exam-builder：keygen / build / verify / verify-answer-sheet /
                      review-paper / export-pins
 crates/client/       学生端：GUI（egui）、解锁流程、答题卡、代码编辑器、Markdown 渲染
+crates/server/       exam-server：内置 HTTP/1.1 + 自签 TLS 的网页作答服务端
+                     （登录 / 取卷 / 每次保存即落盘 / 交卷 / 自动收卷）
+crates/server/src/   main / tls / clock / secure_fs / index.html
+crates/server/assets/ app.js / app.css / codemirror.*（静态资源，内嵌进二进制）
 admin/app/core/      Qt-free 核心逻辑：models / state / grading / attendance / audit /
                      receipt / secure / bank_import / images / difficulty
 admin/app/ui/        PySide6 界面：题库、学生、场次、打包、收卷判分、审计菜单
@@ -214,20 +220,20 @@ schemas/             题库 / manifest 的 JSON Schema（由 pydantic 生成，�
 scripts/             verify-embed / preflight-release / make-release-zip / release_body /
                      run-admin-tests / smoke-answers / smoke-web / drill-web /
                      bump-version（发版只改标记位）
-licenses/            LGPL-3.0 / GPL-3.0 全文
+licenses/            LGPL-3.0 / GPL-3.0 / ISC 全文
 worker/              Cloudflare Worker 时间服务（**目录为空，未实现**）
 ```
 
 ---
 
-## 8. 测试与验证基线（v1.5.1）
+## 8. 测试与验证基线（v1.5.2）
 
 | 项 | 基线 |
 |---|---|
-| Rust | 351 个 `#[test]` |
-| Python | 429 passed + 1 skipped（收集 430，含参数化展开） |
+| Rust | 360 个 `#[test]` |
+| Python | 434 passed + 1 skipped（收集 435，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
-| 发布预检 | `scripts/preflight-release.sh` 15 项（非 `--full`） |
+| 发布预检 | `scripts/preflight-release.sh` 16 项（非 `--full`） |
 | CI | 8 个 job：`rust` / `python` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `tools-scripts` / `web-smoke` |
 
 > 数字会随提交变化，**以 CI 与脚本输出为准**。发布预检的项数看脚本最后一行
@@ -286,7 +292,8 @@ zip 旁边附带 `SHA256SUMS.txt`；构建时会自动检查包内所有 `.md` �
 
 本项目代码以 **Apache License 2.0** 发布（仓库根 `LICENSE`，发布包内为 `ExamAdmin/LICENSE`）。
 第三方组件许可见 `THIRD-PARTY-NOTICES.md`，
-随包附 `licenses/LGPL-3.0.txt`、`licenses/GPL-3.0.txt`（PySide6 / Qt 为 LGPL-3.0）。
+随包附 `licenses/LGPL-3.0.txt`、`licenses/GPL-3.0.txt`（PySide6 / Qt 为 LGPL-3.0）
+与 `licenses/ISC.txt`（`exam-server` 静态链接的 `ring` 为 Apache-2.0 AND ISC）。
 
 - 创始人 / 仓库作者：[AlbusRiddle](https://github.com/Albusriddle)
 - 部分创意支持：[Stone](https://github.com/stone6060)

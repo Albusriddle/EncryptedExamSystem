@@ -6,11 +6,82 @@
 - 命令行：`exam-builder`（打包、校验、导出 PIN、考后看原卷、校验答题卡）
 - 学生端：`exam-client`（单 exe，双击运行，按场次与网络时间解锁）
 
-> 当前版本 **1.5.1**。Release 正文由 `scripts/release_body.py` 从本文件提取
+> 当前版本 **1.5.2**。Release 正文由 `scripts/release_body.py` 从本文件提取
 > **当前版本那一节**，因此 `## 更新摘要（vX.Y.Z）` 小节必须存在且唯一。
 >
-> **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 62 个版本，最新在前）；
+> **记录范围**：本文件从 **v0.14.0** 起逐版本记录（共 63 个版本，最新在前）；
 > 更早版本（v0.13.2 及以前）未逐条整理，需要时查 `git tag` 与 `git log`。
+
+## 更新摘要（v1.5.2）
+
+本版修掉 v1.5.1 复审发现的 **1 个 P1 + 4 个 P2 + 约 40 个 P3**，不新增功能。
+
+### P1：网页端代码题从 v1.4.11 起完全不可用（本版修复）
+
+- `renderText()` 在 textarea **还没插入 DOM** 时就调用 `CodeMirror.fromTextArea()`；
+  CodeMirror 5 内部要 `textarea.parentNode.insertBefore`，直接抛 `TypeError` →
+  `render()` 中断、`#exam` 保持隐藏，学生看到**只有小节标题的空白页**，而错误被写进已隐藏的
+  `#loginMsg`（完全无提示）。v1.4.10 是「先 append 再初始化」，v1.4.11 把初始化挪进
+  `renderText()` 时丢了顺序，**四个版本（v1.4.11 / 1.4.12 / 1.5.0 / 1.5.1）都受影响**。
+- 现在改为「先 `q.appendChild(ta)`，再 `initCodeEditor(ta, item)`」；并用真实含 `qtype=code`
+  的考试包在浏览器里验证：题目卡片、行号、语法高亮、自动保存全部正常。
+- 新增契约用例 `code_editor_is_initialised_only_after_the_textarea_is_in_the_dom`：
+  断言 `renderText` 里不再出现 `CodeMirror.fromTextArea`，且 `appendChild(ta)` 在
+  `initCodeEditor(...)` 之前——前端没有单测运行时，这条源码级断言是唯一能挡住回归的闸。
+
+### P2（4 条）
+
+- **关页冲尾会丢题**：`flushBeacon` 的 `.then` 不判 `res.ok`，`fetch` 对 4xx/5xx 也是 resolve →
+  413/400/500 时该题被从重试队列删掉。现在判 `res.ok`，409 切「已交卷」。
+- **证书 SAN 不跟随 `--bind`**：命令行只绑 LAN 网卡时，横幅打印的地址不在证书 SAN 里，
+  学生会看到 `ERR_CERT_COMMON_NAME_INVALID`。现在把 `--bind` 的地址并入 SAN（通配地址除外）。
+- **管理端运行中切换 HTTPS 会误导地址**：运行中勾选框现在**禁用**，地址 scheme 改为
+  **从服务端横幅解析**（不再看勾选框），并显示「改动需重启服务生效」。
+- **`licenses/ISC.txt` 版权行被改写**：逐字恢复 ring 原文 `Copyright 2015-2025 Brian Smith.`，
+  中文说明移到文末（ISC 要求版权声明原样附带）。
+
+### 前端（10 条）
+
+4xx 确定性错误不再无限重试并在横幅写清「这一题保存不了」；保存失败时交卷改为
+**二次确认的「带警告交卷」**（服务端仍会封存已保存部分）；服务端 `already && file=null` 的
+sweep 窗口改回 **503 正在封存**，前端提示并重试；`showDone()` 统一收敛
+`submitted/editable/lockAll` 并停掉两个定时器；断线/重登横幅移出 `#exam`（登录页与
+「已交卷」页也可见），`setNet` 只改文本节点、**「重新登录」按钮常驻**；`pagehide` 不再等
+在途请求；退出加防重入；多选改 `Map<qid, Set<key>>` 精确判定（不再按子串）；`#loginMsg` 加
+`role="alert"`；显隐统一走 class；删掉 `render(data)` 未用参数；加空 favicon 消掉 404。
+
+### TLS / 服务端（12 条）
+
+横幅按实际收紧结果打印私钥权限（不再无条件写「仅当前用户可读」）；`status_text` 补
+302/403/405；**IPv6 绑定**的横幅与 301 `Location` 加方括号；证书备份只留最近 3 份；
+**SAN 比对规范化**（域名小写、IP 按 `IpAddr` 比较，`LOCALHOST`/长写法 IPv6 不再触发重签）；
+`backup_existing` 的 rename 失败即中止（避免截断旧证书）；`server.json` 加 `version`；
+测试辅助清理临时目录、`trusting_client_config` 直接收证书路径；修 fixture 腐烂注释；
+`try_clone` 失败时**跳过 drain**；连接建立时设 10 s 写超时；301 补 `nosniff`。
+
+### 管理端 / 脚本（5 条）
+
+`preflight` 纳入 `licenses/ISC.txt`（预检 **15 → 16 项**）；`copy_legal_files` 补 2 条测试
+（齐全→含 ISC；缺 ISC→`FileNotFoundError`）；把名不符的「8080 只提示不拦启动」用例改成真验证
+（假 exe + 记录 `QProcess.start`）；运行中禁用全部输入；`THIRD-PARTY-NOTICES` 首句许可面改全
+并补 ring 内含 `once_cell` 的说明。
+另按 AGENTS §7.6 把「关闭 HTTPS」的危险确认从 `toggled` 改挂 **`clicked`**（程序化
+`setChecked` 不再弹窗），并补一条反向用例。
+
+### 文档（12 条）
+
+README/架构目录树补 `crates/server/{src,assets}`；README 组件表补 `exam-server`；许可摘要与
+架构 `licenses` 行补 `ISC.txt`；「所有响应加安全头」限定为「HTTPS 端口（301 只带 Location 与
+nosniff）」；`THIRD-PARTY` 首句改全；`crates/server/README.md` 增加入口链接与「每页约 6 次
+TLS 握手（未做 keep-alive）」的已知性能特征；手册补「FAT32/网络盘上私钥权限会降级为告警」；
+架构 pytest 行括注「1 例按环境跳过」。
+
+### 验证
+
+- Rust **360**（+9）；pytest **434 passed + 1 skipped**（收集 435）；预检 **16 项**；
+  `verify-embed` 17 项；CI 8/8。
+- 真浏览器：含代码题的包登录后渲染出 CodeMirror（行号 + 语法高亮），输入可自动保存；
+  v1.5.1 的严格 CSP 与「到点自动交卷 → 已交卷页」路径复跑通过。
 
 ## 更新摘要（v1.5.1）
 
@@ -39,9 +110,10 @@
 ### 安全响应头与页面
 
 - 行内 `<script>`/`<style>` 拆到 `/assets/app.{js,css}`，页面不再有行内 `style=` 属性；
-- 所有响应（含 4xx/5xx）加 `Content-Security-Policy`（`script-src 'self'`、`style-src 'self'`、
+- **HTTPS 端口的所有响应**（含 4xx/5xx）加 `Content-Security-Policy`（`script-src 'self'`、`style-src 'self'`、
   `frame-ancestors 'none'` 等）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、
   `Referrer-Policy: no-referrer`、`Permissions-Policy`；
+  明文跳转端口的 301 只带 `Location`（无 body，不含上述安全头）；
 - `--tls off` 时页面顶部也显示「当前为明文 HTTP，仅限排障」。
 
 ### 网页前端（数据正确性）
@@ -68,7 +140,7 @@
 
 ### 验证
 
-- Rust **350**（+9）；pytest **429 passed + 1 skipped**（收集 430）；
+- Rust **351**（+10）；pytest **429 passed + 1 skipped**（收集 430）；
 - 真浏览器（headless Chromium）：严格 CSP 下页面正常渲染（登录卡可见、考试/已交卷区块隐藏）、
   登录→作答→保存正常；到点自动交卷后显示「已交卷」页且**没有**误报「交卷失败」；
 - `smoke-web.sh`（HTTPS）、`drill --students 6`、`verify-embed` 17 项、`preflight` 15 项 全过；CI 8/8。
