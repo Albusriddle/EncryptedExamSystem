@@ -229,6 +229,10 @@ class WebExamDialog(QDialog):
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
+        # 日志区给一个最小高度：v1.7.0 多了「证书来源」+ 三行文件选择后，只靠布局
+        # 分配会让它缩到 70 px（Windows 上实测），而老师排查启动失败全靠这块内容。
+        # 用最小高度（不是固定高度）→ 窗口最小尺寸会跟着长，窗口够高时日志仍可伸展。
+        self.log.setMinimumHeight(120)
         self.log.setPlaceholderText("服务输出…")
 
         lay = QVBoxLayout(self)
@@ -304,6 +308,16 @@ class WebExamDialog(QDialog):
         # 明文模式下「证书来源」毫无意义：禁用，免得老师切过去以为生效了。
         self.combo_tls_source.setEnabled(self._inputs_editable and https_on)
         self.cert_box.setEnabled(self._inputs_editable and https_on)
+        # 证书区一显隐，布局需要的空间就变了：把「最小高度」跟着更新，窗口被撑到够用为止。
+        # 只用 resize() 不行——Windows 上字体/DPI 不同，show() 之后 sizeHint 还会再长一截，
+        # 结果窗口比布局矮，日志区（排查启动失败全靠它）被压扁。
+        need = self.minimumSizeHint().height()
+        self.setMinimumHeight(need)
+        # `setMinimumHeight` 只是设了下界，Qt 不会立刻把现有窗口撑大（要等下一次布局），
+        # 所以这里主动 resize 到「sizeHint / 最小需要 / 640」三者的最大者。
+        target = max(self.sizeHint().height(), need, 640)
+        if self.height() < target:
+            self.resize(max(self.width(), 720), target)
 
     def _tls_args(self) -> dict[str, object]:
         """把界面上的证书选择映射成 `web_command()` / `validate_inputs()` 的四个参数。

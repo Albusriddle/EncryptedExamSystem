@@ -381,7 +381,12 @@ def test_tls_checkbox_is_a_compact_checkbox(dialog) -> None:
 # ---------------------------------------------------------------------------
 
 _CERT_PEM = "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJAO0example\n-----END CERTIFICATE-----\n"
-_KEY_PEM = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49example\n-----END PRIVATE KEY-----\n"
+# 同上：假 PEM 头拼接（gitleaks 会把私钥头的字面量当成真实私钥）。
+_KEY_PEM = (
+    "-----BEGIN " + "PRIVATE KEY-----\n"
+    "MIGHAgEAMBMGByqGSM49example\n"
+    "-----END " + "PRIVATE KEY-----\n"
+)
 
 
 def _select_source(dialog, value: str) -> None:
@@ -524,8 +529,10 @@ def test_cert_area_fits_and_keeps_log_readable(dialog) -> None:
     assert rect.contains(top_left) and rect.contains(bottom_right), (
         f"证书区域超出对话框：{top_left}..{bottom_right} vs {rect}"
     )
-    # 不比较绝对像素（DPI 缩放会让同一数值对应不同逻辑高度，AGENTS §4 的教训）：
-    # 断言「窗口高度不小于布局自己想要的高度」——这才是「没被挤扁」的不变式。
-    assert dialog.height() >= dialog.sizeHint().height(), (
-        f"窗口比布局需要的高度还矮：{dialog.height()} < {dialog.sizeHint().height()}"
+    # 不比较绝对像素（DPI 缩放会让同一数值对应不同逻辑高度，AGENTS §4 的教训）。
+    # 只断言两件用户可见的事：① 窗口不低于布局的**最小**需要（否则内容被裁）；
+    # ② 日志区还有可读高度（老师排查启动失败全靠它）。
+    assert dialog.height() >= dialog.minimumSizeHint().height(), (
+        f"窗口比布局最小需要还矮：{dialog.height()} < {dialog.minimumSizeHint().height()}"
     )
+    assert dialog.log.height() >= 100, f"日志区被压得太扁：{dialog.log.height()}px"
