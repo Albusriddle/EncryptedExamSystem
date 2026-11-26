@@ -9,7 +9,7 @@ from app.core import paths
 
 @pytest.fixture(autouse=True)
 def clean_user_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    for name in ("LOCALAPPDATA", "APPDATA", "XDG_CONFIG_HOME", "XDG_STATE_HOME"):
+    for name in ("LOCALAPPDATA", "APPDATA", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(paths.sys, "platform", "linux")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
@@ -39,6 +39,7 @@ def test_explicit_appdata_override_is_preserved(
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     assert paths.settings_path() == tmp_path / "local" / "ExamSystem" / "settings.ini"
     assert paths.state_dir() == tmp_path / "local" / "ExamSystem"
+    assert paths.data_dir() == tmp_path / "local" / "ExamSystem"
 
 
 @pytest.mark.parametrize("value", ["", "relative/state"])
@@ -47,6 +48,14 @@ def test_state_directory_has_writable_home_fallback(
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", value)
     assert paths.state_dir() == tmp_path / ".local/state" / "ExamSystem"
+
+
+@pytest.mark.parametrize("value", ["", "relative/data", "absolute"])
+def test_demo_data_directory_honors_absolute_xdg_only(tmp_path, monkeypatch, value) -> None:
+    raw = str(tmp_path / "数据") if value == "absolute" else value
+    monkeypatch.setenv("XDG_DATA_HOME", raw)
+    root = Path(raw) if value == "absolute" else tmp_path / ".local/share"
+    assert paths.data_dir() == root / "ExamSystem"
 
 
 @pytest.mark.parametrize("platform, suffix", [("linux", ""), ("win32", ".exe")])

@@ -174,6 +174,7 @@ def main() -> int:
             "banks": [
                 {
                     "exam_id": win.banks_tab.table.item(row, 0).text(),
+                    "source": win.state.bank_paths[win.banks_tab.table.item(row, 0).text()],
                     "title": win.banks_tab.table.item(row, 1).text(),
                     "questions": int(win.banks_tab.table.item(row, 2).text()),
                     "pick": int(win.banks_tab.table.item(row, 3).text()),

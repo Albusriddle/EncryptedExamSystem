@@ -89,6 +89,74 @@ def test_opened_project_does_not_gain_default_banks(qapp, tmp_path: Path) -> Non
         win.deleteLater()
 
 
+@pytest.mark.parametrize("passphrase", [None, "demo-project-password"])
+def test_saved_appimage_project_reopens_after_extraction_is_removed(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, passphrase: str | None
+) -> None:
+    import shutil
+    import sys
+
+    resources = tmp_path / "first-extraction" / "_internal"
+    shutil.copytree(DEMO, resources / "banks" / "demo")
+    monkeypatch.setattr(sys, "_MEIPASS", str(resources), raising=False)
+    win = MainWindow()
+    project = tmp_path / "demo.eesproj"
+    try:
+        _assert_demo_banks_visible(win)
+        win.state.save(project, passphrase=passphrase)
+    finally:
+        win.deleteLater()
+    shutil.rmtree(resources.parent)
+
+    # 下次启动会解压到另一个目录；工程里不能再引用已删除的第一次解压路径。
+    next_resources = tmp_path / "second-extraction" / "_internal"
+    shutil.copytree(DEMO, next_resources / "banks" / "demo")
+    monkeypatch.setattr(sys, "_MEIPASS", str(next_resources), raising=False)
+    reopened = MainWindow()
+    monkeypatch.setattr(reopened, "_ask_passphrase", lambda _title: passphrase)
+    try:
+        assert reopened._load_project(project)
+        expected = {
+            bank.exam_id: bank
+            for path in DEMO.glob("*.json")
+            if path.name != "manifest.example.json"
+            for bank in [load_bank_from_path(path)]
+        }
+        table = reopened.banks_tab.table
+        assert table.rowCount() == len(expected)
+        for row in range(table.rowCount()):
+            bank = expected[table.item(row, 0).text()]
+            assert table.item(row, 1).text() == bank.title
+            assert table.item(row, 2).text() == str(len(bank.questions))
+        assert {row.exam_id for row in reopened.sessions_tab.checks} == set(reopened.state.banks)
+        assert all(Path(path).is_file() for path in reopened.state.bank_paths.values())
+        assert "源文件读不到" not in reopened.statusBar().currentMessage()
+    finally:
+        reopened.deleteLater()
+
+
+def test_unwritable_demo_data_directory_allows_manual_import(qapp, tmp_path, monkeypatch) -> None:
+    import shutil
+    import sys
+
+    from app.core import default_banks
+
+    resources = tmp_path / "resources"
+    shutil.copytree(DEMO, resources / "banks" / "demo")
+    monkeypatch.setattr(sys, "_MEIPASS", str(resources), raising=False)
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_text("block writes", encoding="utf-8")
+    monkeypatch.setattr(default_banks, "data_dir", lambda: blocked)
+    win = MainWindow()
+    try:
+        assert win.banks_tab.table.rowCount() == 0
+        assert win.banks_tab.btn_add.isEnabled()
+        assert "用户数据目录" in win.statusBar().currentMessage()
+        assert "检查目录权限或手动导入" in win.statusBar().currentMessage()
+    finally:
+        win.deleteLater()
+
+
 def test_missing_demo_resources_allow_manual_import(qapp, tmp_path, monkeypatch) -> None:
     from app.core import default_banks
 

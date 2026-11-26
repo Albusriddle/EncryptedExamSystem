@@ -74,9 +74,48 @@ def test_frozen_default_project_uses_bundled_demo_banks(tmp_path, monkeypatch) -
     dest = resources / "banks" / "demo"
     shutil.copytree(DEMO, dest)
     monkeypatch.setattr(sys, "_MEIPASS", str(resources), raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "user-data"))
     project = new_demo_project()
     assert project.banks
-    assert all(Path(path).parent == dest for path in project.bank_paths.values())
+    for exam_id, path in project.bank_paths.items():
+        source = Path(path)
+        assert source.is_relative_to(tmp_path / "user-data" / "ExamSystem" / "demo-banks")
+        restored = ExamBank.model_validate_json(source.read_text(encoding="utf-8"))
+        assert restored == project.banks[exam_id]
+    shutil.rmtree(resources)
+    saved = tmp_path / "demo.json"
+    project.save(saved)
+    assert project.load(saved).banks == project.banks
+
+
+def test_updated_demo_resources_do_not_overwrite_saved_project_banks(tmp_path, monkeypatch) -> None:
+    import shutil
+    import sys
+
+    from app.core.default_banks import new_demo_project
+    from app.core.state import ProjectState
+
+    resources = tmp_path / "resources"
+    shutil.copytree(DEMO, resources / "banks" / "demo")
+    monkeypatch.setattr(sys, "_MEIPASS", str(resources), raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "user-data"))
+    first = new_demo_project()
+    saved = tmp_path / "project.json"
+    first.save(saved)
+    assert new_demo_project().bank_paths == first.bank_paths
+
+    source = resources / "banks" / "demo" / "math.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    exam_id = payload["exam_id"]
+    payload["title"] = "新版示例题库"
+    source.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    updated = new_demo_project()
+    assert updated.banks[exam_id].title == "新版示例题库"
+    assert updated.bank_paths[exam_id] != first.bank_paths[exam_id]
+    shutil.rmtree(resources)
+    reopened = ProjectState.load(saved)
+    assert reopened.banks == first.banks
+    assert reopened.bank_paths == first.bank_paths
 
 
 def test_missing_bundled_demo_banks_have_actionable_error(tmp_path, monkeypatch) -> None:

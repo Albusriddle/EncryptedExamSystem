@@ -25,6 +25,11 @@ def settings_path() -> Path:
     return _user_dir("XDG_CONFIG_HOME", ".config") / "settings.ini"
 
 
+def data_dir() -> Path:
+    """自带题库的持久副本不能随 AppImage 卸载或临时解压目录清理而消失。"""
+    return _user_dir("XDG_DATA_HOME", ".local/share")
+
+
 def state_dir() -> Path:
     """崩溃日志等运行状态不能写进 /usr/bin 或只读安装目录。"""
     return _user_dir("XDG_STATE_HOME", ".local/state")
