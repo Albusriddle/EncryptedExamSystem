@@ -154,3 +154,21 @@ def test_invalid_default_bank_is_not_silently_skipped(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(default_banks, "data_dir", lambda: tmp_path / "data")
     with pytest.raises(BankImportError, match="math.json"):
         new_demo_project()
+
+
+def test_corrupted_snapshot_is_rebuilt(tmp_path, monkeypatch) -> None:
+    import shutil
+    import sys
+
+    from app.core.default_banks import new_demo_project
+
+    resources = tmp_path / "resources"
+    shutil.copytree(DEMO, resources / "banks" / "demo")
+    monkeypatch.setattr(sys, "_MEIPASS", str(resources), raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "user-data"))
+    first = new_demo_project()
+    source = Path(first.bank_paths["demo-math"])
+    source.write_text("{broken", encoding="utf-8")
+    second = new_demo_project()
+    assert second.bank_paths["demo-math"] == first.bank_paths["demo-math"]
+    assert json.loads(source.read_text(encoding="utf-8"))["exam_id"] == "demo-math"

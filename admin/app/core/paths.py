@@ -41,4 +41,8 @@ def executable_name(stem: str) -> str:
 
 def package_file_filter() -> str:
     # Linux 学生端是无扩展名的 ELF，不能被默认 *.exe 过滤器隐藏。
-    return "可执行文件 (*.exe);;所有文件 (*)" if sys.platform == "win32" else "学生端包 (*)"
+    return (
+        "可执行文件 (*.exe);;所有文件 (*)"
+        if sys.platform == "win32"
+        else "学生端包 (*.AppImage StudentClient*);;所有文件 (*)"
+    )

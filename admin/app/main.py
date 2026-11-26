@@ -87,7 +87,12 @@ def selftest() -> int:
         from app.ui.main_window import MainWindow  # noqa: F401
 
         # 自检仍须发现漏带或损坏的示例，但不需要创建供工程保存路径引用的快照。
-        new_demo_project(persist=False)
+        project = new_demo_project(persist=False)
+        if (
+            len(project.banks) != 3
+            or sum(len(bank.questions) for bank in project.banks.values()) != 14
+        ):
+            raise RuntimeError("内置示例题库应为 3 库 14 题")
         blob = secure.seal(secure.MAGIC_KEY, "selftest-pass", b"x" * 32)
         if secure.unseal(secure.MAGIC_KEY, "selftest-pass", blob) != b"x" * 32:
             raise RuntimeError("secure.seal/unseal 自检失败")
@@ -175,7 +180,7 @@ def main() -> int:
             "banks": [
                 {
                     "exam_id": win.banks_tab.table.item(row, 0).text(),
-                    "source": win.state.bank_paths[win.banks_tab.table.item(row, 0).text()],
+                    "source": win.state.bank_paths.get(win.banks_tab.table.item(row, 0).text(), ""),
                     "title": win.banks_tab.table.item(row, 1).text(),
                     "questions": int(win.banks_tab.table.item(row, 2).text()),
                     "pick": int(win.banks_tab.table.item(row, 3).text()),

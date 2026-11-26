@@ -312,8 +312,8 @@ worker/              Cloudflare Worker 时间服务（只有空的 `worker/src`�
 
 | 项 | 基线 |
 |---|---|
-| Rust | Arch Linux：399 passed；各平台用例数以 `cargo test` 为准 |
-| Python | Arch Linux：537 passed、0 skipped（PySide6 offscreen，含参数化展开） |
+| Rust | Arch Linux：400 passed；Windows 由 `admin-package` 的 `cargo test` 覆盖，各平台以输出为准 |
+| Python | Arch Linux：538 passed、0 skipped；Windows：529 passed + 9 skipped（PySide6 offscreen） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 18 项（非 `--full`） |
 | CI | 9 个 job：`rust` / `python` / `linux-appimage` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `tools-scripts` / `web-smoke` |
@@ -381,7 +381,7 @@ ExamAdmin-<版本>/
 | [风险接受记录](docs/风险接受记录.md) | 决策者 | R-01~R-06 的事实、理由、补偿、复审条件 |
 | [时间令牌协议](docs/时间令牌协议.md) | 自建时间服务的学校 | 请求 / 响应 / 验签 / 最小服务端示例 |
 | [架构与实施方案](docs/保密考试系统_架构与实施方案.md) | 维护者 / 接手人 | 设计取舍、里程碑、踩过的坑 |
-| [代码审阅报告](docs/代码审阅报告.md) | 维护者 | 129 轮审阅的问题索引、技术无解项、复跑方式（轮次以该报告为准） |
+| [代码审阅报告](docs/代码审阅报告.md) | 维护者 | 130 轮审阅的问题索引、技术无解项、复跑方式（轮次以该报告为准） |
 | [发布说明](docs/release-notes.md) | 教师 / 下载者 | 逐版本变更、已知限制、校验口径 |
 | [Arch Linux 指南](docs/arch-linux.md) | Linux 教师 / 学生 / 维护者 | 原生构建、依赖、发布包、Wayland/X11、XDG 路径与排错 |
 | [题库质检 skill](.agents/skills/question-bank-qc/SKILL.md) | 出题 / 质检 | 双盲生产、门禁复核、修复复审流程 |

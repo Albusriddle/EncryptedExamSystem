@@ -115,10 +115,22 @@ fn package_fingerprint(opts: &UnlockOpts) -> String {
     let Some(path) = path else {
         return "unknown".into();
     };
-    match std::fs::read(path) {
-        Ok(bytes) => blake3::hash(&bytes).to_hex()[..8].to_string(),
-        Err(_) => "unknown".into(),
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return "unknown".into(),
+    };
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match std::io::Read::read(&mut file, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+            }
+            Err(_) => return "unknown".into(),
+        }
     }
+    hasher.finalize().to_hex()[..8].to_string()
 }
 
 pub struct ExamApp {

@@ -17,9 +17,13 @@ def appimage_path() -> Path | None:
     image = Path(os.environ.get("APPIMAGE", ""))
     directory = Path(os.environ.get("APPDIR", ""))
     # 外部进程可能继承 APPIMAGE；只认确实位于这次挂载点内的程序。
-    if image.is_absolute() and directory.is_absolute():
-        if Path(sys.executable).is_relative_to(directory):
-            return image
+    if (
+        image.is_absolute()
+        and directory.is_absolute()
+        and directory != Path("/")
+        and Path(sys.executable).is_relative_to(directory)
+    ):
+        return image
     return None
 
 

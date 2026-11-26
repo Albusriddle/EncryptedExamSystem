@@ -1,5 +1,7 @@
 # Arch Linux：原生构建与使用
 
+> 适用版本：**v1.9.1**（Linux 分发为开发分支内容，尚未随 Release 发布）。
+
 教师端（`ExamAdmin`）、学生端（`exam-client`）和可选的局域网网页服务端（`exam-server`）都可以在 Linux 原生运行，无需 Wine。请按学生使用的系统准备考试包：Linux 的 ELF 或 AppImage 不能发给 Windows 学生，Windows 的 `.exe` 也不能在 Linux 原生运行。打包时不会交叉编译学生端模板。
 
 ## 1. 安装依赖

@@ -3,7 +3,7 @@
 //! 用法：
 //!   exam-builder build --manifest manifest.json --banks banks/ --stub stub.exe --out StudentClient.exe
 //!   exam-builder keygen                          # 生成 64-hex 主密钥
-//!   exam-builder verify --package StudentClient.exe --master <hex>   # 校验包可解
+//!   EXAM_MASTER=<hex> exam-builder verify --package StudentClient.exe   # 校验包可解
 
 use std::path::PathBuf;
 
@@ -57,10 +57,6 @@ enum Cmd {
         /// 静默换掉却不知道。GUI 会在用户确认后自动带上本开关。
         #[arg(long)]
         force: bool,
-        /// 64-hex 主密钥。**优先用 --master-file 或环境变量 EXAM_MASTER**，
-        /// 因为命令行参数会出现在进程列表里，任何本机用户都能看到。
-        #[arg(long, conflicts_with = "master_file")]
-        master: Option<String>,
         /// 从文件读取主密钥（文件内容为 64-hex，末尾空白会被忽略）
         #[arg(long)]
         master_file: Option<PathBuf>,
@@ -72,7 +68,7 @@ enum Cmd {
         /// **不要**把 K_manifest 写进包（默认会写）。
         ///
         /// 默认写入时，学生双击 exe 即可解锁，无需任何参数。
-        /// 加上本开关后，学生必须自行提供 --master——GUI 无法使用，
+        /// 加上本开关后，学生必须自行提供 EXAM_MASTER / --master-file——GUI 无法使用，
         /// 仅用于调试或特殊的分发方式。
         #[arg(long)]
         no_embed_key: bool,
@@ -87,8 +83,6 @@ enum Cmd {
         /// 学生端包：提供时做交叉校验（试卷指纹与题目必须对得上）
         #[arg(long)]
         package: Option<PathBuf>,
-        #[arg(long, conflicts_with = "master_file")]
-        master: Option<String>,
         #[arg(long)]
         master_file: Option<PathBuf>,
     },
@@ -103,8 +97,6 @@ enum Cmd {
         /// 可选：对应答题卡，用于核对题目/显示作答
         #[arg(long)]
         sheet: Option<PathBuf>,
-        #[arg(long, conflicts_with = "master_file")]
-        master: Option<String>,
         #[arg(long)]
         master_file: Option<PathBuf>,
     },
@@ -114,8 +106,6 @@ enum Cmd {
         package: PathBuf,
         #[arg(long)]
         out: PathBuf,
-        #[arg(long, conflicts_with = "master_file")]
-        master: Option<String>,
         #[arg(long)]
         master_file: Option<PathBuf>,
     },
@@ -123,37 +113,28 @@ enum Cmd {
     Verify {
         #[arg(long)]
         package: PathBuf,
-        #[arg(long, conflicts_with = "master_file")]
-        master: Option<String>,
         #[arg(long)]
         master_file: Option<PathBuf>,
     },
 }
 
-/// 按优先级取主密钥：--master-file > --master > 环境变量 EXAM_MASTER。
+/// 按优先级取主密钥：--master-file > 环境变量 EXAM_MASTER（命令行不再接受 master）。
 ///
 /// **显式参数优先于环境变量**。反过来（环境变量优先）会造成极危险的静默错误：
 /// 管理员显式传了 A 密钥，但机器上残留的 EXAM_MASTER=B 被悄悄采用，
 /// 包用 B 加密而管理员以为用的是 A。
-fn resolve_master(master: Option<String>, master_file: Option<PathBuf>) -> Result<String> {
+fn resolve_master(master_file: Option<PathBuf>) -> Result<String> {
     if let Some(path) = master_file {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("读取密钥文件 {}", path.display()))?;
         return Ok(text.trim().to_string());
-    }
-    if let Some(m) = master {
-        eprintln!(
-            "⚠ 警告：主密钥通过命令行传入，本机其他用户可从进程列表读到。\
-             建议改用 --master-file 或环境变量 EXAM_MASTER。"
-        );
-        return Ok(m);
     }
     if let Ok(v) = std::env::var("EXAM_MASTER")
         && !v.trim().is_empty()
     {
         return Ok(v.trim().to_string());
     }
-    anyhow::bail!("缺少主密钥：请用 --master-file、--master 或环境变量 EXAM_MASTER 提供")
+    anyhow::bail!("缺少主密钥：请用 --master-file 或环境变量 EXAM_MASTER 提供")
 }
 
 /// 让"下游提前关闭管道"不再 panic。
@@ -180,12 +161,11 @@ fn verify_answer_sheet(
     file: &std::path::Path,
     as_json: bool,
     package: Option<&std::path::Path>,
-    master: Option<String>,
     master_file: Option<PathBuf>,
 ) -> Result<i32> {
     use common::answer_sheet;
 
-    let master_hex = resolve_master(master, master_file)?;
+    let master_hex = resolve_master(master_file)?;
     let master = crypto::master_from_hex(&master_hex).context("解析主密钥")?;
     let k_manifest = container::manifest_key(&master);
 
@@ -281,12 +261,11 @@ fn review_paper(
     student_id: u64,
     session_id: u32,
     sheet_path: Option<&std::path::Path>,
-    master: Option<String>,
     master_file: Option<PathBuf>,
 ) -> Result<()> {
     use common::picker;
 
-    let master_hex = resolve_master(master, master_file)?;
+    let master_hex = resolve_master(master_file)?;
     let master = crypto::master_from_hex(&master_hex).context("解析主密钥")?;
     let k_manifest = container::manifest_key(&master);
     let bytes =
@@ -460,10 +439,9 @@ fn check_binding(
 fn export_pins(
     package: &std::path::Path,
     out: &std::path::Path,
-    master: Option<String>,
     master_file: Option<PathBuf>,
 ) -> Result<()> {
-    let master_hex = resolve_master(master, master_file)?;
+    let master_hex = resolve_master(master_file)?;
     let master = crypto::master_from_hex(&master_hex).context("解析主密钥")?;
     let bytes = std::fs::read(package).with_context(|| format!("读取 {}", package.display()))?;
     let payload = container::extract_payload(&bytes).context("包里没有 payload")?;
@@ -518,10 +496,9 @@ fn main() -> Result<()> {
             file,
             json,
             package,
-            master,
             master_file,
         } => {
-            let code = verify_answer_sheet(&file, json, package.as_deref(), master, master_file)?;
+            let code = verify_answer_sheet(&file, json, package.as_deref(), master_file)?;
             std::process::exit(code);
         }
         Cmd::ReviewPaper {
@@ -529,17 +506,9 @@ fn main() -> Result<()> {
             student,
             session,
             sheet,
-            master,
             master_file,
         } => {
-            review_paper(
-                &package,
-                student,
-                session,
-                sheet.as_deref(),
-                master,
-                master_file,
-            )?;
+            review_paper(&package, student, session, sheet.as_deref(), master_file)?;
         }
         Cmd::Build {
             manifest,
@@ -548,14 +517,13 @@ fn main() -> Result<()> {
             out,
             allow_weak_kdf,
             force,
-            master,
             master_file,
             emit_keyfile,
             no_embed_key,
             pin_login,
             emit_pins,
         } => {
-            let key = resolve_master(master, master_file)?;
+            let key = resolve_master(master_file)?;
             build(BuildRequest {
                 manifest_path: manifest,
                 banks_dir: banks,
@@ -573,17 +541,15 @@ fn main() -> Result<()> {
         Cmd::ExportPins {
             package,
             out,
-            master,
             master_file,
         } => {
-            export_pins(&package, &out, master, master_file)?;
+            export_pins(&package, &out, master_file)?;
         }
         Cmd::Verify {
             package,
-            master,
             master_file,
         } => {
-            let key = resolve_master(master, master_file)?;
+            let key = resolve_master(master_file)?;
             verify(package, &key)?;
         }
     }
@@ -882,7 +848,7 @@ fn build(req: BuildRequest) -> Result<()> {
     //
     // 注意：v3 起密钥默认写在**包**（payload 的密钥区）里，不再依赖
     // stub 是否编译期内嵌。所以这里只做"是不是我们的 client"的识别，
-    // 不再据此警告"学生需要 --master"——那取决于 embed_key 开关。
+    // 不再据此警告"学生需要 EXAM_MASTER"——那取决于 embed_key 开关。
     let stub_plain =
         contains_bytes(&stub, b"EXAMKEY:PLAIN") || contains_bytes(&stub, b"EXAMKEY:EMBEDDED");
     if !stub_plain {
@@ -969,7 +935,7 @@ fn build(req: BuildRequest) -> Result<()> {
         println!("  ✔ 已内嵌密钥：学生双击 exe 输入学号即可，无需任何参数或密钥文件。");
     } else {
         println!(
-            "  ⚠ 未内嵌密钥（--no-embed-key）：学生必须自行提供 --master。\n\
+            "  ⚠ 未内嵌密钥（--no-embed-key）：学生必须自行提供 EXAM_MASTER / --master-file。\n\
              这意味着图形界面无法使用，请确认这是你想要的分发方式。"
         );
     }
@@ -1078,8 +1044,30 @@ mod tests {
         dir
     }
 
+    fn master_keyfile(dir: &std::path::Path) -> PathBuf {
+        let path = dir.join("master.txt");
+        std::fs::write(&path, master_hex()).unwrap();
+        path
+    }
+
     fn master_hex() -> String {
         "11".repeat(32)
+    }
+
+    #[test]
+    fn master_flag_is_rejected() {
+        assert!(
+            Cli::try_parse_from([
+                "exam-builder",
+                "verify",
+                "--package",
+                "x.exe",
+                "--master",
+                "aa",
+            ])
+            .is_err(),
+            "命令行 --master 必须被拒绝"
+        );
     }
 
     /// 造一个最小可用的包，返回 (包路径, K_manifest)。
@@ -1170,7 +1158,8 @@ mod tests {
         let file = dir.join("answers-2021001-1.eea");
         write_atomic(&file, &seal(&k_manifest, &sheet).unwrap(), true).unwrap();
 
-        let code = verify_answer_sheet(&file, true, Some(&pkg), Some(master_hex()), None).unwrap();
+        let code =
+            verify_answer_sheet(&file, true, Some(&pkg), Some(master_keyfile(&dir))).unwrap();
         assert_eq!(code, 0, "正常答题卡应通过");
 
         // 改一个字节：必须解密失败（退出码 2）
@@ -1178,7 +1167,8 @@ mod tests {
         let n = bytes.len();
         bytes[n - 1] ^= 0x01;
         std::fs::write(&file, &bytes).unwrap();
-        let code = verify_answer_sheet(&file, true, Some(&pkg), Some(master_hex()), None).unwrap();
+        let code =
+            verify_answer_sheet(&file, true, Some(&pkg), Some(master_keyfile(&dir))).unwrap();
         assert_eq!(code, 2, "被改动的文件必须解不开");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1197,7 +1187,7 @@ mod tests {
         write_atomic(&file, &seal(&k_a, &sheet).unwrap(), true).unwrap();
 
         let code =
-            verify_answer_sheet(&file, true, Some(&pkg_b), Some(master_hex()), None).unwrap();
+            verify_answer_sheet(&file, true, Some(&pkg_b), Some(master_keyfile(&dir))).unwrap();
         assert_eq!(
             code, 5,
             "拿错包（不同 master）属于'包用不了'，不是绑定不一致"
@@ -1224,7 +1214,7 @@ mod tests {
         write_atomic(&file, &seal(&k_a, &sheet).unwrap(), true).unwrap();
 
         let code =
-            verify_answer_sheet(&file, true, Some(&pkg_b), Some(master_hex()), None).unwrap();
+            verify_answer_sheet(&file, true, Some(&pkg_b), Some(master_keyfile(&dir))).unwrap();
         assert_eq!(code, 4, "同一 master 下换了一份卷：必须判绑定不一致");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1236,7 +1226,7 @@ mod tests {
         let sheet = make_sheet(&pkg, &k_manifest);
         let file = dir.join("answers-2021001-1.eea");
         write_atomic(&file, &seal(&k_manifest, &sheet).unwrap(), true).unwrap();
-        let code = verify_answer_sheet(&file, true, None, Some(master_hex()), None).unwrap();
+        let code = verify_answer_sheet(&file, true, None, Some(master_keyfile(&dir))).unwrap();
         assert_eq!(code, 5, "不给包时必须拒绝，不能把未校验绑定当通过");
         std::fs::remove_dir_all(&dir).ok();
     }

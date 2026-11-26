@@ -41,12 +41,11 @@ exam-server --package StudentClient.exe --keyfile key.txt \
 #    https://<教师机 IP>:8443/   （首次会提示不安全 → 高级 → 继续前往）
 ```
 
-master 的唯一**推荐**传递方式是环境变量 `EXAM_MASTER`（或 `--master-file`，文件权限由教师自管）。
-**`--master` 参数目前仍然存在**，用于兼容脚本与应急；它的值会出现在进程列表（`ps` / 任务管理器）里，
-因此**仓库安全红线（AGENTS §5）禁止在正式流程使用它**，`exam-builder` 在使用时会打印弃用警告
-（优先级：`--master-file` > `--master` > `EXAM_MASTER`）。
-本项目的脚本与文档示例**一律不提供** `--master` 用法；看到别人这样传，应视为操作违规而不是「支持的用法」。
-学生端 `exam-client` 没有 `--master` 参数（只有 `EXAM_MASTER` / `--master-file`）。
+master 只能通过环境变量 `EXAM_MASTER` 或 `--master-file` 传递（文件权限由教师自管）。
+**命令行 `--master` 参数已经移除**：它会把密钥暴露在进程列表（`ps` / 任务管理器）里，
+`AGENTS.md` §5 明确禁止；需要自动化时请用文件或环境变量（优先级：`--master-file` > `EXAM_MASTER`）。
+本项目的脚本与文档示例一律不提供 `--master` 用法；看到别人这样传，说明使用的是旧版二进制。
+学生端 `exam-client` 同样只有 `EXAM_MASTER` / `--master-file`。
 
 - `stub-template.exe` 只在发布包里有；从源码构建时 `--stub` 用
   `target/release/exam-client`（Windows 带 `.exe`）；

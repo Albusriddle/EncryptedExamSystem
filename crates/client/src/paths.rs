@@ -50,7 +50,12 @@ fn executable_path_with(exe: PathBuf, image: Option<OsString>, dir: Option<OsStr
         let image = PathBuf::from(image);
         let dir = PathBuf::from(dir);
         // builder 等外部程序可能继承这些环境变量，不能误读教师端 AppImage。
-        if image.is_absolute() && dir.is_absolute() && exe.starts_with(&dir) {
+        // APPDIR="/" 会让任何绝对路径都满足包含关系；排除根目录。
+        if image.is_absolute()
+            && dir.is_absolute()
+            && dir != PathBuf::from("/")
+            && exe.starts_with(&dir)
+        {
             return image;
         }
     }
@@ -84,6 +89,7 @@ mod tests {
             ("/home/teacher/ExamAdmin.AppImage", "/tmp/.mount_teacher"),
             ("relative.AppImage", "/home/student"),
             ("/home/student/StudentClient.AppImage", "relative"),
+            ("/home/student/StudentClient.AppImage", "/"),
         ] {
             assert_eq!(
                 executable_path_with(native.clone(), Some(image.into()), Some(dir.into())),

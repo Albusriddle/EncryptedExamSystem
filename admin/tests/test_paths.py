@@ -65,6 +65,7 @@ def test_native_executable_names(
     monkeypatch.setattr(paths.sys, "platform", platform)
     assert paths.executable_name("StudentClient") == f"StudentClient{suffix}"
     if platform == "linux":
-        assert paths.package_file_filter().split(";;")[0].endswith("(*)")
+        first = paths.package_file_filter().split(";;")[0]
+        assert "*.AppImage" in first and "StudentClient*" in first
     else:
         assert paths.package_file_filter().split(";;")[0].endswith("(*.exe)")

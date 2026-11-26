@@ -29,7 +29,14 @@ def _persistent_demo_path(bank: ExamBank, name: str) -> Path:
     tmp: Path | None = None
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        if not path.is_file():
+        # 已有快照必须与当前资源逐字节一致；损坏/截断时重建，而不是一直复用坏文件。
+        current = None
+        if path.is_file():
+            try:
+                current = path.read_bytes()
+            except OSError:
+                current = None
+        if current != raw:
             # 多个管理端可同时启动；唯一临时文件 + 原子替换避免读到半份 JSON。
             with tempfile.NamedTemporaryFile(dir=directory, delete=False) as stream:
                 tmp = Path(stream.name)
