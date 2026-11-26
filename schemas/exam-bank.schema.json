@@ -68,6 +68,7 @@
           "items": {
             "$ref": "#/$defs/QuestionSample"
           },
+          "maxItems": 20,
           "title": "Samples",
           "type": "array"
         },
@@ -177,11 +178,13 @@
       "properties": {
         "input": {
           "default": "",
+          "maxLength": 4096,
           "title": "Input",
           "type": "string"
         },
         "output": {
           "default": "",
+          "maxLength": 4096,
           "title": "Output",
           "type": "string"
         }

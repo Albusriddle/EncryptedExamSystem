@@ -67,8 +67,8 @@ class QuestionBody(BaseModel):
 class QuestionSample(BaseModel):
     """一道题的输入/输出示例；只用于学生端展示，不参与判分。"""
 
-    input: str = ""
-    output: str = ""
+    input: str = Field(default="", max_length=4096)
+    output: str = Field(default="", max_length=4096)
 
 
 MAX_SAMPLES = 20
@@ -90,7 +90,7 @@ class Question(BaseModel):
         json_schema_extra={"uniqueItems": True},
     )
     #: 输入/输出示例（学生端渲染成独立的输入框/输出框）。
-    samples: list[QuestionSample] = Field(default_factory=list)
+    samples: list[QuestionSample] = Field(default_factory=list, max_length=20)
     kp: str | None = None
     difficulty: int | None = Field(default=None, ge=0, le=255)
     #: 结构化答案（single/multi/blanks/fixes）。打包时会被剥离。

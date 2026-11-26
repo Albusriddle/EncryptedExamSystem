@@ -170,5 +170,5 @@ def test_samples_are_validated() -> None:
         Question(id="c2", type="code", stem="s", samples=[{"input": "", "output": ""}])
     with pytest.raises(ValueError, match="过大"):
         Question(id="c3", type="code", stem="s", samples=[{"input": "x" * 4096, "output": "y"}])
-    with pytest.raises(ValueError, match="最多 20"):
+    with pytest.raises(ValueError, match="at most 20|最多 20"):
         Question(id="c4", type="code", stem="s", samples=[{"input": "1", "output": "1"}] * 21)

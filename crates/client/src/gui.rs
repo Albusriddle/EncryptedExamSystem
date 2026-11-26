@@ -1438,7 +1438,8 @@ fn sample_box(ui: &mut egui::Ui, idx: usize, label: &str, text: &str) {
         .fill(ui.visuals().extreme_bg_color)
         .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
-            egui::ScrollArea::horizontal()
+            egui::ScrollArea::both()
+                .max_height(240.0)
                 .id_salt(("sample", idx, label))
                 .show(ui, |ui| {
                     let rich = egui::RichText::new(shown).monospace().size(13.0);

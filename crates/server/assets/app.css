@@ -14,6 +14,12 @@
   .q:first-child { border-top:0; }
   .qno { font-weight:600; margin-bottom:8px; }
   pre.stem { white-space:pre-wrap; font-family:inherit; margin:0 0 10px; }
+  .samples { margin: 6px 0 10px; }
+  .sample-title { font-size:12px; color:#777; margin:8px 0 4px; }
+  .sample-label { font-size:12px; color:#777; margin:4px 0 2px; }
+  pre.sample-box { white-space:pre; overflow:auto; max-height:240px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size:13px; background:#f2f3f5; border:1px solid #e2e4e8; border-radius:6px; padding:8px; margin:0 0 6px; }
+  pre.sample-box.empty { color:#999; font-style:italic; }
+  @media (prefers-color-scheme: dark) { pre.sample-box { background:#15161a; border-color:#2e3034; } }
   textarea { width:100%; box-sizing:border-box; min-height:120px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size:14px; padding:10px; border:1px solid #c9ccd2; border-radius:6px; }
   textarea.code { min-height:220px; }
   .bar { position:sticky; top:0; z-index:2; background:inherit; padding:10px 0; display:flex; gap:12px; align-items:center; }

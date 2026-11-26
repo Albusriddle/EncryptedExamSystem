@@ -62,6 +62,14 @@ for _ in $(seq 1 80); do
 done
 # 这一行是 v1.4.3 新增的启动结论，缺失说明时间校验被绕过或日志被改坏。
 grep -q "时间校验：" "$WORK/server.log" || { cat "$WORK/server.log"; echo "启动日志缺少时间校验结论"; exit 1; }
+# 前端资源要带 samples 渲染：题库字段 v1.9 起支持输入/输出示例，网页端必须能显示，
+# 否则同一份题库在桌面端/网页端表现不一致。
+curl -sS -k "https://127.0.0.1:$PORT/assets/app.js" -o "$WORK/app.js" \
+  || { echo "拉取 app.js 失败"; exit 1; }
+grep -q "renderSamples" "$WORK/app.js" || { echo "app.js 缺少 renderSamples"; exit 1; }
+curl -sS -k "https://127.0.0.1:$PORT/assets/app.css" -o "$WORK/app.css" \
+  || { echo "拉取 app.css 失败"; exit 1; }
+grep -q "sample-box" "$WORK/app.css" || { echo "app.css 缺少 sample-box 样式"; exit 1; }
 # -k：自签证书；冒烟不校验证书（证书正确性由 Rust 的 TLS 用例覆盖）。
 C="curl -sS -k -H Content-Type:application/json -H X-EES-CSRF:1"
 # 响应先落文件再 grep：`curl | grep -q` 在 pipefail 下会假失败——grep 一匹配就退出，

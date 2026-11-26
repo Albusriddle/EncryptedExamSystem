@@ -155,6 +155,31 @@ function optionsOf(item) {
   return [];
 }
 
+// 题目级输入/输出示例：与桌面端同一套字段（item.samples）。
+function renderSamples(samples) {
+  if (!Array.isArray(samples) || samples.length === 0) return null;
+  const box = document.createElement('div');
+  box.className = 'samples';
+  samples.forEach((smp, i) => {
+    const title = document.createElement('div');
+    title.className = 'sample-title';
+    title.textContent = `示例 ${i + 1}`;
+    box.appendChild(title);
+    for (const [label, value] of [['输入', smp && smp.input], ['输出', smp && smp.output]]) {
+      const lab = document.createElement('div');
+      lab.className = 'sample-label';
+      lab.textContent = label;
+      box.appendChild(lab);
+      const pre = document.createElement('pre');
+      const text = value == null ? '' : String(value);
+      pre.className = text === '' ? 'sample-box empty' : 'sample-box';
+      pre.textContent = text === '' ? '（空）' : text;
+      box.appendChild(pre);
+    }
+  });
+  return box;
+}
+
 function render() {
   // 旧实例必须还原成 textarea 再扔掉：否则每换一次卷（apply）都会攒下一批脱离 DOM 的
   // CodeMirror 实例，长场次里会一直吃内存。
@@ -169,6 +194,8 @@ function render() {
       const q = document.createElement('div'); q.className = 'card q';
       const no = document.createElement('div'); no.className = 'qno'; no.textContent = `${n}. （${item.score} 分）`; q.appendChild(no);
       q.appendChild(renderStem(item.stem));
+      const samples = renderSamples(item.samples);
+      if (samples) q.appendChild(samples);
       const body = item.body || {};
       const opts = optionsOf(item);
       if (opts.length && (item.qtype === 'single' || item.qtype === 'multiple' || item.qtype === 'judge')) {

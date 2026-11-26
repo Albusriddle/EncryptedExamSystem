@@ -322,3 +322,19 @@ def test_preview_renders_option_code_block() -> None:
     assert "```" not in out, "选项里的围栏不能原样出现"
     assert "| int x = 1;" in out
     assert out.splitlines()[0] == "    B. 程序如下："
+
+
+def test_preview_shows_samples() -> None:
+    from app.core.models import Question
+    from app.ui.tab_banks import _format_samples
+
+    q = Question(
+        id="c1",
+        type="code",
+        stem="s",
+        samples=[{"input": "3", "output": "*\n**\n***"}],
+    )
+    text = "\n".join(_format_samples(q))
+    assert "示例 1 输入" in text
+    assert "| 3" in text
+    assert "| **" in text

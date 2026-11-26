@@ -248,6 +248,7 @@ class BanksTab(QWidget):
             else:
                 for i, opt in enumerate(q.options):
                     lines.append(f"    {chr(ord('A') + i)}. {opt}")
+            lines.extend(_format_samples(q))
             lines.append("")
         if len(bank.questions) > 10:
             lines.append(f"…还有 {len(bank.questions) - 10} 题")
@@ -267,6 +268,18 @@ class BanksTab(QWidget):
                 if c == 2 or c == 3:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(r, c, item)
+
+
+def _format_samples(question) -> list[str]:
+    """把题目级 samples 渲染成预览里的纯文本块（与桌面/网页学生端结构一致）。"""
+
+    out: list[str] = []
+    for idx, sample in enumerate(getattr(question, "samples", []) or [], 1):
+        for label, text in (("输入", sample.input), ("输出", sample.output)):
+            out.append(f"    示例 {idx} {label}：")
+            body = (text or "").splitlines() or [""]
+            out.extend(f"    | {line}" for line in body)
+    return out
 
 
 def _format_stem(stem: str, prefix: str = "") -> list[str]:
