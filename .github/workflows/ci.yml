@@ -93,6 +93,9 @@ jobs:
       - name: 教师 AppImage 界面与持久题库自检
         run: |
           IMAGE="dist/ExamAdmin-$(tr -d '[:space:]' < VERSION)-x86_64.AppImage"
+          export XDG_DATA_HOME="$(mktemp -d)"
+          "$IMAGE" --appimage-extract-and-run --selftest
+          test ! -e "$XDG_DATA_HOME/ExamSystem"
           "$IMAGE" --appimage-extract-and-run --dump-ui target/appimage-ui
           admin/.venv/bin/python - <<'PY'
           import json
@@ -102,6 +105,9 @@ jobs:
           assert len(data["tabs"]) == 5, data
           assert data["qt_style"] == "fusion", data
           assert data["font_family"] == "Noto Sans CJK SC", data
+          # runner 同时装有 Noto；必须用 Qt 从随包文件注册的结果，而不是系统字体列表。
+          for filename in ("NotoSansCJK-Regular.ttc", "NotoSansCJK-Bold.ttc"):
+              assert "Noto Sans CJK SC" in data["bundled_fonts"].get(filename, []), data
           assert data["build"]["stub"].endswith("stub-template.AppImage"), data
           assert data["build"]["output"].endswith("StudentClient.AppImage"), data
           assert len(data["banks"]) == 3, data

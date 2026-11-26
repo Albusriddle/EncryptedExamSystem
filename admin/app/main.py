@@ -142,7 +142,7 @@ def main() -> int:
         from PySide6.QtWidgets import QToolBar
 
         app = QApplication(sys.argv)
-        configure_application(app)
+        bundled_fonts = configure_application(app)
         win = MainWindow()
         win.show()
         for _ in range(10):
@@ -159,6 +159,7 @@ def main() -> int:
             "qt_style": app.style().objectName(),
             "qt_platform": app.platformName(),
             "font_family": app.font().family(),
+            "bundled_fonts": bundled_fonts,
             "font_point_size": app.font().pointSizeF(),
             "device_pixel_ratio": win.devicePixelRatioF(),
             "tabs": [win.tabs.tabText(index) for index in range(win.tabs.count())],

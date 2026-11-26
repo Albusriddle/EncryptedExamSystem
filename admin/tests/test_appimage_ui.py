@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtGui import QFontDatabase  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from app.core.state import ProjectState  # noqa: E402
@@ -94,3 +96,37 @@ def test_appimage_default_output_remains_native_without_portable_template(image)
     (inner.parent / "stub-template").touch()
     assert tab_build.default_stub() == inner.parent / "stub-template"
     assert tab_build.default_out().name == "StudentClient"
+
+
+@pytest.mark.parametrize("load_ok", [False, True], ids=["system-only", "bundled"])
+def test_dump_ui_distinguishes_bundled_fonts_from_a_system_match(
+    qapp, image, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_ok: bool
+) -> None:
+    from app import main as entry
+    from app.ui import application
+
+    family = "Noto Sans CJK SC"
+    fonts = tmp_path / "fonts"
+    fonts.mkdir()
+    regular, bold = fonts / "NotoSansCJK-Regular.ttc", fonts / "NotoSansCJK-Bold.ttc"
+    regular.touch()
+    bold.touch()
+    monkeypatch.setattr(application, "resource_path", lambda name: tmp_path / name)
+    monkeypatch.setattr(QFontDatabase, "families", lambda: [family])
+    monkeypatch.setattr(QFontDatabase, "addApplicationFont", lambda _path: 0 if load_ok else -1)
+    monkeypatch.setattr(QFontDatabase, "applicationFontFamilies", lambda _fid: [family])
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "user-data"))
+    monkeypatch.setattr(entry, "QApplication", lambda _argv: qapp)
+    dump = tmp_path / "dump"
+    monkeypatch.setattr(sys, "argv", ["ExamAdmin", "--dump-ui", str(dump)])
+    style, font, palette = qapp.style().objectName(), qapp.font(), qapp.palette()
+    try:
+        assert entry.main() == 0
+        data = json.loads((dump / "info.json").read_text(encoding="utf-8"))
+        assert data["font_family"] == family, "系统字体同名时，单查 font_family 会误判"
+        expected = {regular.name: [family], bold.name: [family]} if load_ok else {}
+        assert data["bundled_fonts"] == expected
+    finally:
+        qapp.setStyle(style)
+        qapp.setFont(font)
+        qapp.setPalette(palette)
