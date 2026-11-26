@@ -142,6 +142,7 @@ def test_invalid_default_bank_is_not_silently_skipped(tmp_path, monkeypatch) -> 
     import shutil
     import sys
 
+    from app.core import default_banks
     from app.core.bank_import import BankImportError
     from app.core.default_banks import new_demo_project
 
@@ -149,5 +150,7 @@ def test_invalid_default_bank_is_not_silently_skipped(tmp_path, monkeypatch) -> 
     shutil.copytree(DEMO, dest)
     (dest / "math.json").write_text("invalid JSON", encoding="utf-8")
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    # 失败路径也会走到持久快照；不能写真实用户目录，否则测试既污染环境又依赖权限。
+    monkeypatch.setattr(default_banks, "data_dir", lambda: tmp_path / "data")
     with pytest.raises(BankImportError, match="math.json"):
         new_demo_project()

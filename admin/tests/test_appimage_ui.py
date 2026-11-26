@@ -39,6 +39,7 @@ def image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     return outer, inner
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="AppImage 只在 Linux 上生效")
 def test_appimage_build_tab_defaults_to_portable_student(qapp, image) -> None:
     outer, inner = image
     (inner.parent / "stub-template").touch()
