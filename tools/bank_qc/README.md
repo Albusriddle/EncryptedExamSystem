@@ -1,5 +1,7 @@
 # bank_qc —— 题库门禁与难度评分
 
+> 口径来源固定为[出题质检与难度口径](../../docs/出题质检与难度口径.md)，脚本参数随该文档的变更同步。
+
 两个**互相独立**的命令行工具，用来在把题库交给管理端导入之前，先把结构和质量问题挡在门外：
 
 | 脚本 | 作用 | 会不会改文件 |
@@ -7,30 +9,21 @@
 | `verify_bank.py` | 只读校验：结构 / 答案 / 判题材料回放 / 重复 / 原子化 / 代码排版 / 难度一致性 | **不会**（编译产物只写临时目录，退出即删） |
 | `score_bank.py` | 按 `S = 0.35K + 0.45A + 0.20C` 算难度目标；`--write` 时回写 `difficulty` | 默认**不会**；只有 `--write` 才写，且默认只写 `difficulty` / `meta.scoring` |
 
-口径来源：[出题质检与难度口径](../../docs/出题质检与难度口径.md)、
-[题库 JSON 规范](../../docs/题库JSON规范.md)。两份文档写的是「应该是什么样」，
-这两个脚本负责「实际是不是这样」。
+口径来源：[出题质检与难度口径](../../docs/出题质检与难度口径.md)、[题库 JSON 规范](../../docs/题库JSON规范.md)。两份文档写的是「应该是什么样」，这两个脚本负责「实际是不是这样」。
 
-> **它和管理端导入不是一回事。** 导入是产品层校验（格式 + 自洽），过了就能进工程；
-> 这两个脚本是**项目口径层**（题量、难度分布、重复、排版、判题材料）。两个都过才算能交卷。
-> 导入永远是唯一权威——工具是「提前发现」，不是「替代导入」。
+> **它和管理端导入不是一回事。** 导入是产品层校验（格式 + 自洽），过了就能进工程；这两个脚本是**项目口径层**（题量、难度分布、重复、排版、判题材料）。两个都过才算能交卷。导入永远是唯一权威——工具是「提前发现」，不是「替代导入」。
 
 ---
 
 ## 1. 环境
 
-- **Python 3.10+**（本机 3.13 实测）；只用标准库，**不需要** `pip install`，也不依赖
-  pydantic / PySide6；管理端装不装、装哪一版都不影响；
-- **C 编译器**（只有 `verify_bank.py` 的 fill / fix 判题回放需要）：clang 或 gcc 都行。
-  查找顺序 `--clang` → `$CLANG` → `$CC` → `PATH` 里的 `clang` / `gcc` / `cc`；
-  - 找不到时**只给一条 WARN 并跳过回放**（题库没问题，是本机缺工具链），
-    加 `--require-compile` 才当 error；
+- **Python 3.10+**（本机 3.13 实测）；只用标准库，**不需要** `pip install`，也不依赖 pydantic / PySide6；管理端装不装、装哪一版都不影响；
+- **C 编译器**（只有 `verify_bank.py` 的 fill / fix 判题回放需要）：clang 或 gcc 都行。查找顺序 `--clang` → `$CLANG` → `$CC` → `PATH` 里的 `clang` / `gcc` / `cc`；
+  - 找不到时**只给一条 WARN 并跳过回放**（题库没问题，是本机缺工具链），加 `--require-compile` 才当 error；
   - 想指定某一个：`--clang /path/to/clang`（Windows 上 `where clang` 查位置）；
-  - 回放前会**先编译一个最小程序做冒烟**：编译器能启动但装坏了（比如 cc1 静默退出）
-    同样只给一条 WARN 并跳过——否则 121 道题会报 121 条「编译失败」，看着像题库全错。
+  - 回放前会**先编译一个最小程序做冒烟**：编译器能启动但装坏了（比如 cc1 静默退出）同样只给一条 WARN 并跳过——否则 121 道题会报 121 条「编译失败」，看着像题库全错。
 
-两个脚本都**不写死任何盘符或目录**：题库路径、编译器、临时目录全由参数 / 环境决定，
-可以在任何目录下运行。
+两个脚本都**不写死任何盘符或目录**：题库路径、编译器、临时目录全由参数 / 环境决定，可以在任何目录下运行。
 
 ---
 
@@ -85,8 +78,7 @@ python verify_bank.py [PATH ...] [选项]
 | `--max-report N` | `80` | 人读模式最多打印多少条结论 |
 | `--json` | 关 | 输出 JSON（含每条 finding 的 severity / scope / where / rule / message，以及回放通过数） |
 
-退出码：`0` 无 error（warning 不影响）；`1` 有 error；`2` 参数或 IO 问题；**`130` 用户中断**
-（`Ctrl-C`，两个脚本一致）。
+退出码：`0` 无 error（warning 不影响）；`1` 有 error；`2` 参数或 IO 问题；**`130` 用户中断**（`Ctrl-C`，两个脚本一致）。
 
 ### 3.1 能查什么
 
@@ -145,28 +137,22 @@ python score_bank.py [PATH ...] [选项]
 | `--max-report N` | `20` | 每库最多列多少条改动 |
 | `--json` | 关 | 输出 JSON（含每题 from/to/k/a/c/S/source） |
 
-退出码：`0` 正常；`1` `--strict` 下存在偏差（档位或大题分值）；`2` 参数或 IO 问题；
-`3` `--write` 被拒绝（有题缺 `meta.scoring`）；**`130` 用户中断**。
+退出码：`0` 正常；`1` `--strict` 下存在偏差（档位或大题分值）；`2` 参数或 IO 问题；`3` `--write` 被拒绝（有题缺 `meta.scoring`）；**`130` 用户中断**。
 
 ### 4.1 它能给出的结论
 
 - 每题 `S`、目标档位、与当前 `difficulty` 的差异清单；
 - 多选一律 `9`，并报告真实 `S` 落在 `[2.00, 2.20]` 的题数（`50/50` 这种）；
 - 大题的 `uniform` / `formula` 两种口径；分值偏离统一口径会点名（`--fix-score` 才改）；
-- `meta.scoring` 里 `source=heuristic` 的题会**一直**被标出来，不会因为写过一次
-  就被当成「作者标注」。
+- `meta.scoring` 里 `source=heuristic` 的题会**一直**被标出来，不会因为写过一次就被当成「作者标注」。
 
 ### 4.2 它不能做什么
 
-- **不能替你判断 K/A/C 标得对不对**：优先读 `meta.scoring`；没有标注时给的是
-  **启发式估算**（关键词命中数 / 循环分支结构 / 非空代码行数），只用于占位——
-  启发式**不会**给出 A=4（设计类），也不理解「核心算法行数」；
-- 默认不改题干、选项、答案正文，也不改分值（只动 `difficulty`、`meta.scoring`；
-  加 `--fix-score` 才动大题 `score`/`rubric` 合计）；
+- **不能替你判断 K/A/C 标得对不对**：优先读 `meta.scoring`；没有标注时给的是**启发式估算**（关键词命中数 / 循环分支结构 / 非空代码行数），只用于占位——启发式**不会**给出 A=4（设计类），也不理解「核心算法行数」；
+- 默认不改题干、选项、答案正文，也不改分值（只动 `difficulty`、`meta.scoring`；加 `--fix-score` 才动大题 `score`/`rubric` 合计）；
 - 不做题数与判题材料校验（那是 `verify_bank.py` 的活）；
 - 不处理旧格式（`format_version: 2` 没有 `meta`/`score`，会提示先转原生 JSON）；
-- `--write` 会把文件重排成 `indent=2`、UTF-8（无 BOM）、LF 换行，**键顺序保持**；
-  仍然建议 `--backup` 或先提交 git。
+- `--write` 会把文件重排成 `indent=2`、UTF-8（无 BOM）、LF 换行，**键顺序保持**；仍然建议 `--backup` 或先提交 git。
 
 ---
 
@@ -174,10 +160,7 @@ python score_bank.py [PATH ...] [选项]
 
 这条最容易踩，因为它会让「schema 校验通过」给人一种「格式已经没问题」的错觉。
 
-`samples` 的**结构上界**（JSON Schema / 生成器）是：最多 20 组，`input`、`output` 各 ≤ 4096 **字符**。
-但**实际门禁更严**：Rust 校验、管理端导入、`verify_bank.py` 三处一致要求
-**每组 `input + output` 合计 ≤ 4096 UTF-8 字节**，且两者不能同时为空。
-schema 只是宽松上界——**以合计字节为准**，否则会出现「schema 过了、导入被拒」的排查成本。
+`samples` 的**结构上界**（JSON Schema / 生成器）是：最多 20 组，`input`、`output` 各 ≤ 4096 **字符**。但**实际门禁更严**：Rust 校验、管理端导入、`verify_bank.py` 三处一致要求**每组 `input + output` 合计 ≤ 4096 UTF-8 字节**，且两者不能同时为空。schema 只是宽松上界——**以合计字节为准**，否则会出现「schema 过了、导入被拒」的排查成本。
 
 具体差在哪：
 
@@ -188,8 +171,7 @@ schema 只是宽松上界——**以合计字节为准**，否则会出现「sch
 | 管理端 pydantic | 各字段 `max_length=4096`；另有 `MAX_SAMPLE_BYTES = 4096`（合计字节） |
 | `verify_bank.py` | `len ≤ 20`；`len(input.utf8) + len(output.utf8) > 4096` → error |
 
-中文题干下 4096 **字符** 的 UTF-8 长度可达 12 KB，比 4096 **字节** 宽松 3 倍；schema 也没有
-「两组字段合计」这个概念（只逐字段限长）。所以**写题库时按字节算**，别按字符算。
+中文题干下 4096 **字符** 的 UTF-8 长度可达 12 KB，比 4096 **字节** 宽松 3 倍；schema 也没有「两组字段合计」这个概念（只逐字段限长）。所以**写题库时按字节算**，别按字符算。
 
 ---
 
@@ -211,42 +193,32 @@ python tools/bank_qc/score_bank.py banks/final --strict
 python tools/bank_qc/verify_bank.py banks/final --expect choice=500,fill=60,fix=61,rutuan=30,zhaosheng=30 --require-compile
 ```
 
-本仓库自己的 CI（`tools-scripts` job）跑的是**反例守护**：`verify_bank.py banks/demo --no-compile`
-必须**失败**；如果哪天它突然 PASS，说明门禁被放水了，CI 会直接红。这是「门禁本身也要被门禁」
-那条经验的具体实现——`banks/demo` 的三个文件是演示数据，本来就该 FAIL（原因见 §9）。
+本仓库自己的 CI（`tools-scripts` job）跑的是**反例守护**：`verify_bank.py banks/demo --no-compile` 必须**失败**；如果哪天它突然 PASS，说明门禁被放水了，CI 会直接红。这是「门禁本身也要被门禁」那条经验的具体实现——`banks/demo` 的三个文件是演示数据，本来就该 FAIL（原因见 §9）。
 
 ---
 
 ## 7. 常见问题
 
 **`找不到 C 编译器…（本次按 warning 放行）` / `连一个最小程序都编译不了`**
-本机 `PATH` 里没有 clang / gcc，或装的那个根本跑不起来（MSYS2 的 gcc 缺 `cc1` 是常见情况）。
-用 `--clang <路径>` 换一个，或 `--no-compile` 明确只查结构；CI 里加 `--require-compile`
-让这类环境问题变成失败。**看到这两条 WARN 就说明判题材料没验过**，别当成通过。
+本机 `PATH` 里没有 clang / gcc，或装的那个根本跑不起来（MSYS2 的 gcc 缺 `cc1` 是常见情况）。用 `--clang <路径>` 换一个，或 `--no-compile` 明确只查结构；CI 里加 `--require-compile` 让这类环境问题变成失败。**看到这两条 WARN 就说明判题材料没验过**，别当成通过。
 
 **`--expect` 报「没找到对应题库」**
-`--expect` 的名字按**文件名主干**（`choice.json` → `choice`）、`exam_id` 或**主干前缀**
-（`rutuan` → `rutuan-q16-19.json`）匹配。文件叫 `choice-2027.json` 就写 `--expect choice-2027=500`；
-一个名字命中多个文件会报「有歧义」，写全主干即可。
+`--expect` 的名字按**文件名主干**（`choice.json` → `choice`）、`exam_id` 或**主干前缀**（`rutuan` → `rutuan-q16-19.json`）匹配。文件叫 `choice-2027.json` 就写 `--expect choice-2027=500`；一个名字命中多个文件会报「有歧义」，写全主干即可。
 
 **回放很慢**
-单次编译约 0.2–0.5 秒；121 道 fill/fix 全量回放（含撤销变体）在 8 并发下约 25–35 秒
-（既有实测 27.9 秒）。只想快速冒烟时用 `--limit 5`（题数 / 分档检查会自动跳过）。
+单次编译约 0.2–0.5 秒；121 道 fill/fix 全量回放（含撤销变体）在 8 并发下约 25–35 秒（既有实测 27.9 秒）。只想快速冒烟时用 `--limit 5`（题数 / 分档检查会自动跳过）。
 
 **`--limit` 之后一堆「题数不对 / 某档不足」**
 那是旧行为；现在 `--limit` 会自动跳过题数、`pick`、分档下限三类检查。
 
 **自己的题库被「每档 ≥15 题」判成 FAIL**
-那是**2027 交付口径**，不是格式错误。自己的小库自检时加 `--min-per-level 0`
-（骨架种类下限另用 `--max-skeleton-family 0` 关）。
+那是**2027 交付口径**，不是格式错误。自己的小库自检时加 `--min-per-level 0`（骨架种类下限另用 `--max-skeleton-family 0` 关）。
 
 **Windows 控制台是乱码**
-输出重定向到文件时脚本会强制 UTF-8；控制台直接看时用的是系统代码页，
-若仍乱码可先 `chcp 65001`。
+输出重定向到文件时脚本会强制 UTF-8；控制台直接看时用的是系统代码页，若仍乱码可先 `chcp 65001`。
 
 **`--write` 之后 git diff 很大**
-`--write` 会统一成 `indent=2` + LF。第一次对老文件跑会出现纯格式 diff，
-建议单独一个提交（`chore(banks): 统一 JSON 缩进`），别和题目改动混在一起。
+`--write` 会统一成 `indent=2` + LF。第一次对老文件跑会出现纯格式 diff，建议单独一个提交（`chore(banks): 统一 JSON 缩进`），别和题目改动混在一起。
 
 ---
 
@@ -293,9 +265,7 @@ dry-run（未写入；加 --write 落盘）
 
 ## 9. 为什么发布包里的示例题库不 PASS
 
-发布包自带的 `示例题库/`（`数学.json`、`英语.json`、`图片题示例.json`）只用于演示管理端流程
-（导入 → 场次 → 打包 → 收卷）。它由 `banks/demo/math.json`、`banks/demo/english.json` 与
-`examples/image-question.json` 改名生成，题量、难度与 K/A/C 都是随手填的，**不满足出题口径**。
+发布包自带的 `示例题库/`（`数学.json`、`英语.json`、`图片题示例.json`）只用于演示管理端流程（导入 → 场次 → 打包 → 收卷）。它由 `banks/demo/math.json`、`banks/demo/english.json` 与 `examples/image-question.json` 改名生成，题量、难度与 K/A/C 都是随手填的，**不满足出题口径**。
 
 对它们运行：
 
@@ -303,8 +273,7 @@ dry-run（未写入；加 --write 落盘）
 python tools/bank_qc/verify_bank.py 示例题库 --no-compile
 ```
 
-会得到 `FAIL`，这是**预期结果**（`scripts/make-release-zip.sh` 生成的 `示例题库/README.md` 也这么写），
-不代表工具或题库文件损坏。**失败的直接原因是结构错误，不是题量**。本机实测（v1.9.1，`--no-compile`）：
+会得到 `FAIL`，这是**预期结果**（`scripts/make-release-zip.sh` 生成的 `示例题库/README.md` 也这么写），不代表工具或题库文件损坏。**失败的直接原因是结构错误，不是题量**。本机实测（v1.9.1，`--no-compile`）：
 
 ```text
 题库 3 个，题 11 道
@@ -321,17 +290,11 @@ FAIL
 | `图片题示例.json` | 1 题**缺 `kp`** + **缺 `difficulty`**（报 `difficulty 必须是整数，实际 None`）+ **缺 `body`** → 3 条；选项只有 3 个（工具允许 ≥2，但不是 2027 口径的 4 选） |
 | 三个文件 | 11 条 `warnings` 都是「没有 `meta.scoring`（K/A/C）」——所以 `score_bank.py --write` 会被拒绝（退出码 3），先补标注或用 `--allow-heuristic` |
 
-**为什么 `body` 是 error**：这三个文件用的是最早的写法（顶层 `options: ["A……","B……"]`，没有
-`body`）。模型层为了向后兼容仍能读它，但**门禁要求 `body.kind` 形态**——新题库请一律写
-`body: {"kind": "options", "options": [{"key": "A", "text": "……"}]}`（规范见
-[题库 JSON 规范](../../docs/题库JSON规范.md)）。
+**为什么 `body` 是 error**：这三个文件用的是最早的写法（顶层 `options: ["A……","B……"]`，没有 `body`）。模型层为了向后兼容仍能读它，但**门禁要求 `body.kind` 形态**——新题库请一律写 `body: {"kind": "options", "options": [{"key": "A", "text": "……"}]}`（规范见[题库 JSON 规范](../../docs/题库JSON规范.md)）。
 
-关于**题量**：题量只在给了 `--expect` 时才判，**不加 `--expect` 时题量不产生任何错误**。
-所以上面这些结构错误已经足够让门禁 FAIL；「题量远低于 2027 交付口径（500/60/61/30/30）」
-是另一层结论，别把它当成 FAIL 的直接原因。
+关于**题量**：题量只在给了 `--expect` 时才判，**不加 `--expect` 时题量不产生任何错误**。所以上面这些结构错误已经足够让门禁 FAIL；「题量远低于 2027 交付口径（500/60/61/30/30）」是另一层结论，别把它当成 FAIL 的直接原因。
 
-真正出题请按 [题库 JSON 规范](../../docs/题库JSON规范.md) 与
-[出题质检与难度口径](../../docs/出题质检与难度口径.md) 编写。
+真正出题请按[题库 JSON 规范](../../docs/题库JSON规范.md)与[出题质检与难度口径](../../docs/出题质检与难度口径.md)编写。
 
 ---
 
@@ -348,19 +311,13 @@ FAIL
 关键区别：
 
 - 本目录的脚本是**参数化**的：同一套代码可以对任意题库跑，题量由 `--expect` 给；
-- skill 里的 `scripts/verify.py` / `scripts/score.py` 是题库仓的**逐字拷贝**：`verify.py` 把题量写死在
-  文件顶部的 `FILES`（`choice=500, fill=60, fix=61, rutuan=30, zhaosheng=30`），只适用于那 5 个库；
-- skill 另有 `qc.py`（V1–V8 补充门禁）、`check_choice.py`、`fill_inject.py`、`pretty_c.py`、
-  `admin_validate.py`，这些**本目录没有**；反过来，本目录的 `--expect` / `--limit` / `--json`
-  这类通用参数，skill 脚本也没有；
-- 阈值、题量分布、K/A/C 权重有分歧时，以 `docs/出题质检与难度口径.md` 为准；
-  需要「跑门禁、给结论」时用本目录的脚本；需要「组织两个人独立出题 / 复核、怎么抽样」时看 skill。
+- skill 里的 `scripts/verify.py` / `scripts/score.py` 是题库仓的**逐字拷贝**：`verify.py` 把题量写死在文件顶部的 `FILES`（`choice=500, fill=60, fix=61, rutuan=30, zhaosheng=30`），只适用于那 5 个库；
+- skill 另有 `qc.py`（V1–V8 补充门禁）、`check_choice.py`、`fill_inject.py`、`pretty_c.py`、`admin_validate.py`，这些**本目录没有**；反过来，本目录的 `--expect` / `--limit` / `--json` 这类通用参数，skill 脚本也没有；
+- 阈值、题量分布、K/A/C 权重有分歧时，以 `docs/出题质检与难度口径.md` 为准；需要「跑门禁、给结论」时用本目录的脚本；需要「组织两个人独立出题 / 复核、怎么抽样」时看 skill。
 
-> 不要把 skill 的 `verify.py` 与本目录的 `verify_bank.py` 当成同一个文件：两者字节数、参数、
-> 题量假设都不同（本目录脚本约 90 KB / 28 KB，skill 的约 15 KB / 5 KB）。
+> 不要把 skill 的 `verify.py` 与本目录的 `verify_bank.py` 当成同一个文件：两者字节数、参数、题量假设都不同（本目录脚本约 90 KB / 28 KB，skill 的约 15 KB / 5 KB）。
 >
-> **`.agents/` 不随发布包分发**，所以本文件不提供指向它的相对链接（发布包构建会判死链）。
-> 上面出现的这些路径只能作为行内代码阅读，不能在发布包里点开。
+> **`.agents/` 不随发布包分发**，所以本文件不提供指向它的相对链接（发布包构建会判死链）。上面出现的这些路径只能作为行内代码阅读，不能在发布包里点开。
 
 ---
 
