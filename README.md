@@ -314,7 +314,7 @@ worker/              Cloudflare Worker 时间服务（只有空的 `worker/src`�
 | Python | 469 passed + 1 skipped（收集 470，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 18 项（非 `--full`） |
-| CI | 8 个 job：`rust` / `python` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `tools-scripts` / `web-smoke` |
+| CI | 9 个 job：`rust` / `python` / `linux-appimage` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `tools-scripts` / `web-smoke` |
 
 > 数字会随提交变化，**以 CI 与脚本输出为准**。发布预检的项数看脚本最后一行
 > 「✓ 发布预检通过（N 项）」；测试数量看 `cargo test` / `pytest` 的统计行。

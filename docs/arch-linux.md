@@ -62,6 +62,10 @@ New projects automatically load the repository's math, English and question-type
 showcase banks from `banks/demo/`, including in the standalone bundle. These are
 **demo content only**, not production exam banks. Remove them before importing
 your own banks for a real exam. Opening a saved project keeps its banks unchanged.
+Frozen builds copy the public demo banks into the teacher's user data directory
+before recording their paths. Content-addressed snapshots survive AppImage
+unmounting/extraction cleanup and upgrades; newer demos do not overwrite a saved
+project's sources. Source-mode projects continue to reference `banks/demo/`.
 
 In the GUI, configure students/sessions, generate a master key and build the
 student package. On Linux the default output is `dist/StudentClient`
@@ -223,18 +227,47 @@ missing shared libraries; `ldd` can identify `not found` dependencies.
 |---|---|
 | Teacher settings, receipt key, default source-mode projects | `${XDG_CONFIG_HOME:-$HOME/.config}/ExamSystem/` |
 | Teacher crash log | `${XDG_STATE_HOME:-$HOME/.local/state}/ExamSystem/admin-crash.log` |
+| Frozen teacher demo-bank snapshots | `${XDG_DATA_HOME:-$HOME/.local/share}/ExamSystem/demo-banks/<content-hash>/` |
 | Student welcome-dismissal marker | `${XDG_DATA_HOME:-$HOME/.local/share}/ExamSystem/skip_welcome` |
 | Student answers | Beside `StudentClient` / the outer student AppImage if writable; otherwise `${XDG_DATA_HOME:-$HOME/.local/share}/ExamSystem/answers/` |
 
-Only absolute XDG overrides are accepted. Explicit `LOCALAPPDATA`/`APPDATA`
+The teacher app accepts only absolute XDG overrides; use absolute paths for the
+student client's upstream data-directory resolver too. Explicit `LOCALAPPDATA`/`APPDATA`
 overrides in the teacher app remain supported for existing portable deployments;
 unset those variables for normal XDG behavior. A packaged teacher app still tries
 `projects/` beside its executable first (beside the outer file for AppImage),
 then falls back to the user directory.
-Older source builds wrote settings to `~/ExamSystem/settings.ini` and the student
-welcome marker to `~/ExamSystem/skip_welcome`; copy them to the new locations if
-you want to keep those preferences. Collect `.eea` answer files wherever they were
-saved; existing answer formats are unchanged.
+
+### Migrating settings from earlier Linux source builds
+
+Earlier source builds used `~/ExamSystem/settings.ini`. Before the first launch of
+the XDG-aware teacher app, copy that INI to the new configuration directory to
+retain the welcome preference, last project, project directory and encryption
+preference. This is a **manual migration**, not an automatic move. Exit all teacher
+instances first; the following preserves the old file and never overwrites an
+existing XDG configuration (including one already created by the new app):
+
+```bash
+case "${XDG_CONFIG_HOME:-}" in
+  /*) config_root="$XDG_CONFIG_HOME" ;;
+  *) config_root="$HOME/.config" ;;
+esac
+settings_dir="$config_root/ExamSystem"
+if [ -f "$HOME/ExamSystem/settings.ini" ] && [ ! -e "$settings_dir/settings.ini" ]; then
+  mkdir -p -- "$settings_dir"
+  cp -p -- "$HOME/ExamSystem/settings.ini" "$settings_dir/settings.ini"
+fi
+```
+
+If the destination already exists, keep it and transfer the desired settings
+through the UI instead of replacing it. Explicit `LOCALAPPDATA`/`APPDATA` overrides
+still select the old portable-deployment path; unset them before using these XDG
+instructions. Windows paths and settings are unchanged.
+
+The student client retains upstream's automatic, one-time migration of
+`~/ExamSystem/skip_welcome` to the shared user data directory. Collect `.eea`
+answer files wherever they were saved; existing answer formats are unchanged.
+Do not delete demo-bank snapshots while saved projects still reference them.
 
 Store private teacher projects and keys on a Linux filesystem with working file
 permissions. FAT/exFAT and some NTFS mounts cannot enforce Unix `0600` permissions.
@@ -260,10 +293,11 @@ admin/.venv/bin/python scripts/smoke-appimage.py --native
 
 The end-to-end scripts contact the real HTTPS time sources. On a restricted
 network they must fail closed rather than silently skip time verification. The
-Arch container CI job also builds the Linux teacher bundle and runs its self-test;
-the existing Windows job remains in place for Windows-specific regressions.
-Both Arch and Ubuntu-baseline CI jobs exercise AppImage packaging and extraction;
-no release tag is created by building or uploading CI artifacts.
+Ubuntu `linux-appimage` CI job builds both AppImages and the traditional ZIP,
+runs `smoke-appimage.py`, and checks the teacher's `--dump-ui` JSON, including that
+its demo source files remain readable after the extraction process has exited.
+The existing Windows job remains in place for Windows-specific regressions.
+No release tag is created by building or uploading CI artifacts.
 
 For a real student GUI/answer-sheet smoke test **inside a desktop session**:
 
