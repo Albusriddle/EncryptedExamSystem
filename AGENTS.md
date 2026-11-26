@@ -104,7 +104,7 @@ bash scripts/preflight-release.sh          # 全过
 |---|---|
 | 时间门禁在派生入场密钥**之前** | `client/src/workflow.rs::unlock` 的步骤顺序 |
 | 同 `(student_id, session_id, salt)` 必得同一份试卷 | `common/src/picker.rs`，改动需保持 `GOLDEN_FP` 或显式说明 |
-| 试卷指纹只哈希题目 **ID** | 修改会导致已发试卷失效 |
+| 试卷指纹 = 学号 + 场次 + 每大题 `exam_id`（及 `part_id`）+ 题目 id；**不含题干/分值/title** | 改这些标识会让已发试卷指纹失效 |
 | `VERSION` 是唯一版本来源，三处同步 | `VERSION` / `Cargo.toml` / `admin/pyproject.toml`；两个锁文件（`Cargo.lock` / `admin/uv.lock`）与文档里的版本标记由 `scripts/bump-version.sh` 派生 |
 | 对外文案唯一来源 | `branding.json`（Rust `include_str!`，Python 运行时读） |
 | Python 与 Rust 的校验规则一致 | `ProjectState.validate()` ↔ `validate_sessions_impl()` |
