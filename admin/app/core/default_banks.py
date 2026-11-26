@@ -45,7 +45,8 @@ def _persistent_demo_path(bank: ExamBank, name: str) -> Path:
             tmp.unlink(missing_ok=True)
 
 
-def new_demo_project() -> ProjectState:
+def new_demo_project(*, persist: bool = True) -> ProjectState:
+    """加载并验证示例；自检可读取原始资源而不创建持久快照。"""
     directory = demo_banks_dir()
     paths = sorted(
         path for path in directory.glob("*.json") if path.name != "manifest.example.json"
@@ -55,7 +56,7 @@ def new_demo_project() -> ProjectState:
     project = ProjectState()
     for path in paths:
         bank = load_bank_from_path(path)
-        if getattr(sys, "_MEIPASS", None):
+        if persist and getattr(sys, "_MEIPASS", None):
             path = _persistent_demo_path(bank, path.name)
             bank = load_bank_from_path(path)
         if bank.exam_id in project.banks:

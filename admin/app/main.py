@@ -68,7 +68,7 @@ def install_excepthook() -> None:
 
 
 def selftest() -> int:
-    """只验证运行依赖可导入，不创建窗口。
+    """验证依赖与资源，不创建窗口或写入用户数据目录。
 
     打包（PyInstaller）后由 build_exe.py 调用，用来确认产物真的能跑——
     缺少依赖（如 pydantic）时 PyInstaller 不会报错，但打出来的 exe
@@ -86,8 +86,8 @@ def selftest() -> int:
         from app.core.state import ProjectState  # noqa: F401
         from app.ui.main_window import MainWindow  # noqa: F401
 
-        # 防止源码正常、发布包漏带默认题库却仍通过依赖自检。
-        new_demo_project()
+        # 自检仍须发现漏带或损坏的示例，但不需要创建供工程保存路径引用的快照。
+        new_demo_project(persist=False)
         blob = secure.seal(secure.MAGIC_KEY, "selftest-pass", b"x" * 32)
         if secure.unseal(secure.MAGIC_KEY, "selftest-pass", blob) != b"x" * 32:
             raise RuntimeError("secure.seal/unseal 自检失败")
