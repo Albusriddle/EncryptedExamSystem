@@ -214,7 +214,7 @@
 
 ## 5. 快速开始（学生）
 
-- 双击学生端 `.exe`（Windows）或 `.AppImage`（Linux；先允许执行），输入学号（启用 PIN 时再输入 6 位 PIN）；
+- 双击学生端 `.exe`（Windows）或 `.AppImage`（Linux；先允许执行），输入学号（启用 PIN 时再输入 6 位 PIN）；题号旁会显示 `#题库ID`；
 - 等待网络时间校验（至少 2 个时间源成功）；作答 → 交卷（**再点一次确认，5 秒内有效**；另有「取消」按钮）；
 - 答题卡自动加密保存在学生包同目录；不可写时 Windows 回退 `%LOCALAPPDATA%\ExamSystem\answers\`，Linux 回退 `${XDG_DATA_HOME:-~/.local/share}/ExamSystem/answers/`；
 - 若教师允许，交卷后可在结束时间前只读回看。
@@ -312,7 +312,7 @@ worker/              Cloudflare Worker 时间服务（只有空的 `worker/src`�
 
 | 项 | 基线 |
 |---|---|
-| Rust | Arch Linux：400 passed；Windows 由 `admin-package` 的 `cargo test` 覆盖，各平台以输出为准 |
+| Rust | Arch Linux：401 passed；Windows 由 `admin-package` 的 `cargo test` 覆盖，各平台以输出为准 |
 | Python | Arch Linux：538 passed、0 skipped；Windows：529 passed + 9 skipped（PySide6 offscreen） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 18 项（非 `--full`） |

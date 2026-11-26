@@ -67,9 +67,11 @@ grep -q "时间校验：" "$WORK/server.log" || { cat "$WORK/server.log"; echo "
 curl -sS -k "https://127.0.0.1:$PORT/assets/app.js" -o "$WORK/app.js" \
   || { echo "拉取 app.js 失败"; exit 1; }
 grep -q "renderSamples" "$WORK/app.js" || { echo "app.js 缺少 renderSamples"; exit 1; }
+grep -q "qid" "$WORK/app.js" || { echo "app.js 缺少题库编号 qid"; exit 1; }
 curl -sS -k "https://127.0.0.1:$PORT/assets/app.css" -o "$WORK/app.css" \
   || { echo "拉取 app.css 失败"; exit 1; }
 grep -q "sample-box" "$WORK/app.css" || { echo "app.css 缺少 sample-box 样式"; exit 1; }
+grep -q "\.qid" "$WORK/app.css" || { echo "app.css 缺少 .qid 样式"; exit 1; }
 # -k：自签证书；冒烟不校验证书（证书正确性由 Rust 的 TLS 用例覆盖）。
 C="curl -sS -k -H Content-Type:application/json -H X-EES-CSRF:1"
 # 响应先落文件再 grep：`curl | grep -q` 在 pipefail 下会假失败——grep 一匹配就退出，

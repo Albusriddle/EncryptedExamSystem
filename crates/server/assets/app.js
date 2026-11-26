@@ -192,7 +192,9 @@ function render() {
     for (const item of sec.items) {
       n++;
       const q = document.createElement('div'); q.className = 'card q';
-      const no = document.createElement('div'); no.className = 'qno'; no.textContent = `${n}. （${item.score} 分）`; q.appendChild(no);
+      const no = document.createElement('div'); no.className = 'qno'; no.textContent = `${n}. （${item.score} 分）`;
+      const qid = document.createElement('span'); qid.className = 'qid'; qid.textContent = `#${item.id}`; qid.title = `题库编号：${item.id}`; no.appendChild(qid);
+      q.appendChild(no);
       q.appendChild(renderStem(item.stem));
       const samples = renderSamples(item.samples);
       if (samples) q.appendChild(samples);

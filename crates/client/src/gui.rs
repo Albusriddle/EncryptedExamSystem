@@ -2061,10 +2061,19 @@ fn render_paper(
                 let resp = ui
                     .push_id(format!("item{seq}"), |ui| {
                         ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!("{seq}. ({}分)", item.score))
-                                    .size(15.0),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("{seq}. ({}分)", item.score))
+                                        .size(15.0),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("#{}", item.id))
+                                        .size(11.5)
+                                        .color(egui::Color32::GRAY)
+                                        .monospace(),
+                                )
+                                .on_hover_text(format!("题库编号：{}", item.id));
+                            });
                             render_stem(ui, &item.stem);
                             render_samples(ui, &item.samples);
                             ui.indent(format!("q{seq}"), |ui| {
@@ -2801,6 +2810,62 @@ mod tests {
         assert!(
             texts.iter().any(|t| t == "（空）"),
             "空输入应有占位符：{texts:?}"
+        );
+    }
+
+    #[test]
+    fn question_header_shows_bank_id() {
+        let mut paper = divider_test_paper(1, 1);
+        paper.sections[0].items[0].id = "S2-B13".to_string();
+        let mut sheet = common::answer_sheet::AnswerSheet::from_paper(&paper, 1, 1, 0);
+        let unlocked = workflow::Unlocked {
+            student_id: 1,
+            session_id: 1,
+            start: "2026-01-01T09:00:00+08:00".to_string(),
+            end: "2026-01-01T11:00:00+08:00".to_string(),
+            end_unix: 0,
+            net: None,
+            paper,
+            key_source: workflow::KeySource::Package,
+            k_manifest: [0u8; 32],
+            student_review: common::model::StudentReviewPolicy::None,
+        };
+        let mut nav = crate::nav::NavState::default();
+        let mut confirm_at: Option<Instant> = None;
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 1200.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = render_paper(
+                    ui,
+                    &unlocked,
+                    &mut nav,
+                    None,
+                    &mut sheet,
+                    true,
+                    &mut confirm_at,
+                    Instant::now(),
+                    0,
+                );
+            });
+        });
+        let texts: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "#S2-B13"),
+            "缺少题库编号：{texts:?}"
         );
     }
 
