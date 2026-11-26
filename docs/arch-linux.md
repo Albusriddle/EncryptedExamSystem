@@ -1,14 +1,10 @@
-# Arch Linux: native build and usage
+# Arch Linux：原生构建与使用
 
-The teacher GUI (`ExamAdmin`), student GUI (`exam-client`) and optional LAN web
-server (`exam-server`) run natively on Linux. Wine is not required. Build on the
-operating system your students use: a Linux ELF student package does **not** run
-on Windows, and a Windows `.exe` does **not** run natively on Linux. Packaging does
-not cross-compile the student template.
+教师端（`ExamAdmin`）、学生端（`exam-client`）和可选的局域网网页服务端（`exam-server`）都可以在 Linux 原生运行，无需 Wine。请按学生使用的系统准备考试包：Linux 的 ELF 或 AppImage 不能发给 Windows 学生，Windows 的 `.exe` 也不能在 Linux 原生运行。打包时不会交叉编译学生端模板。
 
-## 1. Install dependencies
+## 1. 安装依赖
 
-Use a full Arch upgrade, not a partial upgrade:
+Arch 不支持部分升级；安装依赖时请做完整系统升级：
 
 ```bash
 sudo pacman -Syu --needed \
@@ -21,35 +17,27 @@ rustup toolchain install stable --profile minimal
 rustup component add --toolchain stable rustfmt clippy
 ```
 
-`rust-toolchain.toml` selects stable for this repository; you do not need to change
-your global default toolchain. `curl` and CA certificates are required **at exam
-unlock time**, not only at build time. Arch's `curl` package brings the system CA
-certificate dependencies. Keep the trust store up to date.
+仓库的 `rust-toolchain.toml` 已选定 stable，不用改全局默认工具链。`curl` 和系统 CA 证书不只构建时需要，**学生解锁时也需要**；Arch 的 `curl` 包会安装证书依赖，请保持系统证书更新。
 
-The scripts use `uv` with Python 3.13, downloading that interpreter if necessary.
-This avoids rolling-release Python upgrades arriving before PySide6/PyInstaller
-support. Dependencies live in `admin/.venv`; do **not** use `sudo pip` or
-`--break-system-packages`. Initial setup needs Internet access.
+脚本用 `uv` 管理 Python 3.13，必要时下载解释器，避免 Arch 升级 Python 的速度超过 PySide6 / PyInstaller 的支持进度。依赖放在 `admin/.venv`，不要用 `sudo pip` 或 `--break-system-packages`。首次准备需要联网。
 
-## 2. Build and launch from source
+## 2. 从源码构建与启动
 
-From the repository root:
+在仓库根目录执行：
 
 ```bash
 bash scripts/build-linux.sh
 bash scripts/run-admin.sh
 ```
 
-The build creates native executables under `target/release/`, prepares the Python
-GUI environment and runs the admin dependency/crypto self-test. The launcher works
-from any working directory and forwards command-line arguments:
+构建会在 `target/release/` 生成原生程序，准备管理端 Python 环境，并执行依赖、示例题库及加密自检。启动脚本不要求当前工作目录是仓库根，还会转发参数：
 
 ```bash
 bash scripts/run-admin.sh --version
 bash scripts/run-admin.sh --selftest
 ```
 
-Equivalent manual commands:
+也可以手动执行：
 
 ```bash
 cargo build --locked --release --workspace
@@ -58,194 +46,104 @@ uv sync --locked --python 3.13 --extra gui --extra build --group dev
 uv run --locked python -m app
 ```
 
-New projects automatically load the repository's math, English and question-type
-showcase banks from `banks/demo/`, including in the standalone bundle. These are
-**demo content only**, not production exam banks. Remove them before importing
-your own banks for a real exam. Opening a saved project keeps its banks unchanged.
-Frozen builds copy the public demo banks into the teacher's user data directory
-before recording their paths. Content-addressed snapshots survive AppImage
-unmounting/extraction cleanup and upgrades; newer demos do not overwrite a saved
-project's sources. Source-mode projects continue to reference `banks/demo/`.
+新工程默认加载 `banks/demo/` 的数学、英语和题型展示，共 **3 库 14 题**，不带学生和场次。示例只用于演练，正式考试请移除示例，再导入自己的题库。重新打开已保存的工程时，不会额外加载示例。
 
-In the GUI, configure students/sessions, generate a master key and build the
-student package. On Linux the default output is `dist/StudentClient`
-(without `.exe`). The template is `target/release/exam-client`; the builder sets
-the output's executable permission. Keep the master key private using the GUI's
-explicit copy/export workflow; never distribute it with student packages.
-
-Students run the generated package, **not** the bare template:
+源码运行的默认学生端输出是 `dist/StudentClient`（无 `.exe`），模板是 `target/release/exam-client`。请通过图形界面生成主密钥、编排场次并打包。学生拿到的是**已打包的文件**，不是裸模板：
 
 ```bash
-chmod +x ./StudentClient  # may be necessary after downloading or copying
+chmod +x ./StudentClient    # 下载或复制后若丢失执行权限
 ./StudentClient
 ```
 
-The initial unlock still requires at least two agreeing HTTPS time sources.
-After unlocking, answering is offline. No Linux-specific bypass of the time gate
-or encryption is enabled. Existing accepted security limitations remain documented
-in `安全边界与威胁模型.md` and `风险接受记录.md`.
+学生解锁仍需至少两个 HTTPS 时间源成功且时间一致性达标；解锁后离线作答。Linux 分发没有改变时间门禁、加密方式或 [已接受的风险](风险接受记录.md)。
 
 ## 3. 推荐：AppImage 桌面版
+
+**GitHub Release 不随本改动分发 Linux 产物。** 请从源码构建，或从 GitHub Actions 的 `linux-appimage` job 下载 `exam-admin-linux-appimage` 产物（按工作流保留期提供）。构建命令：
 
 ```bash
 bash scripts/build-linux.sh --appimage
 ```
 
-This produces:
+产物：
 
-- `dist/ExamAdmin-<version>-x86_64.AppImage`: the complete teacher application.
-- `dist/stub-template-x86_64.AppImage`: the student **template**, not an exam yet.
-- The traditional Linux ZIP, also containing the AppImage student template.
+| 文件 | 用途 |
+|---|---|
+| `dist/ExamAdmin-<版本>-x86_64.AppImage` | 教师桌面程序 |
+| `dist/stub-template-x86_64.AppImage` | 学生端模板，**不是考试包** |
+| `dist/ExamAdmin-<版本>-linux.zip` | 传统目录式教师包；使用 `--appimage` 构建时也包含学生 AppImage 模板 |
 
-### Teacher and student workflow
+### 3.1 教师与学生的操作
 
-1. Keep the teacher AppImage in a permanent directory. In the file manager's
-   **Properties → Permissions**, allow execution, then double-click it. The
-   equivalent terminal command is `chmod +x ExamAdmin-*.AppImage` followed by
-   `./ExamAdmin-<version>-x86_64.AppImage`.
-2. Optionally choose **帮助 → 创建桌面启动器…** to add an application-menu entry;
-   pin it using your desktop environment. Installation is per-user, requires no
-   `sudo`, and happens only on request. Move the AppImage later? Run that action
-   again to update its absolute path.
-3. Use the same five tabs as Windows: **题库 → 学生 → 场次 → 打包 → 收卷判分**.
-   New projects still contain 3 public demo banks / 14 questions, and no students
-   or sessions; opening a saved project does not add demo banks.
-4. The packaging page defaults to `stub-template.AppImage` and an output named
-   `StudentClient.AppImage`. Generate the master and build as usual. No AppImage
-   build tools are needed for each exam: the existing Rust builder appends the
-   same encrypted exam format to the prebuilt template.
-5. Give students **only the generated student AppImage**, never the teacher app,
-   master, projects or PIN table. Students allow execution, double-click, and
-   enter their student ID / optional PIN. The initial network-time check is
-   unchanged. Collect the encrypted `.eea` files after the exam.
+1. 将教师 AppImage 放到固定目录，在文件管理器的「属性 → 权限」允许执行后双击。也可在终端用 `chmod +x ExamAdmin-*.AppImage`，再运行对应文件。
+2. 可选：点「帮助 → 创建桌面启动器…」，把程序添加到应用菜单。只写入当前用户目录，不需要 `sudo`，也不会在启动时自动创建。移动 AppImage 后请再次创建，更新启动器记录的绝对路径。
+3. 跟 Windows 一样，依次使用「题库 → 学生 → 场次 → 打包 → 收卷判分」。示例库可用于演练，只有明确选入场次的题库才用于该场考试。
+4. AppImage 管理端默认选 `stub-template.AppImage`，默认输出 `StudentClient.AppImage`。不必为每场考试安装 AppImage 构建工具；Rust builder 会把现有格式的加密考试数据追加到预建模板。
+5. **只发生成后的学生 AppImage**。不要分发管理端、主密钥、工程文件或整张 PIN 表。学生允许执行后双击，输入学号和（启用时）本人 PIN。考后回收加密的 `.eea` 答题卡。
 
-The teacher AppImage includes Python, Qt, builder, server, student template and
-Noto CJK regular/bold fonts. The student AppImage includes its native GUI and
-fonts. Neither requires Python or Wine to be installed. Qt uses a consistent
-light Fusion style on Linux while preserving the Windows native style.
+教师 AppImage 自带 Python、Qt、builder、网页服务端、学生模板及 Noto CJK 常规和粗体字库；学生 AppImage 自带原生 GUI 和字体。两端都不要求另外安装 Python 或 Wine。Linux 管理端用 Fusion 样式，Windows 保持原生样式。
 
-AppImages are read-only mounted applications. The client reads the exam from the
-**outer AppImage**, not its inner ELF. Answers are saved beside the outer student
-file if writable; teacher projects similarly live beside the outer teacher file,
-with the existing user-directory fallback. Nothing persistent is written inside
-`/tmp/.mount_*` or an extract-and-run directory.
+AppImage 内部目录是只读的。学生端从**外层 AppImage 文件**读取考试数据，可写时把答题卡存到外层文件旁；管理端可写时同样把工程存到外层文件旁。不可写时走用户目录回退，不会把持久文件存进临时挂载点或解压目录。
 
-### Runtime requirements and portability
+### 3.2 运行条件与兼容性
 
-A graphical Linux x86_64 session, working OpenGL/Wayland or X11 drivers, `curl`
-and system CA certificates are still required. AppImage does not emulate Windows
-or make an Arch-linked glibc binary work on arbitrarily old distributions.
-The local Arch build is verified on Arch. CI's separate `linux-appimage` job
-builds on Ubuntu 22.04 (glibc 2.35) as an older distribution baseline; its artifact
-is `exam-admin-linux-appimage`. Test on the intended distribution before an exam;
-a baseline build alone is not a claim that every Linux desktop was tested.
+需要 Linux x86_64 图形会话、可用的 X11 或 Wayland/OpenGL 驱动、`curl` 和系统 CA 证书。Arch 本机构建不等于可在旧发行版上运行。`linux-appimage` job 用 Ubuntu 22.04（glibc 2.35）作为较旧的构建基线；考试前仍须在目标发行版上试跑，不能把兼容性推断为验收结果。
 
-The bundled AppImage runtime is pinned to upstream release `20251108` and its
-SHA-256 is checked before use. It statically includes FUSE support, so it does
-**not** need `libfuse.so.2`. It normally needs access to `/dev/fuse`. In restricted
-containers or desktops where mounting is unavailable, use:
+AppImage runtime 固定在上游发布 `20251108`，只使用未超限且 SHA-256 校验正确的下载文件。runtime 自带 FUSE 支持，不需要 `libfuse.so.2`，但直接双击通常需要能访问 `/dev/fuse`。受限容器或不支持挂载的桌面可用解压运行：
 
 ```bash
-./ExamAdmin-<version>-x86_64.AppImage --appimage-extract-and-run
+./ExamAdmin-<版本>-x86_64.AppImage --appimage-extract-and-run
 ./StudentClient.AppImage --appimage-extract-and-run
 ```
 
-Normal desktop launchers use the FUSE route. The extraction option is also used
-by CI; it must preserve the same payload and persistent-file behavior. Licenses
-are included inside the image under `usr/share/doc/EncryptedExamSystem/` and in
-the teacher's directory bundle. To inspect/replace Qt or fonts, use
-`--appimage-extract`, modify `squashfs-root`, and rebuild with the provided
-AppImage packaging script; the original source and license rights remain intact.
+应用菜单启动器走常规 FUSE 路径，CI 走解压运行；两种方式应使用同一份外层考试数据和持久化路径。许可证在 AppImage 的 `usr/share/doc/EncryptedExamSystem/`，目录式包也附有许可证。需检查或更换 Qt / 字体时，可用 `--appimage-extract` 解压到 `squashfs-root`，再依据原许可、用随仓库提供的脚本重新构建。
 
-### Windows comparison
+### 3.3 传统目录式管理端
 
-The Windows `StudentClient.exe` was launched with Bottles/Soda. Its reported X11
-client area was **760×720**, matching the native student viewport. Wine reported
-missing Chinese system fonts; the Linux AppImages now carry Noto CJK instead of
-relying on each user's font setup. The downloaded official Windows teacher ZIP
-was checksum-verified, but its Qt runtime required `icuuc.dll`, unavailable in
-that Wine environment. This is a Wine compatibility limitation, not evidence of
-native Windows failure; Windows CI is retained. No real student PIN or exam
-answers were used for comparison.
-
-The Linux teacher AppImage's diagnostics reported **1080×760**, all five tabs,
-a visible watermark, the AppImage template/output defaults, and the demo banks.
-A debug student AppImage reported a fully contained welcome dialog at
-`center_offset=(0.0,-0.5)` in a 760×720 viewport, loading its Chinese font from
-inside the AppImage. These checks use program/window diagnostics, not screenshots.
-
-## 3.1 Traditional standalone admin bundle
+不需要 AppImage 时可以只构建 Linux ZIP：
 
 ```bash
 bash scripts/build-linux.sh --package
 ```
 
-Outputs:
+解压 `dist/ExamAdmin-<版本>-linux.zip`，进 `ExamAdmin/` 运行 `./ExamAdmin`；整个目录要一起保留，特别是 `_internal/`。原生学生模板为旁边的 `stub-template`。这种分发方式依赖目标机的系统库和 glibc；裸 ELF 学生端还需要系统 CJK 字体。不要把 Windows 和 Linux 的发布目录混用。
 
-- `dist/ExamAdmin/ExamAdmin`: PyInstaller onedir Linux application.
-- `dist/ExamAdmin/stub-template`: native student template.
-- `dist/ExamAdmin/_internal/`: bundled Python, Qt, builder and server dependencies.
-- `dist/ExamAdmin-<version>-linux.zip`: teacher bundle, including docs, licenses,
-  demo banks and native tools.
+## 4. Wayland、X11 与字体
 
-Extract the ZIP and run `./ExamAdmin` **inside its `ExamAdmin/` subdirectory**.
-Keep the complete directory, especially `_internal/`. Build and distribute Linux
-bundles separately from Windows bundles. The Linux build depends on system
-libraries and glibc; it is not a static binary or a promise of compatibility with
-older Linux distributions. The font and graphics runtime packages listed above
-are also needed for the traditional bare ELF student package. AppImage bundles
-its Chinese fonts; the graphics, curl and CA requirements still apply.
-
-## 4. Wayland, X11 and fonts
-
-The Rust student GUI supports both Wayland and X11. Qt normally selects the
-appropriate backend. If a Qt Wayland plugin/driver is unavailable, try XWayland:
+Rust 学生端支持 Wayland 和 X11；Qt 通常会自动选择。缺 Qt Wayland 插件或驱动不兼容时可用 XWayland：
 
 ```bash
 sudo pacman -S --needed xorg-xwayland
 QT_QPA_PLATFORM=xcb bash scripts/run-admin.sh
 ```
 
-To select Qt's native Wayland backend explicitly:
+也可以强制 Qt 走原生 Wayland：
 
 ```bash
 QT_QPA_PLATFORM=wayland bash scripts/run-admin.sh
 ```
 
-Run a graphical session, not a plain TTY or headless SSH shell. Do not set
-`QT_QPA_PLATFORM=offscreen` for an actual exam; that is for tests only.
+请从图形会话启动，不要只从 TTY 或无图形的 SSH 启动。`QT_QPA_PLATFORM=offscreen` 仅用于测试。
 
-Chinese text needs a CJK font. The student client recognizes Arch's
-`/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc` and its bold counterpart,
-provided by `noto-fonts-cjk`. If text appears as boxes, install that package and
-restart the application. For Qt plugin failures, `QT_DEBUG_PLUGINS=1` helps identify
-missing shared libraries; `ldd` can identify `not found` dependencies.
+裸 ELF 学生端会在 Arch 上查找 `/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc` 及同目录的粗体字库。中文显示方框时，安装 `noto-fonts-cjk` 后重启。若 Qt 插件加载失败，可开 `QT_DEBUG_PLUGINS=1` 查看日志，或用 `ldd` 查找 `not found` 的系统库。AppImage 字体验收看 `--dump-ui` 输出中 `bundled_fonts` 的实际注册结果；仅看到 `font_family` 同名不能证明字体随包。
 
-## 5. User files
+## 5. 用户文件与旧设置迁移
 
-| File | Linux location |
+| 文件 | Linux 位置 |
 |---|---|
-| Teacher settings, receipt key, default source-mode projects | `${XDG_CONFIG_HOME:-$HOME/.config}/ExamSystem/` |
-| Teacher crash log | `${XDG_STATE_HOME:-$HOME/.local/state}/ExamSystem/admin-crash.log` |
-| Frozen teacher demo-bank snapshots | `${XDG_DATA_HOME:-$HOME/.local/share}/ExamSystem/demo-banks/<content-hash>/` |
-| Student welcome-dismissal marker | `${XDG_DATA_HOME:-$HOME/.local/share}/ExamSystem/skip_welcome` |
-| Student answers | Beside `StudentClient` / the outer student AppImage if writable; otherwise `${XDG_DATA_HOME:-$HOME/.local/share}/ExamSystem/answers/` |
+| 教师设置、收据密钥、默认源码模式工程 | `${XDG_CONFIG_HOME:-$HOME/.config}/ExamSystem/` |
+| 教师崩溃日志 | `${XDG_STATE_HOME:-$HOME/.local/state}/ExamSystem/admin-crash.log` |
+| 打包版示例题库快照 | `${XDG_DATA_HOME:-$HOME/.local/share}/ExamSystem/demo-banks/<内容哈希>/` |
+| 学生欢迎提示的「不再提示」标记 | `${XDG_DATA_HOME:-$HOME/.local/share}/ExamSystem/skip_welcome` |
+| 学生答题卡 | `StudentClient` / 外层学生 AppImage 同目录；不可写时用 `${XDG_DATA_HOME:-$HOME/.local/share}/ExamSystem/answers/` |
 
-The teacher app accepts only absolute XDG overrides; use absolute paths for the
-student client's upstream data-directory resolver too. Explicit `LOCALAPPDATA`/`APPDATA`
-overrides in the teacher app remain supported for existing portable deployments;
-unset those variables for normal XDG behavior. A packaged teacher app still tries
-`projects/` beside its executable first (beside the outer file for AppImage),
-then falls back to the user directory.
+管理端只接受绝对 XDG 路径；学生端也请使用绝对路径。教师打包版优先把工程存到程序旁的 `projects/`（AppImage 使用外层文件的位置）。已显式配置 `LOCALAPPDATA` 或 `APPDATA` 的便携式管理端继续使用原位置；若要用 XDG，请取消这些覆盖。
 
-### Migrating settings from earlier Linux source builds
+打包版启动时把公开默认示例保存为按内容区分的快照，工程引用该持久路径。升级后的新题库不会覆盖旧工程的来源；只要工程仍在用，就不要删除快照。只读 `--selftest` 会从原始资源校验，不创建快照。源码版直接引用 `banks/demo/`。
 
-Earlier source builds used `~/ExamSystem/settings.ini`. Before the first launch of
-the XDG-aware teacher app, copy that INI to the new configuration directory to
-retain the welcome preference, last project, project directory and encryption
-preference. This is a **manual migration**, not an automatic move. Exit all teacher
-instances first; the following preserves the old file and never overwrites an
-existing XDG configuration (including one already created by the new app):
+### 迁移设置
+
+旧 Linux 源码版使用 `~/ExamSystem/settings.ini`。如需保留欢迎提示偏好、上次工程、工程目录和加密偏好，请退出管理端，**在第一次启动新版前**手动复制。以下命令保留旧文件，也不会覆盖已有的 XDG 配置：
 
 ```bash
 case "${XDG_CONFIG_HOME:-}" in
@@ -259,53 +157,32 @@ if [ -f "$HOME/ExamSystem/settings.ini" ] && [ ! -e "$settings_dir/settings.ini"
 fi
 ```
 
-If the destination already exists, keep it and transfer the desired settings
-through the UI instead of replacing it. Explicit `LOCALAPPDATA`/`APPDATA` overrides
-still select the old portable-deployment path; unset them before using these XDG
-instructions. Windows paths and settings are unchanged.
+目标文件若已存在，请保留它，通过界面重新选所需设置。学生端沿用 `~/ExamSystem/skip_welcome` 的一次性自动迁移。旧 `.eea` 格式不变，去原保存位置收集即可。Windows 设置路径不变。
 
-The student client retains upstream's automatic, one-time migration of
-`~/ExamSystem/skip_welcome` to the shared user data directory. Collect `.eea`
-answer files wherever they were saved; existing answer formats are unchanged.
-Do not delete demo-bank snapshots while saved projects still reference them.
+请将私有工程与密钥放在确实支持 `0600` 权限的 Linux 文件系统上；FAT/exFAT 和部分 NTFS 挂载无法落实这个权限。`chmod +x` 后仍报 `Permission denied` 时，还要检查挂载是否为 `noexec`，必要时移到允许执行的本地目录。
 
-Store private teacher projects and keys on a Linux filesystem with working file
-permissions. FAT/exFAT and some NTFS mounts cannot enforce Unix `0600` permissions.
-If a binary reports `Permission denied` despite `chmod +x`, check for a `noexec`
-mount and move it to an executable Linux filesystem (for example, your home
-folder). Keep the student package and generated `.eea` files together when
-collecting submissions.
-
-## 6. Validation
+## 6. 维护者验证
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
-(cd admin && QT_QPA_PLATFORM=offscreen uv run --locked pytest -q)
+bash scripts/run-admin-tests.sh
 (cd admin && uv run --locked ruff check . && uv run --locked ruff format --check .)
 bash scripts/verify-embed.sh
 bash scripts/preflight-release.sh
 bash scripts/smoke-web.sh
-# After building AppImages: real time gate, self-reading payload and rejection checks
+# 构建 AppImage 后：真实时间门禁、外层考试数据与拒绝路径
 admin/.venv/bin/python scripts/smoke-appimage.py --native
 ```
 
-The end-to-end scripts contact the real HTTPS time sources. On a restricted
-network they must fail closed rather than silently skip time verification. The
-Ubuntu `linux-appimage` CI job builds both AppImages and the traditional ZIP,
-runs `smoke-appimage.py`, and checks the teacher's `--dump-ui` JSON, including that
-its demo source files remain readable after the extraction process has exited.
-The existing Windows job remains in place for Windows-specific regressions.
-No release tag is created by building or uploading CI artifacts.
+端到端脚本会访问真实 HTTPS 时间源，网络受限时必须拒绝解锁，不能跳过门禁。`linux-appimage` job 构建真实产物、以无 FUSE 方式跑学生端烟测，并用教师端 `--selftest` 和 `--dump-ui` 验证自检不写用户目录、随包字体确实注册、示例快照在解压进程退出后仍可读。Windows 由 `admin-package` 另行测构建与测试。构建或上传 CI 产物不会创建 tag 或 Release。
 
-For a real student GUI/answer-sheet smoke test **inside a desktop session**:
+在**图形会话**中可另做学生端 GUI / 答题卡烟测：
 
 ```bash
 cargo build --locked -p client
 bash scripts/smoke-answers.sh
 ```
 
-This briefly opens a debug student GUI, fills synthetic answers and checks the
-encrypted answer sheet with the release builder. The automation hooks are absent
-from release builds; never distribute the debug package under `target/smoke-answers/`.
+脚本会短暂打开 debug 学生端，填入合成答案并用 release builder 校验加密答题卡。调试开关在 release 构建中无效，**不要分发** `target/smoke-answers/` 下的调试包。布局以程序自报的 rect、`contains`、`center_offset` 为准，不用屏幕截图判断。

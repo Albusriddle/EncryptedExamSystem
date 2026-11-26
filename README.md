@@ -201,9 +201,9 @@
 
 ## 4. 快速开始（教师）
 
-1. Windows 从 Release 下载 `ExamAdmin-<版本>-windows.zip` 并解压；Linux 使用构建或 CI 产物 `ExamAdmin-<版本>-x86_64.AppImage`（见 [Linux 桌面指南](docs/arch-linux.md#3-推荐appimage-桌面版)）；
+1. Windows 从 GitHub Release 下载 `ExamAdmin-<版本>-windows.zip` 并解压；Linux 从源码构建或从 Actions 下载 `ExamAdmin-<版本>-x86_64.AppImage`（见 [Linux 桌面指南](docs/arch-linux.md)），Linux 产物不随 Release 分发；
 2. Windows 双击 `ExamAdmin/ExamAdmin.exe`（保留整个文件夹）；Linux 在文件属性中允许执行，然后双击 AppImage，可从「帮助 → 创建桌面启动器」添加应用菜单入口；
-3. **[题库]** 默认已加载仓库 `banks/demo/` 的数学、英语与题型展示示例；可直接试用，正式考试请先移除示例再导入自己的题库（可多选）；
+3. **[题库]** 默认已加载数学、英语与题型展示示例（3 库 14 题）；可直接试用，正式考试请先移除示例再导入自己的题库（可多选）；
 4. **[学生]** 粘贴学号（每行一个）或按班级维护；
 5. **[场次]** 新建场次：时间、名单、科目与抽题数；
 6. **[打包]**：生成 / 粘贴主密钥 → 选输出学生包 → 按需勾选每生 PIN、时间令牌、「仅教师可查看原卷」（默认勾选 = 学生无回看）→ 开始打包；
@@ -240,7 +240,8 @@ bash scripts/build-linux.sh --package
 **[Arch Linux 指南](docs/arch-linux.md)**。AppImage 版包含中文字体与学生模板，
 教师和学生都可双击启动，无需安装 Python 或 Wine；传统无扩展名 ELF 仍可用。
 请为不同操作系统分别构建和分发。Arch 本机构建不等于兼容旧发行版；
-CI 的 `linux-appimage` job 使用 Ubuntu 22.04 基线，跨发行版支持仍需在目标系统验收。
+CI 的 `linux-appimage` job 使用 Ubuntu 22.04 基线，上传 `exam-admin-linux-appimage` 供下载；
+`release.yml` 不发布 Linux 产物。跨发行版支持仍需在目标系统验收。
 
 ### 通用构建
 
@@ -287,15 +288,16 @@ crates/client/       桌面学生端：GUI（egui）、解锁流程、答题卡�
 crates/server/       exam-server：内置 HTTP/1.1 + TLS 的网页作答服务端与监考页
                      src/：main / tls / clock / secure_fs / monitor；assets/：app.js、monitor.js、codemirror 等
 admin/app/core/      Qt-free 核心逻辑：models / state / grading / audit / receipt / secure /
-                     bank_import / images / difficulty
+                     bank_import / images / difficulty / default_banks（新工程示例与快照）
 admin/app/ui/        PySide6 界面：题库、学生、场次、打包、收卷判分、审计菜单
-admin/buildtools/    PyInstaller 打包脚本
+admin/buildtools/    PyInstaller / Linux AppImage 打包脚本
 banks/demo/、examples/  假题库（CI/演示，不含真题）与可直接导入的示例（含图片题）
 docs/                本文档集（含题库规范、出题质检与难度口径）
 tools/bank_qc/       题库门禁与难度评分（verify_bank / score_bank）
 schemas/             题库 / manifest 的 JSON Schema（由 pydantic 生成，有漂移检查）
-scripts/             verify-embed / preflight-release / make-release-zip / run-admin-tests /
-                     smoke-answers / smoke-web / smoke-monitor / smoke-tls-cert / drill-web / bump-version
+scripts/             build-linux / run-admin / verify-embed / preflight-release / make-release-zip /
+                     run-admin-tests / smoke-answers / smoke-web / smoke-appimage / smoke-monitor /
+                     smoke-tls-cert / drill-web / bump-version
 licenses/            LGPL-3.0 / GPL-3.0 / ISC 全文
 worker/              Cloudflare Worker 时间服务（只有空的 `worker/src`，未实现）
 ```
@@ -310,8 +312,8 @@ worker/              Cloudflare Worker 时间服务（只有空的 `worker/src`�
 
 | 项 | 基线 |
 |---|---|
-| Rust | 399 个 `#[test]`（Windows）/ 397（Linux）；差异来自 `#[cfg(windows)]` / `#[cfg(not(windows))]` 门控 |
-| Python | 469 passed + 1 skipped（收集 470，含参数化展开） |
+| Rust | Arch Linux：399 passed；各平台用例数以 `cargo test` 为准 |
+| Python | Arch Linux：537 passed、0 skipped（PySide6 offscreen，含参数化展开） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 18 项（非 `--full`） |
 | CI | 9 个 job：`rust` / `python` / `linux-appimage` / `release-preflight` / `admin-package` / `e2e` / `secret-scan` / `tools-scripts` / `web-smoke` |
@@ -323,14 +325,14 @@ worker/              Cloudflare Worker 时间服务（只有空的 `worker/src`�
 
 ## 9. 发布包结构
 
-`ExamAdmin-<版本>` 解压后：
+Windows ZIP 解压后的 `ExamAdmin-<版本>/`（Linux ZIP 的入口结构相同，程序改用 Linux 文件名）：
 
 ```text
 ExamAdmin-<版本>/
 ├── 开始这里.md              ← 第一步该看什么
 ├── 使用说明.md              ← 完整手册（即《教师使用手册》）
 ├── 风险接受记录.md          ← 随包分发的安全决策
-├── docs/                   ← 全部 10 份文档（使用说明里的链接指向这里）
+├── docs/                   ← 使用说明里的链接指向这里
 ├── tools/bank_qc/          ← 题库自检工具（需 Python 3.10+，只用标准库）
 ├── ExamAdmin/
 │   ├── ExamAdmin.exe
@@ -347,11 +349,9 @@ ExamAdmin-<版本>/
     └── 图片题示例.json
 ```
 
-- `docs/` 共 **10 份**：`release-notes.md`、`安全边界与威胁模型.md`、`保密考试系统_架构与实施方案.md`、
-  `出题质检与难度口径.md`、`图片使用教程.md`、`教师使用手册.md`、`时间令牌协议.md`、
-  `题库JSON规范.md`、`风险接受记录.md`、`代码审阅报告.md`；
+- `docs/` 随 ZIP 分发，包括教师手册、题库规范、安全文档、发布说明及 [Arch Linux 指南](docs/arch-linux.md)；
 - **发布包根目录不含本 `README.md`**（它只面向仓库读者）；包内可见的入口是 `开始这里.md` 与 `使用说明.md`；
-- `示例题库/` 只用于跑通「导入 → 场次 → 打包 → 收卷」，**不满足出题口径**：对它跑 `verify_bank.py` 会得到 `FAIL`，这是预期结果；
+- `示例题库/` 是可手动导入的文件（包括图片题示例），不是新工程自动加载的内置示例。两者都仅供演练，**不满足出题口径**：对 `示例题库/` 跑 `verify_bank.py` 会得到 `FAIL`，这是预期结果；
 - zip 旁边附带 `SHA256SUMS.txt`；`make-release-zip.sh` 构建时会自动检查包内**所有 `.md`** 的相对链接，有死链直接失败（代码围栏数量不成对也会失败）。
 
 ---
