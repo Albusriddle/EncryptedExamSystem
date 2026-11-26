@@ -13,7 +13,9 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 from app.core.desktop import DESKTOP_ID, STUDENT_DESKTOP_ID
@@ -24,23 +26,51 @@ ROOT = Path(__file__).resolve().parents[2]
 # 固定发布版本和 SHA-256；不能直接执行会不断变动的 continuous 下载物。
 RUNTIME_URL = "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64"
 RUNTIME_SHA256 = "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
+RUNTIME_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _runtime_digest(
+    read: Callable[[int], bytes], write: Callable[[bytes], int] | None = None
+) -> str:
+    # 不信任 Content-Length；最多多读一个字节判断是否超限，且不写入临时文件。
+    digest = hashlib.sha256()
+    remaining = RUNTIME_MAX_BYTES
+    while chunk := read(min(64 * 1024, remaining + 1)):
+        remaining -= len(chunk)
+        if remaining < 0:
+            raise ValueError("AppImage runtime 超过大小上限，请检查固定的下载源后重试。")
+        digest.update(chunk)
+        if write is not None:
+            write(chunk)
+    return digest.hexdigest()
 
 
 def runtime_file() -> Path:
     cache = ROOT / "target/appimage-tools/runtime-x86_64"
     cache.parent.mkdir(parents=True, exist_ok=True)
-    if not cache.is_file():
-        tmp = cache.with_suffix(".download")
-        try:
+    try:
+        with cache.open("rb") as stream:
+            if _runtime_digest(stream.read) == RUNTIME_SHA256:
+                return cache
+    except (FileNotFoundError, ValueError):
+        pass  # 无缓存或已超限，均重新下载。
+
+    # 坏缓存由下一次成功下载修复。同目录的唯一临时文件允许并发下载，
+    # 只有校验通过的文件才能原子替换缓存；失败后不会留下新坏缓存。
+    tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=cache.parent, suffix=".download", delete=False
+        ) as stream:
+            tmp = Path(stream.name)
             with urllib.request.urlopen(RUNTIME_URL, timeout=60) as response:
-                with tmp.open("wb") as stream:
-                    shutil.copyfileobj(response, stream)
-            tmp.replace(cache)
-        finally:
+                digest = _runtime_digest(response.read, stream.write)
+        if digest != RUNTIME_SHA256:
+            raise ValueError("AppImage runtime SHA-256 校验失败，请检查固定的下载源后重试。")
+        tmp.replace(cache)
+    finally:
+        if tmp is not None:
             tmp.unlink(missing_ok=True)
-    digest = hashlib.sha256(cache.read_bytes()).hexdigest()
-    if digest != RUNTIME_SHA256:
-        raise ValueError(f"AppImage runtime 校验失败，请删除 {cache} 后重新构建。")
     return cache
 
 
@@ -131,6 +161,35 @@ def check_image(path: Path, *args: str) -> None:
     print(f"✓ {path.name} {' '.join(args)}: {result.stdout.strip() or 'OK'}")
 
 
+def _student_marker(client: Path, version: str) -> bytes:
+    data = client.read_bytes()
+    if not data.startswith(b"\x7fELF"):
+        raise ValueError("学生模板不是 Linux ELF，请在 Linux 重新构建。")
+    marker = next((tag for tag in (b"EXAMKEY:EMBEDDED", b"EXAMKEY:PLAIN") if tag in data), None)
+    if marker is None:
+        raise ValueError("学生模板缺少身份标记，请使用本项目构建的 exam-client。")
+    # 本地与带 --target 的 Cargo 产物可能同时存在。写出 AppImage 前先核对版本，
+    # 不能只检查 ELF 魔数或等到成品能运行时才发现版本不对。
+    rebuild = "请运行 cargo build --locked --release -p client 后重试。"
+    try:
+        result = subprocess.run(
+            [str(client), "--version"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"无法运行学生模板 {client}：{exc}。{rebuild}") from exc
+    reported = result.stdout.strip()
+    if result.returncode or reported != f"exam-client {version}":
+        raise ValueError(
+            f"学生模板需要 exam-client {version}，实际为 {reported[:160] or '无版本输出'}"
+            f"（退出码 {result.returncode}）。{rebuild}"
+        )
+    return marker
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--student-only", action="store_true")
@@ -144,8 +203,12 @@ def main() -> int:
     client = args.client or find_artifact("exam-client")
     if client is None or not client.is_file():
         parser.error("缺少学生端：先 cargo build --locked --release --workspace。")
-    if client.read_bytes()[:4] != b"\x7fELF":
-        parser.error("学生模板不是 Linux ELF，请在 Linux 重新构建。")
+    client = client.resolve()
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    try:
+        marker = _student_marker(client, version)
+    except ValueError as exc:
+        parser.error(str(exc))
     runtime = runtime_file()
     output = args.output_dir.resolve()
     stage_root = ROOT / "build/appimage"
@@ -154,16 +217,6 @@ def main() -> int:
     binary.parent.mkdir(parents=True)
     shutil.copy2(client, binary)
     binary.chmod(0o755)
-    marker = next(
-        (
-            value
-            for value in (b"EXAMKEY:EMBEDDED", b"EXAMKEY:PLAIN")
-            if value in client.read_bytes()
-        ),
-        None,
-    )
-    if marker is None:
-        parser.error("学生模板缺少身份标记，请使用本项目构建的 exam-client。")
     stub = output / "stub-template-x86_64.AppImage"
     make_image(student, stub, runtime, marker)
     check_image(stub, "--version")
@@ -175,7 +228,6 @@ def main() -> int:
     shutil.copy2(stub, admin / "stub-template.AppImage")
     teacher = prepare_appdir(stage_root / "teacher.AppDir", student=False)
     shutil.copytree(admin, teacher / "usr/lib/ExamAdmin", dirs_exist_ok=True)
-    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     image = output / f"ExamAdmin-{version}-x86_64.AppImage"
     make_image(teacher, image, runtime)
     check_image(image, "--selftest")
