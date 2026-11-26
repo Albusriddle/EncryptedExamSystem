@@ -1417,6 +1417,23 @@ fn avail_w(ui: &egui::Ui) -> f32 {
     }
 }
 
+/// 题号旁显示的题库 ID：去掉空白/控制字符并限长，完整值放 tooltip。
+fn display_question_id(id: &str) -> String {
+    let total = id.chars().count();
+    let mut out = String::new();
+    for c in id.chars().take(40) {
+        if c.is_control() || c.is_whitespace() {
+            out.push('_');
+        } else {
+            out.push(c);
+        }
+    }
+    if total > 40 {
+        out.push('…');
+    }
+    out
+}
+
 /// 渲染题库里的输入/输出示例：每个示例一组「输入 / 输出」等宽框。
 ///
 /// 只影响显示，不参与判分；旧学生端会忽略该字段（只显示题干）。
@@ -2067,12 +2084,15 @@ fn render_paper(
                                         .size(15.0),
                                 );
                                 ui.label(
-                                    egui::RichText::new(format!("#{}", item.id))
-                                        .size(11.5)
-                                        .color(egui::Color32::GRAY)
-                                        .monospace(),
+                                    egui::RichText::new(format!(
+                                        "#{}",
+                                        display_question_id(&item.id)
+                                    ))
+                                    .size(11.5)
+                                    .color(egui::Color32::GRAY)
+                                    .monospace(),
                                 )
-                                .on_hover_text(format!("题库编号：{}", item.id));
+                                .on_hover_text(format!("题库编号：{}（{}）", item.id, sec.title));
                             });
                             render_stem(ui, &item.stem);
                             render_samples(ui, &item.samples);
@@ -2811,6 +2831,15 @@ mod tests {
             texts.iter().any(|t| t == "（空）"),
             "空输入应有占位符：{texts:?}"
         );
+    }
+
+    #[test]
+    fn question_id_is_sanitized_and_capped() {
+        assert_eq!(display_question_id("q\n1"), "q_1");
+        let long = "x".repeat(50);
+        let shown = display_question_id(&long);
+        assert_eq!(shown.chars().count(), 41);
+        assert!(shown.ends_with('…'));
     }
 
     #[test]

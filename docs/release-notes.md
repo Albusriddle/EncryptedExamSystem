@@ -21,6 +21,7 @@
 - AppImage 构建拒绝版本不符的学生模板；只有通过大小和 SHA-256 检查的 runtime 可以写入缓存。
 - CI 新增 Ubuntu 22.04 `linux-appimage` job，构建并烟测实际产物（含 Qt 随包字体注册及示例持久化）。Linux 产物从源码构建或从 Actions 获取，**不随 GitHub Release 分发**。见 [Arch Linux 指南](arch-linux.md)。
 - 学生端（桌面 + 网页）题号旁显示 `#题库ID`，便于学生现场报告后按 ID 定位题目；不改变容器/答题卡格式。
+- `exam-builder` 移除命令行 `--master`，只接受 `--master-file` / `EXAM_MASTER`（master 不再进入进程列表）；旧脚本需改用环境变量或密钥文件。
 - 不改变加密容器、答题卡格式或网络时间门禁；请分别在学生使用的系统上验收。
 
 ## 更新摘要（v1.9.1）

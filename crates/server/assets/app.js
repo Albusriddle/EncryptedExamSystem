@@ -155,6 +155,12 @@ function optionsOf(item) {
   return [];
 }
 
+// 题号旁显示的题库 ID：去掉空白/控制字符并限长，完整值放 title。
+function displayId(id) {
+  const text = String(id == null ? '' : id).replace(/[\s\u0000-\u001f\u007f]/g, '_');
+  return text.length > 40 ? `${text.slice(0, 40)}…` : text;
+}
+
 // 题目级输入/输出示例：与桌面端同一套字段（item.samples）。
 function renderSamples(samples) {
   if (!Array.isArray(samples) || samples.length === 0) return null;
@@ -193,7 +199,7 @@ function render() {
       n++;
       const q = document.createElement('div'); q.className = 'card q';
       const no = document.createElement('div'); no.className = 'qno'; no.textContent = `${n}. （${item.score} 分）`;
-      const qid = document.createElement('span'); qid.className = 'qid'; qid.textContent = `#${item.id}`; qid.title = `题库编号：${item.id}`; no.appendChild(qid);
+      const qid = document.createElement('span'); qid.className = 'qid'; qid.textContent = `#${displayId(item.id)}`; qid.title = `题库编号：${item.id}（${sec.title}）`; no.appendChild(qid);
       q.appendChild(no);
       q.appendChild(renderStem(item.stem));
       const samples = renderSamples(item.samples);

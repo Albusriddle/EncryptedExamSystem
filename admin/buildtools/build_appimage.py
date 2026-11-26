@@ -49,11 +49,13 @@ def runtime_file() -> Path:
     cache = ROOT / "target/appimage-tools/runtime-x86_64"
     cache.parent.mkdir(parents=True, exist_ok=True)
     try:
+        if cache.is_dir():
+            shutil.rmtree(cache)
         with cache.open("rb") as stream:
             if _runtime_digest(stream.read) == RUNTIME_SHA256:
                 return cache
-    except (FileNotFoundError, ValueError):
-        pass  # 无缓存或已超限，均重新下载。
+    except (OSError, ValueError):
+        pass  # 无缓存、不可读、是目录或已超限，均重新下载。
 
     # 坏缓存由下一次成功下载修复。同目录的唯一临时文件允许并发下载，
     # 只有校验通过的文件才能原子替换缓存；失败后不会留下新坏缓存。
