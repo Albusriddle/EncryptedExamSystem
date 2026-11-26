@@ -38,8 +38,20 @@ def test_copy_legal_files_puts_them_in_release_dir() -> None:
     assert (dest / "licenses" / "LGPL-3.0.txt").is_file()
 
 
-@pytest.mark.parametrize("name", ["OFL-1.1-Noto.txt", "AppImage-runtime.txt"])
-def test_missing_linux_resource_license_makes_build_fail(tmp_path, name: str) -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ISC.txt",
+        "OFL-1.1-Noto.txt",
+        "AppImage-runtime.txt",
+        "LGPL-2.1.txt",
+        "AppImage-musl.txt",
+        "AppImage-squashfuse.txt",
+        "AppImage-zstd.txt",
+        "AppImage-zlib.txt",
+    ],
+)
+def test_missing_dependency_license_makes_build_fail(tmp_path, name: str) -> None:
     root = tmp_path / "repo"
     root.mkdir()
     for filename in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
