@@ -53,7 +53,7 @@ fn executable_path_with(exe: PathBuf, image: Option<OsString>, dir: Option<OsStr
         // APPDIR="/" 会让任何绝对路径都满足包含关系；排除根目录。
         if image.is_absolute()
             && dir.is_absolute()
-            && dir != PathBuf::from("/")
+            && dir.as_path() != std::path::Path::new("/")
             && exe.starts_with(&dir)
         {
             return image;

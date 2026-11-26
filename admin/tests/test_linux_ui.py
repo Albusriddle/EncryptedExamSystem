@@ -51,7 +51,8 @@ def test_save_dialog_accepts_extensionless_package(qapp, monkeypatch: pytest.Mon
     monkeypatch.setattr(QFileDialog, "getSaveFileName", pick)
     tab = tab_build.BuildTab(ProjectState())
     tab._pick_save()
-    assert seen and seen[0].split(";;")[0].endswith("(*)")
+    first = seen[0].split(";;")[0]
+    assert "*.AppImage" in first and "StudentClient*" in first
     tab.deleteLater()
 
 
@@ -68,7 +69,8 @@ def test_answer_dialog_selects_extensionless_package(
     monkeypatch.setattr(QFileDialog, "getOpenFileName", pick)
     tab = tab_answers.AnswersTab(ProjectState())
     tab._pick_package()
-    assert seen and seen[0].split(";;")[0].endswith("(*)")
+    first = seen[0].split(";;")[0]
+    assert "*.AppImage" in first and "StudentClient*" in first
     assert tab.pkg.text() == str(package)
     tab.deleteLater()
 
