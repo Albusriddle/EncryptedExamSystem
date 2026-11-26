@@ -48,3 +48,106 @@ def test_example_manifest_is_valid() -> None:
     assert "time_sources" not in data
     assert "time_pubkey" not in data
     Manifest.model_validate(data)
+
+
+def test_default_project_loads_demo_banks_with_source_paths() -> None:
+    from app.core.default_banks import new_demo_project
+
+    project = new_demo_project()
+    expected = {
+        ExamBank.model_validate_json(path.read_text(encoding="utf-8")).exam_id: path.resolve()
+        for path in demo_banks()
+    }
+    assert set(project.banks) == set(expected)
+    assert {key: Path(value) for key, value in project.bank_paths.items()} == expected
+    assert project.students == []
+    assert project.sessions == []
+
+
+def test_frozen_default_project_uses_bundled_demo_banks(tmp_path, monkeypatch) -> None:
+    import shutil
+    import sys
+
+    from app.core.default_banks import new_demo_project
+
+    resources = tmp_path / "ExamAdmin" / "_internal"
+    dest = resources / "banks" / "demo"
+    shutil.copytree(DEMO, dest)
+    monkeypatch.setattr(sys, "_MEIPASS", str(resources), raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "user-data"))
+    project = new_demo_project()
+    assert project.banks
+    for exam_id, path in project.bank_paths.items():
+        source = Path(path)
+        assert source.is_relative_to(tmp_path / "user-data" / "ExamSystem" / "demo-banks")
+        restored = ExamBank.model_validate_json(source.read_text(encoding="utf-8"))
+        assert restored == project.banks[exam_id]
+    shutil.rmtree(resources)
+    saved = tmp_path / "demo.json"
+    project.save(saved)
+    assert project.load(saved).banks == project.banks
+
+
+def test_updated_demo_resources_do_not_overwrite_saved_project_banks(tmp_path, monkeypatch) -> None:
+    import shutil
+    import sys
+
+    from app.core.default_banks import new_demo_project
+    from app.core.state import ProjectState
+
+    resources = tmp_path / "resources"
+    shutil.copytree(DEMO, resources / "banks" / "demo")
+    monkeypatch.setattr(sys, "_MEIPASS", str(resources), raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "user-data"))
+    first = new_demo_project()
+    saved = tmp_path / "project.json"
+    first.save(saved)
+    assert new_demo_project().bank_paths == first.bank_paths
+
+    source = resources / "banks" / "demo" / "math.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    exam_id = payload["exam_id"]
+    payload["title"] = "新版示例题库"
+    source.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    updated = new_demo_project()
+    assert updated.banks[exam_id].title == "新版示例题库"
+    assert updated.bank_paths[exam_id] != first.bank_paths[exam_id]
+    shutil.rmtree(resources)
+    reopened = ProjectState.load(saved)
+    assert reopened.banks == first.banks
+    assert reopened.bank_paths == first.bank_paths
+
+
+def test_missing_bundled_demo_banks_have_actionable_error(tmp_path, monkeypatch) -> None:
+    import sys
+
+    from app.core.default_banks import new_demo_project
+
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    with pytest.raises(ValueError, match="示例题库.*重新安装"):
+        new_demo_project()
+
+
+def test_default_project_does_not_change_empty_state_or_other_projects() -> None:
+    from app.core.default_banks import new_demo_project
+    from app.core.state import ProjectState
+
+    first = new_demo_project()
+    first.banks.clear()
+    assert new_demo_project().banks
+    assert ProjectState().banks == {}
+
+
+def test_invalid_default_bank_is_not_silently_skipped(tmp_path, monkeypatch) -> None:
+    import shutil
+    import sys
+
+    from app.core.bank_import import BankImportError
+    from app.core.default_banks import new_demo_project
+
+    dest = tmp_path / "banks" / "demo"
+    shutil.copytree(DEMO, dest)
+    (dest / "math.json").write_text("invalid JSON", encoding="utf-8")
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    with pytest.raises(BankImportError, match="math.json"):
+        new_demo_project()

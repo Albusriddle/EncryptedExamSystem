@@ -167,9 +167,19 @@ def copy_legal_files(dest: Path, root: Path | None = None) -> list[str]:
     ]
     missing = [str(src) for src, _ in required if not src.is_file()]
     lic_dir = base / "licenses"
-    # ISC.txt：v1.5.0 起 `ring`（TLS 的加密后端）是 Apache-2.0 AND ISC，
-    # 少这份等于发布包缺许可；同 LGPL/GPL 一样，缺了就构建失败。
-    for name in ("LGPL-3.0.txt", "GPL-3.0.txt", "ISC.txt"):
+    # TLS 后端 ring 的 ISC 与 AppImage/runtime/字体许可都必须随包附带，不能互相覆盖。
+    for name in (
+        "LGPL-3.0.txt",
+        "GPL-3.0.txt",
+        "ISC.txt",
+        "OFL-1.1-Noto.txt",
+        "AppImage-runtime.txt",
+        "LGPL-2.1.txt",
+        "AppImage-musl.txt",
+        "AppImage-squashfuse.txt",
+        "AppImage-zstd.txt",
+        "AppImage-zlib.txt",
+    ):
         if not (lic_dir / name).is_file():
             missing.append(str(lic_dir / name))
     if missing:
@@ -215,6 +225,14 @@ def main() -> int:
 
     DIST.mkdir(exist_ok=True)
     sep = ";" if os.name == "nt" else ":"
+    resources = ["--add-data", f"{ROOT / 'assets' / 'ees.svg'}{sep}assets"]
+    if sys.platform == "linux":
+        # 直接执行本脚本时 sys.path[0] 是 buildtools，而不是 admin。
+        sys.path.insert(0, str(ADMIN))
+        from buildtools.linux_resources import font_sources
+
+        for font in font_sources():
+            resources.extend(["--add-data", f"{font}{sep}fonts"])
     cmd = [
         sys.executable,
         "-m",
@@ -248,6 +266,9 @@ def main() -> int:
         # 品牌信息：欢迎弹窗的仓库地址/许可证/致谢都从这里读
         "--add-data",
         f"{ROOT / 'branding.json'}{sep}.",
+        # 默认题库必须与源码启动一致；不能只依赖仓库外的示例文件夹。
+        "--add-data",
+        f"{ROOT / 'banks' / 'demo'}{sep}banks/demo",
         # 加密依赖是**动态导入**的（ProjectState.save 里 from app.core import secure），
         # PyInstaller 静态分析看不到 argon2；v0.12.2 因此出现"打包版备份/加密全失败"。
         "--collect-all",
@@ -261,6 +282,7 @@ def main() -> int:
         # 让 PyInstaller 能找到 app 包
         "--paths",
         str(ADMIN),
+        *resources,
         str(ADMIN / "app" / "main.py"),
     ]
     print("运行 PyInstaller…")

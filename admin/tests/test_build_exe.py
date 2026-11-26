@@ -108,12 +108,22 @@ def test_pick_artifact_missing_is_reported(monkeypatch, capsys) -> None:
 
 
 def _legal_root(tmp_path: Path, *, with_isc: bool = True) -> Path:
-    """造一个最小的「仓库根」：LICENSE + 第三方声明 + licenses/ 三份许可。"""
+    """造一个完整许可夹具；只有指定的 ISC 缺失，不能被其它缺件掩盖。"""
     root = tmp_path / "repo"
     (root / "licenses").mkdir(parents=True)
     (root / "LICENSE").write_text("Apache License 2.0\n", encoding="utf-8")
     (root / "THIRD-PARTY-NOTICES.md").write_text("第三方声明\n", encoding="utf-8")
-    for name in ("LGPL-3.0.txt", "GPL-3.0.txt"):
+    for name in (
+        "LGPL-3.0.txt",
+        "GPL-3.0.txt",
+        "OFL-1.1-Noto.txt",
+        "AppImage-runtime.txt",
+        "LGPL-2.1.txt",
+        "AppImage-musl.txt",
+        "AppImage-squashfuse.txt",
+        "AppImage-zstd.txt",
+        "AppImage-zlib.txt",
+    ):
         (root / "licenses" / name).write_text(f"{name}\n", encoding="utf-8")
     if with_isc:
         (root / "licenses" / "ISC.txt").write_text(
@@ -134,6 +144,8 @@ def test_copy_legal_files_includes_isc(tmp_path: Path) -> None:
 
     assert (dest / "licenses" / "ISC.txt").is_file(), "缺 ISC.txt 等于发布包缺许可"
     assert "licenses/" in copied
+    for source in (root / "licenses").iterdir():
+        assert (dest / "licenses" / source.name).read_bytes() == source.read_bytes()
 
 
 def test_copy_legal_files_rejects_missing_isc(tmp_path: Path) -> None:

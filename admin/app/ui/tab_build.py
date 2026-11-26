@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 
 from app.core.banks_io import write_temp_banks
 from app.core.buildcmd import build_command, build_env, safe_pin_dir
-from app.core.paths import settings_path
+from app.core.paths import executable_name, package_file_filter, settings_path
 from app.core.state import ProjectState
 from app.core.subproc import no_window_kwargs
 from app.ui.widgets import NoWheelComboBox, NoWheelSpinBox, fit_button_text, make_checkbox
@@ -135,17 +135,20 @@ def default_stub() -> Path:
     `.../ExamAdmin/target/release/exam-client.exe` —— 根本不存在，
     教师点「开始打包」只会看到"找不到 stub"。
     """
-    name = "exam-client.exe" if os.name == "nt" else "exam-client"
+    name = executable_name("exam-client")
     if is_frozen():
         d = program_dir()
+        portable = d / "stub-template.AppImage"
+        if sys.platform == "linux" and portable.is_file():
+            return portable
         for cand in (
-            d / f"stub-template{'.exe' if os.name == 'nt' else ''}",
+            d / executable_name("stub-template"),
             d / "_internal" / name,
         ):
             if cand.is_file():
                 return cand
         # 都不在：返回"应该放的位置"，让报错信息有指导意义
-        return d / f"stub-template{'.exe' if os.name == 'nt' else ''}"
+        return d / executable_name("stub-template")
     return builder_exe_root() / name
 
 
@@ -173,8 +176,11 @@ def default_out() -> Path:
     这里按"文档 → 桌面 → 用户目录 → 程序目录"顺序探测，
     都不可写才退回当前工作目录。
     """
+    name = executable_name("StudentClient")
+    if is_frozen() and sys.platform == "linux" and default_stub().suffix == ".AppImage":
+        name += ".AppImage"
     if not is_frozen():
-        return Path(__file__).resolve().parents[3] / "dist" / "StudentClient.exe"
+        return Path(__file__).resolve().parents[3] / "dist" / name
 
     home = Path.home()
     for d in (
@@ -185,8 +191,8 @@ def default_out() -> Path:
         program_dir(),
     ):
         if d.is_dir() and _writable(d):
-            return d / "StudentClient.exe"
-    return Path.cwd() / "StudentClient.exe"
+            return d / name
+    return Path.cwd() / name
 
 
 def builder_exe_root() -> Path:
@@ -652,7 +658,7 @@ class BuildTab(QWidget):
 
     def _pick_save(self) -> None:
         p, _ = QFileDialog.getSaveFileName(
-            self, "保存学生端包", self.edit_out.text(), "可执行文件 (*.exe);;所有文件 (*)"
+            self, "保存学生端包", self.edit_out.text(), package_file_filter()
         )
         if p:
             self.edit_out.setText(p)
@@ -978,7 +984,8 @@ class BuildTab(QWidget):
             QMessageBox.critical(
                 self,
                 "找不到学生端模板",
-                f"{stub}\n\n这个文件不存在。{hint}\n\n可以点右侧「选择…」指定 stub-template.exe。",
+                f"{stub}\n\n这个文件不存在。{hint}\n\n"
+                f"可以点右侧「选择…」指定 {executable_name('stub-template')}。",
             )
             return
 
@@ -995,7 +1002,7 @@ class BuildTab(QWidget):
                 "请先关闭正在运行的学生端；也可以直接另存为新文件。",
             )
             new_path, _ = QFileDialog.getSaveFileName(
-                self, "另存学生端", str(suggested), "EXE (*.exe)"
+                self, "另存学生端", str(suggested), package_file_filter()
             )
             if not new_path:
                 return

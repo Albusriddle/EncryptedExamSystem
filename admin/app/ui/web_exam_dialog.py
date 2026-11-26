@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.paths import executable_name
 from app.core.webexam import (
     CERT_FILE_FILTER,
     DEFAULT_BIND,
@@ -479,14 +480,18 @@ class WebExamDialog(QDialog):
     def _server_path(self) -> Path:
         import sys
 
+        name = executable_name("exam-server")
         cands = []
         if getattr(sys, "_MEIPASS", None):
-            cands.append(Path(sys._MEIPASS) / "exam-server.exe")
+            cands.append(Path(sys._MEIPASS) / name)
+        if getattr(sys, "frozen", False):
+            cands.append(Path(sys.executable).parent / name)
         root = Path(__file__).resolve().parents[3]
         cands += [
-            root / "target" / "release" / "exam-server.exe",
-            root / "target" / "debug" / "exam-server.exe",
+            root / "target" / "release" / name,
+            root / "target" / "debug" / name,
         ]
+        cands += [d / name for d in sorted((root / "target").glob("*/release"))]
         for c in cands:
             if c.is_file():
                 return c

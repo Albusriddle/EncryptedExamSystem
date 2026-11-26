@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -33,6 +36,32 @@ def test_copy_legal_files_puts_them_in_release_dir() -> None:
     assert set(copied) == {"LICENSE", "THIRD-PARTY-NOTICES.md", "licenses/"}, copied
     assert (dest / "LICENSE").is_file()
     assert (dest / "licenses" / "LGPL-3.0.txt").is_file()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ISC.txt",
+        "OFL-1.1-Noto.txt",
+        "AppImage-runtime.txt",
+        "LGPL-2.1.txt",
+        "AppImage-musl.txt",
+        "AppImage-squashfuse.txt",
+        "AppImage-zstd.txt",
+        "AppImage-zlib.txt",
+    ],
+)
+def test_missing_dependency_license_makes_build_fail(tmp_path, name: str) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    for filename in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
+        shutil.copy2(ROOT / filename, root / filename)
+    shutil.copytree(ROOT / "licenses", root / "licenses")
+    (root / "licenses" / name).unlink()
+    dest = tmp_path / "release"
+    dest.mkdir()
+    with pytest.raises(FileNotFoundError, match="缺少许可证文件"):
+        _module().copy_legal_files(dest, root=root)
 
 
 def test_missing_license_makes_build_fail(tmp_path) -> None:

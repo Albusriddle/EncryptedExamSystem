@@ -14,19 +14,15 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app.branding import branding
+from app.ui.application import configure_application
 from app.ui.main_window import MainWindow
 
 
 def log_dir() -> Path:
-    """崩溃日志目录：优先 %LOCALAPPDATA%，不可写则退回程序所在目录。"""
-    import os
+    """崩溃日志优先写入用户状态目录，不可写再回退。"""
+    from app.core.paths import state_dir
 
-    base = os.environ.get("LOCALAPPDATA")
-    candidates = []
-    if base:
-        candidates.append(Path(base) / "ExamSystem")
-    candidates.append(Path(sys.executable).parent)
+    candidates = [state_dir(), Path(sys.executable).parent]
     for c in candidates:
         try:
             c.mkdir(parents=True, exist_ok=True)
@@ -72,7 +68,7 @@ def install_excepthook() -> None:
 
 
 def selftest() -> int:
-    """只验证运行依赖可导入，不创建窗口。
+    """验证依赖与资源，不创建窗口或写入用户数据目录。
 
     打包（PyInstaller）后由 build_exe.py 调用，用来确认产物真的能跑——
     缺少依赖（如 pydantic）时 PyInstaller 不会报错，但打出来的 exe
@@ -85,10 +81,13 @@ def selftest() -> int:
 
         from app.branding import branding
         from app.core import secure
+        from app.core.default_banks import new_demo_project
         from app.core.models import Manifest  # noqa: F401
         from app.core.state import ProjectState  # noqa: F401
         from app.ui.main_window import MainWindow  # noqa: F401
 
+        # 自检仍须发现漏带或损坏的示例，但不需要创建供工程保存路径引用的快照。
+        new_demo_project(persist=False)
         blob = secure.seal(secure.MAGIC_KEY, "selftest-pass", b"x" * 32)
         if secure.unseal(secure.MAGIC_KEY, "selftest-pass", blob) != b"x" * 32:
             raise RuntimeError("secure.seal/unseal 自检失败")
@@ -128,12 +127,22 @@ def selftest() -> int:
 def main() -> int:
     if "--selftest" in sys.argv:
         return selftest()
+    if "--install-desktop" in sys.argv:
+        from app.core.desktop import install_desktop_entry
+
+        try:
+            print(f"桌面启动器已创建：{install_desktop_entry()}")
+        except (OSError, ValueError) as exc:
+            print(f"创建启动器失败：{exc}", file=sys.stderr)
+            return 1
+        return 0
     if "--dump-ui" in sys.argv:
         # 诊断用：把主窗口与工具栏渲染成 PNG，并打印水印控件状态。
         # 打包后无法从外部检查 Qt 控件，只能让程序自己报告。
         from PySide6.QtWidgets import QToolBar
 
         app = QApplication(sys.argv)
+        bundled_fonts = configure_application(app)
         win = MainWindow()
         win.show()
         for _ in range(10):
@@ -147,11 +156,33 @@ def main() -> int:
         lbl = getattr(win, "watermark_label", None)
         info = {
             "window": [win.width(), win.height()],
+            "qt_style": app.style().objectName(),
+            "qt_platform": app.platformName(),
+            "font_family": app.font().family(),
+            "bundled_fonts": bundled_fonts,
+            "font_point_size": app.font().pointSizeF(),
+            "device_pixel_ratio": win.devicePixelRatioF(),
+            "tabs": [win.tabs.tabText(index) for index in range(win.tabs.count())],
+            "build": {
+                "stub": win.build_tab.edit_stub.text(),
+                "output": win.build_tab.edit_out.text(),
+            },
             "toolbar": [bar.width(), bar.height()] if bar else None,
             "label_text": lbl.text() if lbl else None,
             "label_geom": [lbl.x(), lbl.y(), lbl.width(), lbl.height()] if lbl else None,
             "label_visible": lbl.isVisible() if lbl else None,
             "style": lbl.styleSheet() if lbl else None,
+            "banks": [
+                {
+                    "exam_id": win.banks_tab.table.item(row, 0).text(),
+                    "source": win.state.bank_paths[win.banks_tab.table.item(row, 0).text()],
+                    "title": win.banks_tab.table.item(row, 1).text(),
+                    "questions": int(win.banks_tab.table.item(row, 2).text()),
+                    "pick": int(win.banks_tab.table.item(row, 3).text()),
+                }
+                for row in range(win.banks_tab.table.rowCount())
+            ],
+            "status": win.statusBar().currentMessage(),
         }
         (out / "info.json").write_text(
             json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -165,10 +196,9 @@ def main() -> int:
         print(app_version())
         return 0
     app = QApplication(sys.argv)
+    configure_application(app)
     install_excepthook()
-    app.setApplicationName(f"{branding().product} · 管理端")
-    # 中文字体：Windows 下默认字体即可；Linux 若缺失由系统配置决定
-    win = MainWindow()  # 正常启动：空白工程（上次工程由工具栏按钮打开）
+    win = MainWindow()  # 正常启动：自带示例题库的新工程（上次工程由工具栏按钮打开）
     win.show()
     # 欢迎弹窗：放在主窗口显示之后，避免"弹窗背后一片空白"。
     # 之前这行因为注释被格式化而漏掉，导致教师端根本没弹窗。

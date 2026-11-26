@@ -46,24 +46,46 @@ if [ ! -f "$OUTDIR/ExamAdmin/ExamAdmin.exe" ] && [ ! -f "$OUTDIR/ExamAdmin/ExamA
   exit 1
 fi
 
+if [ -f "$OUTDIR/ExamAdmin/ExamAdmin.exe" ]; then
+  EXE=".exe"
+  PLATFORM="windows"
+elif [ "$(uname -s)" = Linux ]; then
+  EXE=""
+  PLATFORM="linux"
+else
+  echo "  不支持此平台的发布包。"
+  exit 1
+fi
+
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
 # 1. 管理端程序（整个文件夹，含 _internal）
 cp -r "$OUTDIR/ExamAdmin" "$STAGE/ExamAdmin"
-# 去掉模板与手册的副本，改放到外层，避免重复
-rm -f "$STAGE/ExamAdmin/stub-template.exe" "$STAGE/ExamAdmin/使用说明.md"
+# 手册改放到发布包根；学生端模板保留在程序旁边。
+rm -f "$STAGE/ExamAdmin/使用说明.md"
 echo "  ✓ ExamAdmin/"
 
 # 2. 学生端模板（打包时必须用，教师不需理解它）
-# 这里不能 `|| true`：缺了 exam-builder 的发布包，教师端根本没法打包，
-# 而原来失败了还照样打印「✓ 内含 …」，等于把坏包说成好包。
-cp "$OUTDIR/ExamAdmin/_internal/exam-builder.exe" "$STAGE/ExamAdmin/" \
-  || { echo "  ✗ 缺少 _internal/exam-builder.exe（先跑 admin/buildtools/build_exe.py）"; exit 1; }
-cp "$ROOT/target/release/exam-client.exe" "$STAGE/ExamAdmin/stub-template.exe" 2>/dev/null \
-  || cp "$ROOT/target/x86_64-pc-windows-msvc/release/exam-client.exe" "$STAGE/ExamAdmin/stub-template.exe" \
-  || { echo "  ✗ 找不到 exam-client.exe（先 cargo build --release --workspace）"; exit 1; }
-echo "  ✓ ExamAdmin/ 内含 stub-template.exe 与 exam-builder.exe"
+# 缺少打包器或模板必须失败，不能把坏包说成好包；Linux 同时保留可执行权限。
+for name in "exam-builder$EXE" "exam-server$EXE"; do
+  if [ -f "$OUTDIR/ExamAdmin/_internal/$name" ]; then
+    cp -p "$OUTDIR/ExamAdmin/_internal/$name" "$STAGE/ExamAdmin/"
+  fi
+done
+# 优先保留 build_exe.py 随包复制的模板，避免打包后又换成旧 target 产物。
+if [ ! -f "$STAGE/ExamAdmin/stub-template$EXE" ]; then
+  for candidate in "$ROOT/target/release/exam-client$EXE" "$ROOT"/target/*/release/"exam-client$EXE"; do
+    if [ -f "$candidate" ]; then
+      cp -p "$candidate" "$STAGE/ExamAdmin/stub-template$EXE"
+      break
+    fi
+  done
+fi
+for name in "stub-template$EXE" "exam-builder$EXE" "exam-server$EXE"; do
+  [ -f "$STAGE/ExamAdmin/$name" ] || { echo "  ✗ 缺少 $name"; exit 1; }
+done
+echo "  ✓ ExamAdmin/ 内含原生学生端模板、打包器与网页服务端"
 
 # 3. 示例题库（拿来就能试）
 #
@@ -211,25 +233,27 @@ cat > "$STAGE/开始这里.md" <<'DOC'
 ## 一、打开程序
 
 1. 进入 `ExamAdmin` 文件夹
-2. 双击 **`ExamAdmin.exe`**
+2. Windows 双击 **`ExamAdmin.exe`**；Linux 目录版执行 **`./ExamAdmin`**。
+   Linux 推荐使用另外生成的教师 **`ExamAdmin-<版本>-x86_64.AppImage`**：允许执行后双击，
+   可通过「帮助 → 创建桌面启动器」添加应用菜单入口；见 `docs/arch-linux.md`。
 
-> ⚠ 不要把 `ExamAdmin.exe` 单独拖到别处，它需要同目录的 `_internal` 才能启动。
+> ⚠ 不要把主程序单独拖到别处，它需要同目录的 `_internal` 才能启动。
 
 ## 二、完整流程（约 10 分钟）
 
 | 步骤 | 在哪 | 做什么 |
 |---|---|---|
-| 1 | `[题库]` 标签 | 点「导入题库…」，选 `示例题库\数学.json` |
+| 1 | `[题库]` 标签 | 默认已加载数学、英语与题型展示示例；正式考试请移除示例并导入自己的题库 |
 | 2 | `[学生]` 标签 | 粘贴学号（每行一个），点「应用到名单」 |
 | 3 | `[场次]` 标签 | 点「新建」，设考试时间，勾选科目，点「保存此场次」；需要控制难度时勾选「限制平均难度」（1–255） |
 | 4 | `[打包]` 标签 | 点「生成」拿主密钥（有进度条，约 1–2 秒）→ 点「开始打包」 |
-| 5 | 分发 | 把生成的 `.exe` 发给学生，双击输入学号即可 |
+| 5 | 分发 | Windows 发生成的 `.exe`；Linux 优先发生成的 `StudentClient.AppImage`（允许执行后双击）；裸 ELF 仍可用 |
 | 6 | `[收卷判分]` | 考后拖入学生交的 `.eea` → 校验 → 生成成绩 → 导出已判/未判 CSV |
 
-> 启动是空白工程；要接着上次做，点工具栏【打开上次工程】。
+> 启动和新建工程默认加载示例题库（仅供演示），学生与场次仍为空；要接着上次做，点工具栏【打开上次工程】，不会额外混入示例。
 > 勾选「每生 PIN 登录」时，PIN 表在打包成功弹窗里显示路径（工程保存位置，不在考试包目录）。
 
-**先把 `示例题库` 里的三个文件跑一遍**，确认流程通了，再换成你自己的题库。
+**先用默认示例跑通一次**，再换成自己的题库。包根的 `示例题库/` 是可手动导入的示例（含图片题），不是新工程自动载入的内置资源。
 
 ## 三、题库格式
 
@@ -256,9 +280,9 @@ echo "  ✓ 开始这里.md"
 
 # 6. 压缩
 cd "$OUTDIR"
-ZIP="ExamAdmin-$VER-windows.zip"
+ZIP="ExamAdmin-$VER-$PLATFORM.zip"
 rm -f "$ZIP"
-if command -v powershell.exe >/dev/null 2>&1; then
+if [ "$PLATFORM" = windows ] && command -v powershell.exe >/dev/null 2>&1; then
   powershell.exe -NoProfile -Command \
     "Compress-Archive -Path '$(pwd -W)/ExamAdmin-$VER' -DestinationPath '$(pwd -W)/$ZIP' -Force" >/dev/null
 else

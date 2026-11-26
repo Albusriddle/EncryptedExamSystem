@@ -40,6 +40,8 @@ banks/*
 # ---- 构建产物（走 GitHub Releases，不入库）----
 *.exe
 *.msi
+*.AppImage
+*.squashfs
 release/
 out/
 

@@ -202,8 +202,12 @@ impl Welcome {
         if let Some(path) = std::env::var_os("EES_DEBUG_LAYOUT") {
             let dx = popup_rect.center().x - screen.center().x;
             let dy = popup_rect.center().y - screen.center().y;
+            let font_source = ctx.data(|data| {
+                data.get_temp::<String>(egui::Id::new("ees_cjk_font_source"))
+                    .unwrap_or_default()
+            });
             let info = format!(
-                "screen={:?}\npopup={:?}\nsize_pt={}x{}\ncenter_offset=({dx:.1},{dy:.1})\ncontains={}\n",
+                "screen={:?}\npopup={:?}\nsize_pt={}x{}\ncenter_offset=({dx:.1},{dy:.1})\ncontains={}\nfont_source={font_source}\n",
                 screen,
                 popup_rect,
                 popup_rect.width(),

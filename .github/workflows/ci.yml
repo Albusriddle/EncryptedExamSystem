@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
 
-# PR/push 检查全部在 Linux 上跑：Windows runner 计费更高，能省则省。
+# 保留 Linux / Windows 回归；AppImage 单独构建并验收真实产物。
 jobs:
   rust:
     # 没有超时会一直占着 runner 到默认 6 小时上限，把队列堵死。
@@ -65,6 +65,70 @@ jobs:
           uv run ruff check ../scripts
           uv run ruff format --check ../scripts
           uv run pytest -q
+
+  # 使用较旧 glibc 基线；无 FUSE 的真实 AppImage 路径也必须在 PR 阶段覆盖。
+  linux-appimage:
+    timeout-minutes: 45
+    runs-on: ubuntu-22.04
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - name: 安装 Linux 桌面与 AppImage 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config curl ca-certificates zip unzip squashfs-tools fonts-noto-cjk \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libegl1 libgl1 \
+            libfontconfig1 libdbus-1-3 libxcb-cursor0 libxcb-keysyms1 libxcb-icccm4 \
+            libxcb-image0 libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1
+      - name: 构建教师、学生 AppImage 与目录式发布包
+        run: bash scripts/build-linux.sh --appimage
+      - name: AppImage 外层 payload 与时间门禁烟测
+        run: admin/.venv/bin/python scripts/smoke-appimage.py
+      - name: 教师 AppImage 界面与持久题库自检
+        run: |
+          IMAGE="dist/ExamAdmin-$(tr -d '[:space:]' < VERSION)-x86_64.AppImage"
+          export XDG_DATA_HOME="$(mktemp -d)"
+          "$IMAGE" --appimage-extract-and-run --selftest
+          test ! -e "$XDG_DATA_HOME/ExamSystem"
+          "$IMAGE" --appimage-extract-and-run --dump-ui target/appimage-ui
+          admin/.venv/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path("target/appimage-ui/info.json").read_text(encoding="utf-8"))
+          assert data["label_visible"], data
+          assert len(data["tabs"]) == 5, data
+          assert data["qt_style"] == "fusion", data
+          assert data["font_family"] == "Noto Sans CJK SC", data
+          # runner 同时装有 Noto；必须用 Qt 从随包文件注册的结果，而不是系统字体列表。
+          for filename in ("NotoSansCJK-Regular.ttc", "NotoSansCJK-Bold.ttc"):
+              assert "Noto Sans CJK SC" in data["bundled_fonts"].get(filename, []), data
+          assert data["build"]["stub"].endswith("stub-template.AppImage"), data
+          assert data["build"]["output"].endswith("StudentClient.AppImage"), data
+          assert len(data["banks"]) == 3, data
+          assert sum(bank["questions"] for bank in data["banks"]) == 14, data
+          # AppImage 进程已经退出，解压目录已清理；此时源文件仍须可读。
+          for bank in data["banks"]:
+              source = Path(bank["source"])
+              saved = json.loads(source.read_text(encoding="utf-8"))
+              assert saved["exam_id"] == bank["exam_id"], bank
+              assert len(saved["questions"]) == bank["questions"], bank
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exam-admin-linux-appimage
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            dist/ExamAdmin-*-linux.zip
+            dist/ExamAdmin-*-x86_64.AppImage
+            dist/stub-template-x86_64.AppImage
+            target/appimage-ui/info.json
 
   # 发布预检：复现 release.yml 的关键假设。
   #

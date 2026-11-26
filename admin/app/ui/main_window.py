@@ -37,6 +37,8 @@ from PySide6.QtWidgets import (
 
 from app.branding import branding
 from app.core.audit import AuditLog, verify_file
+from app.core.bank_import import BankImportError
+from app.core.default_banks import new_demo_project
 from app.core.models import Manifest
 from app.core.state import ProjectLocked, ProjectState
 from app.ui.app_settings import (
@@ -61,7 +63,7 @@ from app.version import app_version, watermark
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.state = ProjectState()
+        self.state, note = self._new_project_defaults()
         self.project_path: Path | None = None
         #: 是否有未保存的改动。没有它的话，只要导入过题库/建过场次，
         #: 每次新建或打开工程都会问"未保存的修改会丢失"——哪怕刚保存过。
@@ -77,7 +79,16 @@ class MainWindow(QMainWindow):
         self._build_tabs()
         self._build_statusbar()
         self._refresh_status()
-        self.statusBar().showMessage("已新建空白工程" + self._last_project_hint(), 10000)
+        self.statusBar().showMessage(note + self._last_project_hint(), 20000)
+
+    @staticmethod
+    def _new_project_defaults() -> tuple[ProjectState, str]:
+        try:
+            state = new_demo_project()
+        except (BankImportError, OSError, ValueError) as exc:
+            # 资源缺失不能让管理端打不开；保留手动导入的入口并说明补救方法。
+            return ProjectState(), f"默认示例题库加载失败：{exc}；请重新安装或使用「导入题库」。"
+        return state, f"新工程：已加载 {len(state.banks)} 个示例题库（仅供演示，正式考试请替换）"
 
     # ---------------------------------------------------------------- 构建
 
@@ -132,6 +143,29 @@ class MainWindow(QMainWindow):
         # 显式颜色：palette(mid) 在深色主题下几乎与背景同色，实测看不见。
         self.watermark_label.setStyleSheet("color: #9aa0a6; padding-right: 12px; font-size: 11px;")
         bar.addWidget(self.watermark_label)
+
+        from app.core.desktop import appimage_path
+
+        if appimage_path() is not None:
+            # 显式操作才写入 ~/.local/share，不在首次启动时悄悄安装。
+            menu = self.menuBar().addMenu("帮助")
+            desktop_action = menu.addAction("创建桌面启动器…")
+            desktop_action.triggered.connect(self.install_desktop_launcher)
+
+    def install_desktop_launcher(self) -> None:
+        from app.core.desktop import install_desktop_entry
+
+        try:
+            destination = install_desktop_entry()
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "无法创建启动器", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "桌面启动器已创建",
+            f"已添加到应用菜单：\n{destination}\n\n"
+            "可以从应用菜单启动或固定到任务栏。移动 AppImage 后请重新创建启动器。",
+        )
 
     def _build_tabs(self) -> None:
         self.tabs = QTabWidget()
@@ -210,7 +244,7 @@ class MainWindow(QMainWindow):
     def new_project(self) -> None:
         if not self._confirm_discard():
             return
-        self.state = ProjectState()
+        self.state, default_note = self._new_project_defaults()
         self.project_path = None
         self.project_passphrase = None
         self._dirty = False
@@ -218,7 +252,7 @@ class MainWindow(QMainWindow):
         self.project_passphrase: str | None = None
         note = self._ensure_project_dir()
         self._reload_tabs()
-        self.statusBar().showMessage(note or "已新建工程", 8000)
+        self.statusBar().showMessage(note or default_note, 20000)
 
     def _ensure_project_dir(self) -> str | None:
         """目录失效（U 盘拔出/共享盘离线）时回退到默认位置。"""

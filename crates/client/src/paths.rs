@@ -1,4 +1,4 @@
-//! 用户数据目录（答题卡、欢迎弹窗标记）。
+//! 用户数据目录（答题卡、欢迎弹窗标记）与 AppImage 外层考试包定位。
 //!
 //! **只在这里定义一次**：以前 `welcome.rs` 与 `gui.rs` 各写一套回退逻辑，
 //! Linux 上会得到 `$HOME/ExamSystem` 与 `$HOME/.local/share/ExamSystem` 两个目录；
@@ -12,6 +12,8 @@
 //! 3. 都没有：返回 `None`，由调用方**明确提示**「本次作答不会落盘」，
 //!    **不要**再偷偷写到当前目录。
 
+#[cfg(target_os = "linux")]
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// 本产品的用户数据根目录（`.../ExamSystem`）。
@@ -25,9 +27,70 @@ pub fn user_data_dir() -> Option<PathBuf> {
     Some(base.join("ExamSystem"))
 }
 
+/// AppImage 的 payload/答题卡属于外层文件，不属于只读挂载点里的 ELF。
+pub fn executable_path() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    #[cfg(target_os = "linux")]
+    {
+        Ok(executable_path_with(
+            exe,
+            std::env::var_os("APPIMAGE"),
+            std::env::var_os("APPDIR"),
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(exe)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn executable_path_with(exe: PathBuf, image: Option<OsString>, dir: Option<OsString>) -> PathBuf {
+    if let (Some(image), Some(dir)) = (image, dir) {
+        let image = PathBuf::from(image);
+        let dir = PathBuf::from(dir);
+        // builder 等外部程序可能继承这些环境变量，不能误读教师端 AppImage。
+        if image.is_absolute() && dir.is_absolute() && exe.starts_with(&dir) {
+            return image;
+        }
+    }
+    exe
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_payload_is_read_from_outer_file() {
+        let inner = PathBuf::from("/tmp/.mount_exam/usr/bin/exam-client");
+        let outer = PathBuf::from("/home/student/下载/StudentClient.AppImage");
+        assert_eq!(
+            executable_path_with(
+                inner,
+                Some(outer.clone().into_os_string()),
+                Some(OsString::from("/tmp/.mount_exam")),
+            ),
+            outer
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_executable_ignores_inherited_or_relative_appimage_environment() {
+        let native = PathBuf::from("/home/student/StudentClient");
+        for (image, dir) in [
+            ("/home/teacher/ExamAdmin.AppImage", "/tmp/.mount_teacher"),
+            ("relative.AppImage", "/home/student"),
+            ("/home/student/StudentClient.AppImage", "relative"),
+        ] {
+            assert_eq!(
+                executable_path_with(native.clone(), Some(image.into()), Some(dir.into())),
+                native
+            );
+        }
+    }
 
     /// 数据目录必须落在 `ExamSystem` 下——学生的答题卡与「不再提示」标记都靠它定位。
     #[test]

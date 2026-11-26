@@ -11,9 +11,23 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CLIENT="$ROOT/target/debug/exam-client.exe"
-BUILDER="$ROOT/target/release/exam-builder.exe"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;;
+  *) EXE="" ;;
+esac
+CLIENT="$ROOT/target/debug/exam-client$EXE"
+if [ "$#" -eq 2 ] && [ "$1" = --client ]; then
+  CLIENT="$2"
+elif [ "$#" -ne 0 ]; then
+  echo "Usage: bash scripts/smoke-answers.sh [--client path/to/debug-client-or-AppImage]" >&2
+  exit 2
+fi
+BUILDER="$ROOT/target/release/exam-builder$EXE"
 WORK="$ROOT/target/smoke-answers"
+PACKAGE="$WORK/pkg$EXE"
+if [[ "$CLIENT" == *.AppImage ]]; then
+  PACKAGE="$WORK/pkg.AppImage"
+fi
 
 # 挑一个**真的能跑**的解释器（Windows 上 python3 可能指向应用商店占位程序，
 # 一执行就退出 49）；时间窗也用它生成，避免依赖 GNU `date -d`（BSD/macOS 没有）。
@@ -53,12 +67,17 @@ JSON
 
 MASTER="$("$BUILDER" keygen 2>/dev/null)"
 EXAM_MASTER="$MASTER" "$BUILDER" build --manifest "$WORK/manifest.json" --banks "$WORK/banks" \
-  --stub "$CLIENT" --out "$WORK/pkg.exe" \
+  --stub "$CLIENT" --out "$PACKAGE" \
   --allow-weak-kdf --force >/dev/null
 
 # 启动 GUI 作答，轮询答题卡直到两个答案都落盘，避免固定 sleep 截断。
-EES_AUTOLOGIN=2 EES_ANSWER="0=B,1=AC" "$WORK/pkg.exe" >"$WORK/gui.log" 2>&1 &
+RUN=("$PACKAGE")
+if [[ "$PACKAGE" == *.AppImage ]]; then
+  RUN+=(--appimage-extract-and-run)
+fi
+EES_AUTOLOGIN=2 EES_ANSWER="0=B,1=AC" "${RUN[@]}" >"$WORK/gui.log" 2>&1 &
 pid=$!
+trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 SHEET=""
 for _ in $(seq 1 30); do
   sleep 0.5
@@ -66,19 +85,20 @@ for _ in $(seq 1 30); do
   # 在 `set -euo pipefail` 下会把整个脚本带走。
   SHEET="$(find "$WORK" -maxdepth 1 -name 'answers-*.eea' -print -quit)"
   [ -n "$SHEET" ] || continue
-  OUT="$(EXAM_MASTER="$MASTER" "$BUILDER" verify-answer-sheet "$SHEET" --package "$WORK/pkg.exe" --json 2>/dev/null || true)"
+  OUT="$(EXAM_MASTER="$MASTER" "$BUILDER" verify-answer-sheet "$SHEET" --package "$PACKAGE" --json 2>/dev/null || true)"
   if printf '%s' "$OUT" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") and d.get("sheet",{}).get("answers")==["B","AC"]' 2>/dev/null; then
     break
   fi
 done
 kill "$pid" 2>/dev/null || true
-sleep 1
+wait "$pid" 2>/dev/null || true
+trap - EXIT
 
 SHEET="$(find "$WORK" -maxdepth 1 -name 'answers-*.eea' -print -quit)"
 [ -n "$SHEET" ] || { echo "✗ 没有生成答题卡"; exit 1; }
 echo "答题卡：$(basename "$SHEET")（$(wc -c < "$SHEET" | tr -d ' ') 字节）"
 
-OUT="$(EXAM_MASTER="$MASTER" "$BUILDER" verify-answer-sheet "$SHEET" --package "$WORK/pkg.exe" --json)"
+OUT="$(EXAM_MASTER="$MASTER" "$BUILDER" verify-answer-sheet "$SHEET" --package "$PACKAGE" --json)"
 echo "$OUT" | "$PY" -c '
 import json,sys
 d=json.load(sys.stdin)
