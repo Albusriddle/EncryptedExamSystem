@@ -24,7 +24,12 @@ SERVER="$BIN/exam-server$EXE"
 BUILDER="$BIN/exam-builder$EXE"
 CLIENT="$BIN/exam-client$EXE"
 PY=${PY:-python3}
-command -v "$PY" >/dev/null 2>&1 || PY=python
+# Windows 上 python3 常是应用商店的占位程序：command -v 能找到，但执行返回 49。
+# 必须真跑一次解释器，失败就退回 python。
+if ! command -v "$PY" >/dev/null 2>&1 || ! "$PY" -c "import sys" >/dev/null 2>&1; then
+  PY=python
+fi
+"$PY" -c "import sys" >/dev/null 2>&1 || { echo "找不到可用的 Python（python3/python）"; exit 1; }
 
 [ -x "$SERVER" ] || { echo "缺少 $SERVER（先 cargo build --release）"; exit 1; }
 [ -x "$BUILDER" ] || { echo "缺少 $BUILDER"; exit 1; }

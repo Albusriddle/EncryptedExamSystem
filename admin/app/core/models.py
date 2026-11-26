@@ -64,6 +64,17 @@ class QuestionBody(BaseModel):
         return self
 
 
+class QuestionSample(BaseModel):
+    """一道题的输入/输出示例；只用于学生端展示，不参与判分。"""
+
+    input: str = ""
+    output: str = ""
+
+
+MAX_SAMPLES = 20
+MAX_SAMPLE_BYTES = 4096
+
+
 class Question(BaseModel):
     id: str
     qtype: str = Field(alias="type")
@@ -78,6 +89,8 @@ class Question(BaseModel):
         max_length=8,
         json_schema_extra={"uniqueItems": True},
     )
+    #: 输入/输出示例（学生端渲染成独立的输入框/输出框）。
+    samples: list[QuestionSample] = Field(default_factory=list)
     kp: str | None = None
     difficulty: int | None = Field(default=None, ge=0, le=255)
     #: 结构化答案（single/multi/blanks/fixes）。打包时会被剥离。
@@ -123,6 +136,14 @@ class Question(BaseModel):
             raise ValueError("code_language 与 code_languages 不能同时填写，二者只写一个")
         if len(self.code_languages) > 8:
             raise ValueError("code_languages 最多 8 个")
+        if len(self.samples) > MAX_SAMPLES:
+            raise ValueError(f"示例最多 {MAX_SAMPLES} 个")
+        for idx, sample in enumerate(self.samples, 1):
+            size = len(sample.input.encode("utf-8")) + len(sample.output.encode("utf-8"))
+            if size > MAX_SAMPLE_BYTES:
+                raise ValueError(f"第 {idx} 个示例过大：{size} 字节（上限 {MAX_SAMPLE_BYTES}）")
+            if not sample.input.strip() and not sample.output.strip():
+                raise ValueError(f"第 {idx} 个示例的输入和输出都为空")
         return self
 
     @field_validator("qtype")

@@ -1405,6 +1405,52 @@ fn avail_w(ui: &egui::Ui) -> f32 {
     }
 }
 
+/// 渲染题库里的输入/输出示例：每个示例一组「输入 / 输出」等宽框。
+///
+/// 只影响显示，不参与判分；旧学生端会忽略该字段（只显示题干）。
+fn render_samples(ui: &mut egui::Ui, samples: &[common::model::QuestionSample]) {
+    for (idx, sample) in samples.iter().enumerate() {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(format!("示例 {}", idx + 1))
+                .size(12.0)
+                .color(egui::Color32::GRAY),
+        );
+        sample_box(ui, idx, "输入", &sample.input);
+        sample_box(ui, idx, "输出", &sample.output);
+    }
+    if !samples.is_empty() {
+        ui.add_space(2.0);
+    }
+}
+
+fn sample_box(ui: &mut egui::Ui, idx: usize, label: &str, text: &str) {
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new(label)
+            .size(12.0)
+            .color(egui::Color32::GRAY),
+    );
+    // 空输入是合法的（程序不需要输入）；用灰色占位符区分"真的空"和"没写"。
+    let empty = text.is_empty();
+    let shown = if empty { "（空）" } else { text };
+    egui::Frame::none()
+        .fill(ui.visuals().extreme_bg_color)
+        .inner_margin(egui::Margin::same(8.0))
+        .show(ui, |ui| {
+            egui::ScrollArea::horizontal()
+                .id_salt(("sample", idx, label))
+                .show(ui, |ui| {
+                    let rich = egui::RichText::new(shown).monospace().size(13.0);
+                    if empty {
+                        ui.label(rich.color(egui::Color32::GRAY));
+                    } else {
+                        ui.label(rich);
+                    }
+                });
+        });
+}
+
 fn render_stem(ui: &mut egui::Ui, stem: &str) {
     let blocks = crate::markdown::parse_cached(stem);
     render_blocks(ui, blocks.as_ref(), false);
@@ -2007,6 +2053,7 @@ fn render_paper(
                                     .size(15.0),
                             );
                             render_stem(ui, &item.stem);
+                            render_samples(ui, &item.samples);
                             ui.indent(format!("q{seq}"), |ui| {
                                 render_body(ui, item);
                                 if render_answer_inputs(
@@ -2448,6 +2495,7 @@ mod tests {
             stem: "请实现".into(),
             options: vec![],
             code_languages: Vec::new(),
+            samples: Vec::new(),
             body: common::model::QuestionBody::Text,
             score: 10,
         };
@@ -2592,6 +2640,7 @@ mod tests {
             options: Vec::new(),
             body: common::model::QuestionBody::Text,
             code_languages: Vec::new(),
+            samples: Vec::new(),
             score: 2,
         }
     }
@@ -2675,6 +2724,53 @@ mod tests {
 
     fn divider_line_count(sections: usize, items_per_section: usize) -> usize {
         divider_strokes(sections, items_per_section).len()
+    }
+
+    #[test]
+    fn samples_render_input_and_output_boxes() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let samples = [
+            common::model::QuestionSample {
+                input: "3".to_string(),
+                output: "*\n**\n***".to_string(),
+            },
+            common::model::QuestionSample {
+                input: String::new(),
+                output: "EMPTY".to_string(),
+            },
+        ];
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_samples(ui, &samples);
+            });
+        });
+        let texts: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "示例 1"),
+            "缺少示例编号：{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("**")),
+            "输出内容被改坏：{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "（空）"),
+            "空输入应有占位符：{texts:?}"
+        );
     }
 
     #[test]
@@ -2769,6 +2865,7 @@ mod tests {
             stem: "请实现".into(),
             options: vec![],
             code_languages: Vec::new(),
+            samples: Vec::new(),
             body: common::model::QuestionBody::Text,
             score: 10,
         };

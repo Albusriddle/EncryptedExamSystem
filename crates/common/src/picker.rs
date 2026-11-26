@@ -35,6 +35,9 @@ pub struct PaperItem {
     /// - 空：老师未限制，学生可选全部语言。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub code_languages: Vec<String>,
+    /// 输入/输出示例（学生端渲染成独立的输入框/输出框）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<crate::model::QuestionSample>,
     pub score: u32,
 }
 
@@ -86,6 +89,7 @@ impl From<&crate::model::Question> for PaperItem {
             options: q.options.clone(),
             body,
             code_languages: normalize_code_languages(q),
+            samples: q.samples.clone(),
             score: q.score,
             // 注意：`q.answer` / `q.judge` 被有意忽略，本结构没有对应字段可放。
         }
@@ -770,6 +774,7 @@ mod tests {
                     options: vec!["A".into(), "B".into(), "C".into(), "D".into()],
                     code_language: None,
                     code_languages: Vec::new(),
+                    samples: Vec::new(),
                     body: Default::default(),
                     kp: None,
                     difficulty: None,
@@ -931,6 +936,7 @@ mod tests {
             stem: format!("题干 {id}"),
             options: vec![],
             code_languages: Vec::new(),
+            samples: Vec::new(),
             body: Default::default(),
             score: 2,
         }

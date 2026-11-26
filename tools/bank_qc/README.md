@@ -98,6 +98,7 @@ python verify_bank.py [PATH ...] [选项]
 | 答案 | `single/multi/blanks/fixes/rubric` 五种形状；答案字母必须落在选项里；多选答案升序、不重复、2–3 项、**不能等于全部选项**；fill 占位符数 = `blank_count` = 答案条数、`no` 与占位符对位、**出现顺序是否 ①②③**（WARN）；fix 行号在范围内、`wrong` 与原文逐字一致、多条改正项不指向同一行、**改前改后不能相同** |
 | 大题 rubric | `answer.kind=rubric`、`total == score`、`points` 非空且合计等于总分、`reference` 与 `samples` 存在、每个 sample 有 `input`/`output`、样例 <2 组给 WARN |
 | 代码语言 | `code_language` 与 `code_languages` 不能共存；11 种白名单；≤8 个；重复项提示；大题必须是 `code_languages: ["c"]`（可用 `--big-lang` 改） |
+| 输入/输出示例 | `samples` 必须是对象数组；单个 `input`+`output` ≤4096 字节；两者不能同时为空；最多 20 个 |
 | 判题材料 | fill/fix 必须有 `judge.entry/harness/tests`；`tests ≥ 3`；每条有 `input` 与 `expected`（**兼容旧写法 `output`**）；`entry` 是否真的出现在 harness 里（提示）；harness 含 `fopen/fprintf` 时提示并发风险 |
 | 编译回放 | fill：官方答案回放**全过**；fix：官方修正**全过**、原始代码**必败**、撤销任意一处修改后**必败**（每项都实跑编译器）；输出里显示 `judge 回放 60/60` |
 | 重复 | 库内逐字题干（仅去空白）；骨架族 ≤4；骨架种类下限（选择题库 120、其它 30，按题量取小）；跨库逐字同题干 |

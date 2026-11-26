@@ -23,6 +23,24 @@ pub const CODE_LANGUAGES: [&str; 11] = [
 /// 单题允许语言数量上限。
 pub const MAX_CODE_LANGUAGES: usize = 8;
 
+/// 单题最多几个输入/输出示例。
+pub const MAX_SAMPLES: usize = 20;
+/// 单个示例（输入 + 输出）的字节上限。
+pub const MAX_SAMPLE_BYTES: usize = 4096;
+
+/// 一道题的输入/输出示例。
+///
+/// 只用于展示（学生端渲染成等宽的输入框/输出框），不参与判分。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QuestionSample {
+    /// 输入内容（可为空：程序不需要输入时）。
+    #[serde(default)]
+    pub input: String,
+    /// 期望输出（保留换行与行尾空格）。
+    #[serde(default)]
+    pub output: String,
+}
+
 /// 一个选项。保留键（A/B/C…），顺序即呈现顺序。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChoiceOption {
@@ -86,6 +104,11 @@ pub struct Question {
     /// 非空时忽略 `code_language`。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub code_languages: Vec<String>,
+    /// 输入/输出示例（学生端渲染成独立的输入框/输出框）。
+    ///
+    /// 只影响显示；旧学生端会忽略该字段。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<QuestionSample>,
     /// 知识点编号（如 "1.1"，外部题库才有）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kp: Option<String>,
@@ -239,6 +262,31 @@ impl ExamBank {
                     return Err(crate::model::ModelError::CodeLanguageConflict {
                         exam_id: self.exam_id.clone(),
                         qid: q.id.clone(),
+                    });
+                }
+            }
+            if q.samples.len() > MAX_SAMPLES {
+                return Err(crate::model::ModelError::TooManySamples {
+                    exam_id: self.exam_id.clone(),
+                    qid: q.id.clone(),
+                    count: q.samples.len(),
+                });
+            }
+            for (idx, sample) in q.samples.iter().enumerate() {
+                let bytes = sample.input.len() + sample.output.len();
+                if bytes > MAX_SAMPLE_BYTES {
+                    return Err(crate::model::ModelError::SampleTooLarge {
+                        exam_id: self.exam_id.clone(),
+                        qid: q.id.clone(),
+                        index: idx + 1,
+                        bytes,
+                    });
+                }
+                if sample.input.trim().is_empty() && sample.output.trim().is_empty() {
+                    return Err(crate::model::ModelError::EmptySample {
+                        exam_id: self.exam_id.clone(),
+                        qid: q.id.clone(),
+                        index: idx + 1,
                     });
                 }
             }
@@ -474,6 +522,27 @@ pub enum ModelError {
     },
     #[error("题库 {exam_id} 的代码题 {qid} 同时写了 code_language 与 code_languages；二者不共存")]
     CodeLanguageConflict { exam_id: String, qid: String },
+    #[error("题库 {exam_id} 的题 {qid} 示例过多：{count}（上限 {MAX_SAMPLES}）")]
+    TooManySamples {
+        exam_id: String,
+        qid: String,
+        count: usize,
+    },
+    #[error(
+        "题库 {exam_id} 的题 {qid} 第 {index} 个示例过大：{bytes} 字节（上限 {MAX_SAMPLE_BYTES}）"
+    )]
+    SampleTooLarge {
+        exam_id: String,
+        qid: String,
+        index: usize,
+        bytes: usize,
+    },
+    #[error("题库 {exam_id} 的题 {qid} 第 {index} 个示例的输入和输出都为空")]
+    EmptySample {
+        exam_id: String,
+        qid: String,
+        index: usize,
+    },
     #[error("题库 {exam_id} 的代码题 {qid} 使用了不支持的语言：{language}")]
     InvalidCodeLanguage {
         exam_id: String,
@@ -499,6 +568,7 @@ mod tests {
                 options: vec![],
                 code_language: None,
                 code_languages: Vec::new(),
+                samples: Vec::new(),
                 body: QuestionBody::Code {
                     code: vec!["x".into()],
                     blank_count: 1,
@@ -529,6 +599,7 @@ mod tests {
                 body: QuestionBody::Text,
                 code_language: single.map(str::to_string),
                 code_languages: languages.into_iter().map(str::to_string).collect(),
+                samples: Vec::new(),
                 kp: None,
                 difficulty: None,
                 answer: None,
@@ -536,6 +607,42 @@ mod tests {
                 score: 2,
             }],
         }
+    }
+
+    #[test]
+    fn samples_are_validated() {
+        let mut bank = code_q(vec!["c"], None);
+        bank.questions[0].samples = vec![QuestionSample {
+            input: "3".into(),
+            output: "*\n**\n***".into(),
+        }];
+        assert!(bank.validate().is_ok(), "正常示例应通过");
+
+        bank.questions[0].samples = vec![QuestionSample::default()];
+        assert!(matches!(
+            bank.validate(),
+            Err(ModelError::EmptySample { .. })
+        ));
+
+        bank.questions[0].samples = vec![QuestionSample {
+            input: "x".repeat(MAX_SAMPLE_BYTES),
+            output: "y".into(),
+        }];
+        assert!(matches!(
+            bank.validate(),
+            Err(ModelError::SampleTooLarge { .. })
+        ));
+
+        bank.questions[0].samples = (0..MAX_SAMPLES + 1)
+            .map(|i| QuestionSample {
+                input: i.to_string(),
+                output: i.to_string(),
+            })
+            .collect();
+        assert!(matches!(
+            bank.validate(),
+            Err(ModelError::TooManySamples { .. })
+        ));
     }
 
     #[test]
@@ -581,6 +688,7 @@ mod tests {
                 body: QuestionBody::Text,
                 code_language: Some("brainfuck".into()),
                 code_languages: Vec::new(),
+                samples: Vec::new(),
                 kp: None,
                 difficulty: None,
                 answer: None,
@@ -607,6 +715,7 @@ mod tests {
                 options: vec![],
                 code_language: None,
                 code_languages: Vec::new(),
+                samples: Vec::new(),
                 body: QuestionBody::Text,
                 kp: None,
                 difficulty: None,
@@ -633,6 +742,7 @@ mod tests {
                 options: vec![],
                 code_language: None,
                 code_languages: Vec::new(),
+                samples: Vec::new(),
                 body: QuestionBody::Text,
                 kp: None,
                 difficulty: None,
@@ -663,6 +773,7 @@ mod tests {
             options: Vec::new(),
             code_language: None,
             code_languages: Vec::new(),
+            samples: Vec::new(),
             body: QuestionBody::Options {
                 options: (0..n)
                     .map(|i| ChoiceOption {

@@ -1469,6 +1469,35 @@ def check_question(bank: Bank, index: int, report: Report, opts: Options) -> Non
     stem = q.get("stem")
     if not isinstance(stem, str) or not stem.strip():
         report.error(bank.label, where, "结构", "题干为空")
+
+    samples = q.get("samples")
+    if samples is not None:
+        if not isinstance(samples, list):
+            report.error(bank.label, where, "结构", "samples 必须是数组")
+        else:
+            if len(samples) > 20:
+                report.error(bank.label, where, "结构", f"samples 最多 20 个，实际 {len(samples)}")
+            for si, smp in enumerate(samples, 1):
+                if not isinstance(smp, dict):
+                    report.error(bank.label, where, "结构", f"第 {si} 个 sample 必须是对象")
+                    continue
+                inp = smp.get("input", "")
+                out = smp.get("output", "")
+                if not isinstance(inp, str) or not isinstance(out, str):
+                    report.error(
+                        bank.label, where, "结构", f"第 {si} 个 sample 的 input/output 必须是字符串"
+                    )
+                    continue
+                size = len(inp.encode("utf-8")) + len(out.encode("utf-8"))
+                if size > 4096:
+                    report.error(
+                        bank.label,
+                        where,
+                        "结构",
+                        f"第 {si} 个 sample 过大：{size} 字节（上限 4096）",
+                    )
+                if not inp.strip() and not out.strip():
+                    report.error(bank.label, where, "结构", f"第 {si} 个 sample 的输入和输出都为空")
     if qtype not in ALLOWED_TYPES:
         report.error(
             bank.label,

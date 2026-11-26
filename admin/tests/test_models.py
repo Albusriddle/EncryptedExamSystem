@@ -154,3 +154,21 @@ def test_code_languages_multi_and_conflict() -> None:
     assert q2.code_languages == ["c"]
     with pytest.raises(ValueError, match="不能同时填写"):
         Question(id="c3", type="code", stem="s", code_language="c", code_languages=["c"])
+
+
+def test_samples_are_validated() -> None:
+    from app.core.models import Question
+
+    q = Question(
+        id="c1",
+        type="code",
+        stem="s",
+        samples=[{"input": "3", "output": "*\n**\n***"}],
+    )
+    assert q.samples[0].output.startswith("*")
+    with pytest.raises(ValueError, match="输入和输出都为空"):
+        Question(id="c2", type="code", stem="s", samples=[{"input": "", "output": ""}])
+    with pytest.raises(ValueError, match="过大"):
+        Question(id="c3", type="code", stem="s", samples=[{"input": "x" * 4096, "output": "y"}])
+    with pytest.raises(ValueError, match="最多 20"):
+        Question(id="c4", type="code", stem="s", samples=[{"input": "1", "output": "1"}] * 21)

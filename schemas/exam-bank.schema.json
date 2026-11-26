@@ -64,6 +64,13 @@
           "type": "array",
           "uniqueItems": true
         },
+        "samples": {
+          "items": {
+            "$ref": "#/$defs/QuestionSample"
+          },
+          "title": "Samples",
+          "type": "array"
+        },
         "kp": {
           "anyOf": [
             {
@@ -163,6 +170,23 @@
         }
       },
       "title": "QuestionBody",
+      "type": "object"
+    },
+    "QuestionSample": {
+      "description": "一道题的输入/输出示例；只用于学生端展示，不参与判分。",
+      "properties": {
+        "input": {
+          "default": "",
+          "title": "Input",
+          "type": "string"
+        },
+        "output": {
+          "default": "",
+          "title": "Output",
+          "type": "string"
+        }
+      },
+      "title": "QuestionSample",
       "type": "object"
     }
   },

@@ -434,6 +434,11 @@ fn find_char(chars: &[char], from: usize, target: char) -> Option<usize> {
 fn find_double_star(chars: &[char], from: usize) -> Option<usize> {
     let mut k = from;
     while k + 1 < chars.len() {
+        // 加粗**不跨行**：输出示例里单独一行 `**` 不能被下一行的 `***` 当成结束标记，
+        // 否则星号三角形之类的示例会被吃掉（v1.9.0 之前的真实 bug）。
+        if chars[k] == '\n' {
+            return None;
+        }
         if chars[k] == '*' && chars[k + 1] == '*' {
             return Some(k);
         }
@@ -490,6 +495,26 @@ mod tests {
                 Span::Text("。".into()),
             ]
         );
+    }
+
+    #[test]
+    fn bold_does_not_span_lines() {
+        // 题面里的星号示例：三行都必须原样保留，不能产生 Bold。
+        let spans = parse_spans("输出：\n*\n**\n***");
+        assert!(
+            !spans.iter().any(|s| matches!(s, Span::Bold(_))),
+            "跨行的 ** 被误判成加粗：{spans:?}"
+        );
+        let text: String = spans
+            .iter()
+            .map(|s| match s {
+                Span::Text(t) => t.clone(),
+                Span::Code(t) => t.clone(),
+                Span::Bold(t) => t.clone(),
+            })
+            .collect();
+        assert!(text.contains("**"), "星号被吃掉：{text:?}");
+        assert!(text.contains("***"), "星号被吃掉：{text:?}");
     }
 
     #[test]

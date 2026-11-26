@@ -486,6 +486,7 @@ fn demo_bank(count: usize) -> ExamBank {
             body: QuestionBody::Text,
             code_language: None,
             code_languages: Vec::new(),
+            samples: Vec::new(),
             kp: None,
             difficulty: Some(1),
             answer: None,
@@ -1855,6 +1856,7 @@ fn fill_answer_text_round_trips_with_blank_count() {
             blank_count: 3,
         },
         code_languages: Vec::new(),
+        samples: Vec::new(),
         score: 2,
     };
     let stored = normalize_answer(&item, "a\nb");

@@ -462,6 +462,7 @@ mod tests {
                     options: vec!["a".into(), "b".into()],
                     code_language: None,
                     code_languages: Vec::new(),
+                    samples: Vec::new(),
                     body: Default::default(),
                     kp: None,
                     difficulty: None,
