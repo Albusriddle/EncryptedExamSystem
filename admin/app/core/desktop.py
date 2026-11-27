@@ -32,6 +32,18 @@ def resource_path(name: str) -> Path:
     return Path(base) / name if base else Path(__file__).resolve().parents[3] / name
 
 
+def desktop_exec_quote(path: Path) -> str:
+    """desktop 文件 `Exec=` 的双引号参数转义。
+
+    GIO 会在展开 %% 之前查找可执行文件，百分号文件名因此要双写；
+    其余保留字符先加反斜杠，再按 desktop 字符串规则把反斜杠翻倍。
+    """
+    quoted = str(path).replace("%", "%%")
+    for char in ("\\", '"', "`", "$"):
+        quoted = quoted.replace(char, "\\" + char)
+    return quoted.replace("\\", "\\\\")
+
+
 def install_desktop_entry() -> Path:
     image = appimage_path()
     if image is None or not image.is_file():
@@ -46,13 +58,7 @@ def install_desktop_entry() -> Path:
     shutil.copy2(resource_path("assets/ees.svg"), icons / f"{DESKTOP_ID}.svg")
     from app.branding import branding
 
-    # Exec 先做双引号内的保留字符转义，再做 desktop 字符串转义。
-    # GIO 会在展开 %% 之前查找可执行文件，百分号文件名因此被误判不存在。
-    # env 把 AppImage 作为参数接收；不经过 shell，不展开 $/反引号或执行文件名。
-    quoted = str(image).replace("%", "%%")
-    for char in ("\\", '"', "`", "$"):
-        quoted = quoted.replace(char, "\\" + char)
-    quoted = quoted.replace("\\", "\\\\")
+    quoted = desktop_exec_quote(image)
     text = (
         "[Desktop Entry]\nType=Application\n"
         f"Name={branding().product} · 管理端\n"

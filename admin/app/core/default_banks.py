@@ -12,6 +12,10 @@ from app.core.models import ExamBank
 from app.core.paths import data_dir
 from app.core.state import ProjectState
 
+#: 内置示例的固定规模；--selftest 用它发现资源缺失/被替换。
+DEMO_BANK_COUNT = 3
+DEMO_QUESTION_COUNT = 14
+
 
 def demo_banks_dir() -> Path:
     # 冻结后不能再按源码层级找资源；打包时只附带公开的 banks/demo。

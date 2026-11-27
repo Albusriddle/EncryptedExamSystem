@@ -236,6 +236,23 @@ pub enum PickError {
         difficulty: u8,
         available: usize,
     },
+    #[error("同一份试卷出现重复题目 ID：{id}（不同题库使用了同一个 id，答题卡会互相覆盖）")]
+    DuplicateItemId { id: String },
+}
+
+/// 整卷题目 ID 必须唯一：答题卡/网页按 qid 存答案，重复会互相覆盖。
+fn ensure_unique_item_ids(paper: &Paper) -> Result<(), PickError> {
+    let mut seen = std::collections::HashSet::new();
+    for sec in &paper.sections {
+        for item in &sec.items {
+            if !seen.insert(item.id.as_str()) {
+                return Err(PickError::DuplicateItemId {
+                    id: item.id.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 从题库中确定性抽取 `pick` 道题，返回题目 id。
@@ -602,11 +619,13 @@ where
             parts: Vec::new(),
         });
     }
-    Ok(Paper {
+    let paper = Paper {
         student_id,
         session_id,
         sections,
-    })
+    };
+    ensure_unique_item_ids(&paper)?;
+    Ok(paper)
 }
 
 fn bank_for_file<'a>(banks: &'a [ExamBank], file: &str) -> Option<&'a ExamBank> {
@@ -683,11 +702,13 @@ pub fn generate_paper_sections(
             parts: Vec::new(),
         });
     }
-    Ok(Paper {
+    let paper = Paper {
         student_id,
         session_id,
         sections: out,
-    })
+    };
+    ensure_unique_item_ids(&paper)?;
+    Ok(paper)
 }
 
 /// 按“大题 → 部分”生成试卷：每个部分固定精确难度，顺序即卷面顺序。
@@ -750,11 +771,13 @@ pub fn generate_paper_parts(
             parts,
         });
     }
-    Ok(Paper {
+    let paper = Paper {
         student_id,
         session_id,
         sections: out,
-    })
+    };
+    ensure_unique_item_ids(&paper)?;
+    Ok(paper)
 }
 
 #[cfg(test)]
@@ -768,7 +791,7 @@ mod tests {
             pick,
             questions: (0..n)
                 .map(|i| crate::model::Question {
-                    id: format!("q{i:04}"),
+                    id: format!("{exam_id}-q{i:04}"),
                     qtype: "single".into(),
                     stem: format!("题目 {i}"),
                     options: vec!["A".into(), "B".into(), "C".into(), "D".into()],
@@ -940,6 +963,22 @@ mod tests {
             body: Default::default(),
             score: 2,
         }
+    }
+
+    #[test]
+    fn duplicate_item_ids_across_banks_are_rejected() {
+        let paper = Paper {
+            student_id: 1,
+            session_id: 1,
+            sections: vec![
+                section("a", vec![item("q1")]),
+                section("b", vec![item("q1")]),
+            ],
+        };
+        assert!(matches!(
+            ensure_unique_item_ids(&paper),
+            Err(PickError::DuplicateItemId { .. })
+        ));
     }
 
     /// 用题库自带 pick 抽题的便捷封装（测试用）。
@@ -1141,9 +1180,12 @@ mod tests {
     /// v2 变更记录（2026-10-22）：fingerprint 加入长度前缀以消除拼接歧义，
     /// 因此向量值随之改变。此前无真实试卷发出，变更无影响。
     ///
+    /// v1.10.1 记录：测试 fixture 的题目 ID 改为带题库前缀（满足“整卷 ID 唯一”
+    /// 校验），抽题算法本身未变，因此仅更新向量；真实题库不受影响。
+    ///
     /// 取值条件：student=2021001, session=1, salt="golden-salt",
     /// banks=[math(50 题, pick 10), english(40 题, pick 8)]，使用题库自带 pick。
-    const GOLDEN_FP: &str = "6e429e5e0cf9d03a4ec340c949a6c6e7bbeb0de3043da70e27b0674a2861f971";
+    const GOLDEN_FP: &str = "0a3869fabb2a58d108555092b068481c52bc3caccbab51da2cb8fe897974847f";
 
     fn bank_with_difficulty(diffs: &[u8]) -> ExamBank {
         let mut b = demo_bank("m", diffs.len(), diffs.len() as u32);

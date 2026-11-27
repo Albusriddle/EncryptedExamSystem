@@ -320,7 +320,7 @@ worker/              Cloudflare Worker 时间服务（只有空的 `worker/src`�
 
 | 项 | 基线 |
 |---|---|
-| Rust | Arch Linux：402 passed；Windows 由 `admin-package` 的 `cargo test` 覆盖，各平台以输出为准 |
+| Rust | Arch Linux：404 passed；Windows 由 `admin-package` 的 `cargo test` 覆盖，各平台以输出为准 |
 | Python | Arch Linux：538 passed、0 skipped；Windows：529 passed + 9 skipped（PySide6 offscreen） |
 | 密钥嵌入端到端 | `scripts/verify-embed.sh` 17 项 |
 | 发布预检 | `scripts/preflight-release.sh` 18 项（非 `--full`） |

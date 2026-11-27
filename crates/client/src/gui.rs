@@ -1422,7 +1422,16 @@ fn display_question_id(id: &str) -> String {
     let total = id.chars().count();
     let mut out = String::new();
     for c in id.chars().take(40) {
-        if c.is_control() || c.is_whitespace() {
+        if c.is_control()
+            || c.is_whitespace()
+            || matches!(
+                c,
+                '\u{200b}'..='\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2060}'..='\u{206f}'
+                    | '\u{feff}'
+            )
+        {
             out.push('_');
         } else {
             out.push(c);
@@ -2836,6 +2845,7 @@ mod tests {
     #[test]
     fn question_id_is_sanitized_and_capped() {
         assert_eq!(display_question_id("q\n1"), "q_1");
+        assert_eq!(display_question_id("q\u{202e}1"), "q_1");
         let long = "x".repeat(50);
         let shown = display_question_id(&long);
         assert_eq!(shown.chars().count(), 41);

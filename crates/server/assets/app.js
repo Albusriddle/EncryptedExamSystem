@@ -157,8 +157,12 @@ function optionsOf(item) {
 
 // 题号旁显示的题库 ID：去掉空白/控制字符并限长，完整值放 title。
 function displayId(id) {
-  const text = String(id == null ? '' : id).replace(/[\s\u0000-\u001f\u007f]/g, '_');
-  return text.length > 40 ? `${text.slice(0, 40)}…` : text;
+  const text = String(id == null ? '' : id).replace(
+    /[\s\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g,
+    '_'
+  );
+  const chars = Array.from(text);
+  return chars.length > 40 ? `${chars.slice(0, 40).join('')}…` : text;
 }
 
 // 题目级输入/输出示例：与桌面端同一套字段（item.samples）。

@@ -81,7 +81,9 @@ def selftest() -> int:
 
         from app.branding import branding
         from app.core import secure
-        from app.core.default_banks import new_demo_project
+        from app.core.default_banks import (
+            new_demo_project,
+        )
         from app.core.models import Manifest  # noqa: F401
         from app.core.state import ProjectState  # noqa: F401
         from app.ui.main_window import MainWindow  # noqa: F401

@@ -34,7 +34,7 @@ use rayon::prelude::*;
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, CryptoError, KdfParams, TAG_LEN};
-use crate::model::Session;
+use crate::model::{ExamBank, Session};
 
 /// payload 起始魔数。
 pub const MAGIC: &[u8; 8] = b"EXAMPKG3";
@@ -263,6 +263,35 @@ pub fn build_payload_with_pins(
     )
 }
 
+/// 同一场次引用多个题库时，题目 ID 必须全局唯一：答题卡/网页按 qid 存答案。
+fn validate_session_item_ids(
+    banks: &[ExamBank],
+    sessions: &[Session],
+) -> Result<(), ContainerError> {
+    for session in sessions {
+        let mut seen = std::collections::HashSet::new();
+        let files = session
+            .exams
+            .iter()
+            .map(|e| e.file.as_str())
+            .chain(session.sections.iter().map(|sec| sec.file.as_str()));
+        for file in files {
+            let Some(bank) = match_bank(file, banks) else {
+                continue;
+            };
+            for question in &bank.questions {
+                if !seen.insert(question.id.as_str()) {
+                    return Err(ContainerError::Format(format!(
+                        "场次 {} 的题库引用出现重复题目 ID：{}（不同题库使用了同一个 id，答题卡会互相覆盖）",
+                        session.session_id, question.id
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 带时间令牌配置的构建入口（builder 使用）。
 #[allow(clippy::too_many_arguments)]
 pub fn build_payload_with_options(
@@ -305,6 +334,7 @@ pub fn build_payload_with_options(
             q.judge = None;
         }
     }
+    validate_session_item_ids(&clean_banks, sessions)?;
 
     // 2. 清单自身校验（时间窗、重复学号、场次编号）。
     //    用静默版：builder 层已校验并打印过警告，这里重复打印会让管理员困惑。
@@ -1314,6 +1344,36 @@ mod tests {
         sess.start = "2026-10-23T11:00:00+08:00".into();
         sess.end = "2026-10-23T16:00:00+08:00".into();
         assert!(validate_sessions_silent(&[sess]).is_ok());
+    }
+
+    #[test]
+    fn duplicate_item_ids_across_banks_in_session_are_rejected() {
+        let a = bank("a", 1);
+        let mut b = bank("b", 1);
+        b.questions[0].id = a.questions[0].id.clone();
+        let session = Session {
+            session_id: 7,
+            start: "2026-10-23T11:00:00+08:00".into(),
+            end: "2026-10-23T16:00:00+08:00".into(),
+            students: vec![2021001],
+            exams: vec![
+                SessionExam {
+                    file: "a.json".into(),
+                    pick: Some(1),
+                    difficulty_min: None,
+                    difficulty_max: None,
+                },
+                SessionExam {
+                    file: "b.json".into(),
+                    pick: Some(1),
+                    difficulty_min: None,
+                    difficulty_max: None,
+                },
+            ],
+            sections: Vec::new(),
+        };
+        let err = validate_session_item_ids(&[a, b], &[session]).unwrap_err();
+        assert!(err.to_string().contains("重复题目 ID"), "{err}");
     }
 
     #[test]
