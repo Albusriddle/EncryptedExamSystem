@@ -79,7 +79,7 @@ function apply(data) {
   $('title').textContent = `学号 ${data.student_id} · 场次 #${data.session_id}`;
   if (!data.paper) {
     // 已交卷 + 策略不允许回看：不下发卷面，切到「已交卷」页。
-    showDone(data.student_id);
+    showDone(data.student_id, 'server');
     return;
   }
   paper = data.paper;
@@ -101,7 +101,7 @@ function apply(data) {
 
 /// 切到「已交卷」页。提交后会话 cookie 会立即失效（默认策略），
 /// 此时再取 /api/paper 会 401 —— 所以这个页面必须能本地渲染。
-function showDone(studentId) {
+function showDone(studentId, reason = 'submit') {
   // 状态与 UI 一起收敛，不靠调用方记得先置 submitted——漏一个就会出现
   // 「页面显示已交卷，但 beforeunload 还在拦、自动保存还在发」。
   submitted = true;
@@ -116,7 +116,19 @@ function showDone(studentId) {
   dirty.clear();
   $('exam').classList.add('hidden');
   $('done').classList.remove('hidden');
-  $('doneMsg').textContent = studentId ? `学号 ${studentId} 的答题卡已封存。` : '答题卡已封存。';
+  const title = $('doneTitle');
+  if (reason === 'monitor') title.textContent = '考试已终止';
+  else if (reason === 'time') title.textContent = '考试已结束';
+  else if (reason === 'submit') title.textContent = '已交卷';
+  else title.textContent = '考试已结束';
+  const who = studentId ? `学号 ${studentId} 的` : '';
+  if (reason === 'monitor') {
+    $('doneMsg').textContent = `监考老师已收卷，${who}答题卡已封存。`;
+  } else if (reason === 'time') {
+    $('doneMsg').textContent = `已到结束时间，${who}答题卡已封存。`;
+  } else {
+    $('doneMsg').textContent = `${who}答题卡已封存。`;
+  }
 }
 
 // 只支持题库实际用到的 Markdown 子集：图片与围栏代码，其余按纯文本显示。
@@ -306,9 +318,22 @@ function renderText(item) {
 function initCodeEditor(ta, item) {
   if (!window.CodeMirror) return;
   const lang = (item.code_languages && item.code_languages[0]) || '';
-  const mode = lang === 'python' ? 'python' : ['c','cpp','java','javascript','typescript','go','rust'].includes(lang) ? 'text/x-csrc' : null;
-  const cm = CodeMirror.fromTextArea(ta, { lineNumbers: true, mode, indentUnit: 4, tabSize: 4, lineWrapping: false, readOnly: !editable });
+  // 没有语言或未知语言时也给 C 系高亮：至少比纯黑文本更容易读；
+  // Python 单独用 python mode。
+  const mode = lang === 'python' ? 'python' : 'text/x-csrc';
+  const cm = CodeMirror.fromTextArea(ta, {
+    lineNumbers: true,
+    gutters: ['CodeMirror-linenumbers'],
+    mode,
+    indentUnit: 4,
+    tabSize: 4,
+    lineWrapping: false,
+    readOnly: !editable,
+  });
   cm.setSize('100%', '260px');
+  // 初始化时 #exam 刚从 hidden 切出来，字体/行高可能还没稳定；下一帧 refresh
+  // 让行号槽重新测量，避免行号与代码错位。
+  requestAnimationFrame(() => cm.refresh());
   cm.on('change', () => { if (editable) setAnswer(item.id, cm.getValue()); });
   editors.set(item.id, cm);
 }
@@ -355,8 +380,8 @@ async function doSaveDirty() {
       submitted = true;
       lockAll();
       setNet('');
-      showDone(me);
-      toast('已到结束时间，答题卡已自动封存');
+      showDone(me, terminationReason());
+      toast('答题卡已被封存，考试已结束');
       return false;
     }
     // 4xx（除 401/409）是确定性错误（413 单题超限、400 格式、403 无权限）：
@@ -384,6 +409,12 @@ let tickTimer = null;
 // 到点自动交卷的退避：原来每秒重试一次，断网时会把日志/网络刷爆。
 let autoSubmitDelay = 2000;
 let autoSubmitAt = 0;
+/// 服务端说已封存时，区分「监考收卷」与「到点自动收卷」。
+function terminationReason() {
+  if (endUnix && serverNow() < endUnix) return 'monitor';
+  return 'time';
+}
+
 function updateClock() {
   const tick = () => {
     const remaining = endUnix ? endUnix - serverNow() : 0;
@@ -397,31 +428,40 @@ function updateClock() {
   tick();
   if (!tickTimer) tickTimer = setInterval(tick, 1000);
   if (!pollTimer) {
-    pollTimer = setInterval(async () => {
-      try {
-        const t = await api('/api/time');
-        serverOffset = (t.server_time || serverNow()) - Math.floor(Date.now()/1000);
-        if (t.end_unix) endUnix = t.end_unix;
-        // 服务端字段缺失时保持现状（不要因为 undefined 就误判）。
-        if (t.submitted === true && !submitted) {
-          submitted = true;
-          lockAll();
-          setNet('');
-          showDone(me);
-          toast('已到结束时间，答题卡已自动封存');
-          return;
-        }
-        // 只有「没有待保存的题」时才清横幅：否则会把「保存失败，正在重试」的提示
-        // 在 15 秒后悄悄抹掉，学生以为已经存上了。
-        // 有 503 退避在跑时别清横幅：那条「答题卡正在封存，请不要关闭页面」正是
-        // 学生此刻最需要看到的提示，被 15 s 轮询抹掉会让人以为已经交上了。
-        if (!dirty.size && !resubmitTimer) setNet('');
-      } catch (e) {
-        // 轮询失败不回退本地计时：断线时学生更需要看到剩余时间。
-        if (e && e.status === 401) { needRelogin(); return; }
-        if (!navigator.onLine) setNet('网络已断开：作答暂存在本页，恢复后会自动保存。请不要关闭页面。');
-      }
-    }, 15000);
+    pollTimer = setInterval(pollServer, 15000);
+    // 切回标签页时立即查一次：监考刚收卷时不要让学生再多等一个 15 s 周期。
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && !submitted) pollServer();
+    });
+  }
+}
+
+async function pollServer() {
+  try {
+    const t = await api('/api/time');
+    serverOffset = (t.server_time || serverNow()) - Math.floor(Date.now()/1000);
+    if (t.end_unix) endUnix = t.end_unix;
+    // 服务端字段缺失时保持现状（不要因为 undefined 就误判）。
+    if (t.submitted === true && !submitted) {
+      const reason = terminationReason();
+      submitted = true;
+      lockAll();
+      setNet('');
+      showDone(me, reason);
+      toast(reason === 'monitor'
+        ? '监考老师已收卷，考试已终止'
+        : '已到结束时间，答题卡已封存');
+      return;
+    }
+    // 只有「没有待保存的题」时才清横幅：否则会把「保存失败，正在重试」的提示
+    // 在 15 秒后悄悄抹掉，学生以为已经存上了。
+    // 有 503 退避在跑时别清横幅：那条「答题卡正在封存，请不要关闭页面」正是
+    // 学生此刻最需要看到的提示，被 15 s 轮询抹掉会让人以为已经交上了。
+    if (!dirty.size && !resubmitTimer) setNet('');
+  } catch (e) {
+    // 轮询失败不回退本地计时：断线时学生更需要看到剩余时间。
+    if (e && e.status === 401) { needRelogin(); return; }
+    if (!navigator.onLine) setNet('网络已断开：作答暂存在本页，恢复后会自动保存。请不要关闭页面。');
   }
 }
 
@@ -470,7 +510,7 @@ async function submit(auto = false, skipConfirm = false) {
     clearResubmit();
     submitted = true;
     toast('已交卷');
-    showDone(me);
+    showDone(me, 'submit');
     // 503 退避期间挂着的「正在封存…」横幅必须收掉：否则「已交卷」页上还写着
     // 「请不要关闭页面，稍后会自动重试」，学生会以为没交上。
     setNet('');
@@ -552,7 +592,7 @@ function flushBeacon() {
         // fetch 对 4xx/5xx 也会 resolve：不判 ok 就会把「没存上」当成「存上了」，
         // 该题从 dirty 里被删掉、再也不会重发，封存的卡里就少了这一题。
         if (res.ok) { dirty.delete(qid); return; }
-        if (res.status === 409) { submitted = true; lockAll(); showDone(me); }
+        if (res.status === 409) { submitted = true; lockAll(); showDone(me, terminationReason()); }
       })
       .catch(() => { /* 页面正在关闭，失败也没法再提示；dirty 保留，下次还能再试 */ });
   }

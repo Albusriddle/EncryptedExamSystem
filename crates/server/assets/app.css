@@ -50,3 +50,49 @@
 .mt-14 { margin-top: 14px; }
 .ml-auto { margin-left: auto; }
 .center-card { max-width: 560px; margin: 12vh auto; }
+
+/* CodeMirror：行号区必须与正文分开，深浅色都要可读。 */
+.CodeMirror {
+  height: 280px;
+  border: 1px solid #c9ccd2;
+  border-radius: 6px;
+  background: #fff;
+  color: #1d1e20;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.CodeMirror-scroll { min-height: 260px; }
+.CodeMirror-gutters { background: #f2f3f5; border-right: 1px solid #d9dce1; }
+.CodeMirror-linenumber { min-width: 32px; padding: 0 8px 0 6px; color: #5f6670; }
+.CodeMirror pre.CodeMirror-line { padding: 0 8px; }
+.CodeMirror textarea { width: auto; min-height: 0; padding: 0; border: 0; }
+
+/* 深色主题必须放在最后：放在基础规则前面会被后面的白底 .card/table 覆盖，
+   造成“深色背景 + 白卡片 + 浅色字”的低对比（v1.10.2 修）。 */
+@media (prefers-color-scheme: dark) {
+  body { background: #17181a; color: #e6e6e6; }
+  .card { background: #1f2023; border-color: #2e3034; }
+  .q { border-color: #2e3034; }
+  .muted, .qid, .sample-title, .sample-label { color: #a8b0b8; }
+  input[type=text], input[type=password], textarea {
+    background: #15161a; color: #e6e6e6; border-color: #3a3d42;
+  }
+  .note { background: #33290f; border-color: #5a4a22; color: #ffd98a; }
+  pre.sample-box { background: #15161a; border-color: #2e3034; }
+  .CodeMirror { background: #15161a; color: #e6e6e6; border-color: #3a3d42; }
+  .CodeMirror-gutters { background: #1b1c20; border-right-color: #2e3034; }
+  .CodeMirror-linenumber { color: #9aa0a8; }
+  .CodeMirror-selected { background: #2c3442; }
+  .CodeMirror-focused .CodeMirror-selected { background: #34405a; }
+  .cm-s-default .cm-keyword { color: #c792ea; }
+  .cm-s-default .cm-atom { color: #82aaff; }
+  .cm-s-default .cm-number { color: #f78c6c; }
+  .cm-s-default .cm-def { color: #82aaff; }
+  .cm-s-default .cm-variable-2 { color: #89ddff; }
+  .cm-s-default .cm-type, .cm-s-default .cm-variable-3 { color: #ffcb6b; }
+  .cm-s-default .cm-comment { color: #8a9aa8; }
+  .cm-s-default .cm-string { color: #c3e88d; }
+  .cm-s-default .cm-meta { color: #b0b6be; }
+  .cm-s-default .cm-builtin { color: #c792ea; }
+  .cm-s-default .cm-bracket { color: #d8dce2; }
+}

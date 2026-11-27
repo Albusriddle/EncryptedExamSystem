@@ -69,10 +69,14 @@ curl -sS -k "https://127.0.0.1:$PORT/assets/app.js" -o "$WORK/app.js" \
 grep -q "renderSamples" "$WORK/app.js" || { echo "app.js 缺少 renderSamples"; exit 1; }
 grep -q "qid.className = 'qid'" "$WORK/app.js" || { echo "app.js 缺少题号旁题库编号"; exit 1; }
 grep -q "displayId(item.id)" "$WORK/app.js" || { echo "app.js 未使用 displayId"; exit 1; }
+grep -q "doneTitle" "$WORK/app.js" || { echo "app.js 缺少终止/结束标题"; exit 1; }
+grep -q "pollServer" "$WORK/app.js" || { echo "app.js 缺少服务端状态轮询"; exit 1; }
 curl -sS -k "https://127.0.0.1:$PORT/assets/app.css" -o "$WORK/app.css" \
   || { echo "拉取 app.css 失败"; exit 1; }
 grep -q "sample-box" "$WORK/app.css" || { echo "app.css 缺少 sample-box 样式"; exit 1; }
 grep -q "\.qid" "$WORK/app.css" || { echo "app.css 缺少 .qid 样式"; exit 1; }
+grep -q "CodeMirror-gutters" "$WORK/app.css" || { echo "app.css 缺少 CodeMirror 行号样式"; exit 1; }
+grep -q "prefers-color-scheme: dark" "$WORK/app.css" || { echo "app.css 缺少深色主题"; exit 1; }
 # -k：自签证书；冒烟不校验证书（证书正确性由 Rust 的 TLS 用例覆盖）。
 C="curl -sS -k -H Content-Type:application/json -H X-EES-CSRF:1"
 # 响应先落文件再 grep：`curl | grep -q` 在 pipefail 下会假失败——grep 一匹配就退出，

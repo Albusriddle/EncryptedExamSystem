@@ -285,3 +285,18 @@ code {
   .card { background: #1f2023; border-color: #2e3034; }
   code { background: #26282c; }
 }
+
+/* 深色主题必须放在最后：基础规则里的白底卡片/表格会覆盖前面同优先级的 @media。 */
+@media (prefers-color-scheme: dark) {
+  body, .bar { background: #17181a; color: #e6e6e6; }
+  .bar { border-bottom-color: #2e3034; }
+  .counts .cell, table, dialog { background: #1f2023; color: #e6e6e6; border-color: #2e3034; }
+  thead th { background: #232529; color: #d8dce2; }
+  th, td { border-color: #2e3034; color: #e6e6e6; }
+  .muted, .counts .label, dialog .hint { color: #a8b0b8; }
+  button.secondary { border-color: #4a6fd0; color: #9db8ff; }
+  code { background: #26282c; color: #e6e6e6; }
+  dialog input[type=text] { background: #15161a; color: #e6e6e6; border-color: #3a3d42; }
+  .toast { background: #2a2c30; color: #fff; }
+  tr.row-blocked td, tr.row-blocked th { background: #2a1c1c; }
+}
